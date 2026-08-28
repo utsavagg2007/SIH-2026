@@ -278,10 +278,9 @@ def test_detector_defaults():
     assert detector.reset() is None
 
 
-def test_no_real_detectors_are_shipped():
-    """This foundation ships plumbing only - no detection logic yet."""
-    from detection_core import aggregators, detectors, ml
+def test_only_the_port_scan_detector_is_shipped():
+    """Port scan is the first and so far only real detector."""
+    from detection_core import detectors, ml
 
-    assert detectors.__all__ == []
+    assert detectors.__all__ == ["PortScanConfig", "PortScanDetector"]
     assert ml.__all__ == []
-    assert aggregators.__all__ == []

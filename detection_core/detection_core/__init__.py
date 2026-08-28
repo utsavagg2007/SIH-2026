@@ -15,6 +15,7 @@ handled entirely inside ``detection_core.adapters``.
 from __future__ import annotations
 
 from .adapters import FlowSource, IngestionJsonlAdapter
+from .detectors import PortScanConfig, PortScanDetector
 from .engine import DetectionEngine, Detector
 from .schemas import (
     ALERT_SCHEMA_VERSION,
@@ -41,6 +42,8 @@ __all__ = [
     "FlowSource",
     "HttpInfo",
     "IngestionJsonlAdapter",
+    "PortScanConfig",
+    "PortScanDetector",
     "ScoreType",
     "Severity",
     "ThreatAlert",

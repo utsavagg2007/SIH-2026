@@ -154,10 +154,13 @@ unique_dst_ports  unique_dst_ips  src_ip_entropy
 ```
 
 The upstream global-window logic is still being corrected, so nothing
-downstream may depend on these values. Correct source/destination/pair-keyed
-state will live in `aggregators/`, or come from corrected ingestion later.
-They are listed in `encodings.IGNORED_WINDOW_FIELDS` only so they do not
-trigger a schema-drift warning.
+downstream may depend on these values. They are listed in
+`encodings.IGNORED_WINDOW_FIELDS` only so they do not trigger a schema-drift
+warning.
+
+Correct rolling state is computed inside `aggregators/sliding_window.py`,
+keyed per source and driven by `FlowEvent.timestamp`, so a PCAP replay behaves
+exactly like a live stream. `PortScanDetector` is its first consumer.
 
 ---
 
