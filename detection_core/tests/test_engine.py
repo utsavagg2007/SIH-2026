@@ -279,10 +279,13 @@ def test_detector_defaults():
 
 
 def test_shipped_detectors():
-    """Port scan and DDoS are the real detectors so far; no ML yet."""
+    """Port scan, DDoS and C2 beaconing ship so far; no ML yet."""
     from detection_core import detectors, ml
 
     assert detectors.__all__ == [
+        "BeaconKey",
+        "C2BeaconingConfig",
+        "C2BeaconingDetector",
         "DDoSConfig",
         "DDoSDetector",
         "PortScanConfig",

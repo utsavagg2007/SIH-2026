@@ -161,7 +161,11 @@ warning.
 Correct rolling state is computed inside `aggregators/sliding_window.py`,
 driven by `FlowEvent.timestamp`, so a PCAP replay behaves exactly like a live
 stream. The window is keyed by whatever entity a detector cares about:
-`PortScanDetector` keys it by `src_ip`, `DDoSDetector` by `dst_ip`.
+`PortScanDetector` keys it by `src_ip`, `DDoSDetector` by `dst_ip`, and
+`C2BeaconingDetector` by the `(src_ip, dst_ip, dst_port, proto)` relationship.
+
+`inter_arrival_mean` / `inter_arrival_stddev` are ignored for the same reason:
+beacon timing is computed per relationship here, not globally upstream.
 
 ---
 

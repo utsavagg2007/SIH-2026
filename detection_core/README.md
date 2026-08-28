@@ -18,9 +18,9 @@ file format, and that knowledge is confined to `detection_core/adapters/`.
 
 ## Status
 
-Schemas, adapter, engine and tests are complete. Two detectors ship:
-**`PortScanDetector`** and **`DDoSDetector`**. No ML model yet — `ml/` is still
-a reserved namespace.
+Schemas, adapter, engine and tests are complete. Three detectors ship:
+**`PortScanDetector`**, **`DDoSDetector`** and **`C2BeaconingDetector`**. No ML
+model yet — `ml/` is still a reserved namespace.
 
 ## Layout
 
@@ -30,7 +30,7 @@ detection_core/
 ├── adapters/         the ONLY code that understands features.jsonl
 ├── engine/           Detector interface + DetectionEngine
 ├── aggregators/      rolling sliding windows, keyed by whatever a detector needs
-├── detectors/        port_scan, ddos, and the shared scoring helpers
+├── detectors/        port_scan, ddos, c2_beaconing + shared scoring helpers
 └── ml/               reserved - empty
 ```
 
@@ -201,6 +201,62 @@ detector = DDoSDetector(DDoSConfig(
 
 `packet_count` and `byte_count` are originator-side: traffic arriving at the
 victim, not traffic it sent back.
+
+## C2 beaconing detector
+
+Looks for one source contacting one endpoint over and over on a suspiciously
+even timer. State is keyed by the whole relationship —
+`(src_ip, dst_ip, dst_port, proto)` — so two conversations never pool timing,
+and a missing port stays `None` rather than collapsing onto a fake port 0.
+
+A relationship qualifies only when all of these hold inside the window:
+
+* **persistence** — `observation_count >= min_observations` **and**
+  `interval_count >= min_observations - 1` genuinely usable intervals
+* **plausible cadence** — mean interval within
+  `[min_mean_interval_seconds, max_mean_interval_seconds]`
+* **regularity** — `coefficient_of_variation <= max_interval_cv`
+
+Persistence is checked on both counts deliberately. Zero-length gaps
+(duplicate timestamps) are dropped from the interval list, so contact count
+alone could otherwise clear the bar while the timing verdict rested on fewer
+measurements than intended — and the intervals are the evidence here. With the
+default `min_observations=6`, at least **5 valid positive intervals** are
+required.
+
+```python
+from detection_core import C2BeaconingConfig, C2BeaconingDetector
+
+detector = C2BeaconingDetector(C2BeaconingConfig(
+    window_seconds=900.0,             # rolling history per relationship
+    min_observations=6,               # contacts before timing is judged
+    min_mean_interval_seconds=2.0,    # faster is a keep-alive, not a check-in
+    max_mean_interval_seconds=120.0,  # slower cannot fill the window
+    max_interval_cv=0.20,             # spread within ~20% of the mean
+    cooldown_seconds=300.0,
+))
+```
+
+> These defaults are **initial heuristics, not operationally tuned values.**
+> They must be re-evaluated against captures of this network's benign periodic
+> services *and* real C2 traffic.
+
+Intervals are `t2-t1, t3-t2, …` computed here from `FlowEvent.timestamp`;
+`CV = stddev / mean`, and **lower CV means more periodic, so more suspicious**.
+Only strictly positive gaps are used, so duplicate timestamps are skipped rather
+than producing a zero interval or a division by zero.
+
+**Periodicity is not proof of malware.** Health checks, update pollers,
+telemetry agents, keep-alives and monitoring probes all beacon. This is a
+"possible C2 beaconing" lead to investigate, not a verdict. Volume is reported
+as evidence but gates nothing — real C2 transfers vary in size.
+
+### Evidence
+
+`observation_count`, `interval_count`, `mean_interval_seconds`,
+`interval_stddev_seconds`, `coefficient_of_variation`, `window_seconds`, the
+four configured thresholds, plus `total_orig_bytes`, `total_orig_packets` and
+`average_orig_bytes_per_flow` as context.
 
 Rates are `None` when the window spans no event time (one flow, or several
 sharing a timestamp). That is the honest answer — dividing by a fudged epsilon

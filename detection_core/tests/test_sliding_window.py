@@ -255,6 +255,40 @@ def test_duration_is_zero_on_an_empty_window():
     assert ActivityWindow(60.0).duration() == 0.0
 
 
+def test_timestamps_are_returned_in_arrival_order():
+    window = ActivityWindow(60.0)
+    for ts in (100.0, 110.0, 130.0):
+        window.observe(obs(ts))
+
+    assert window.timestamps() == [100.0, 110.0, 130.0]
+
+
+def test_timestamps_respect_expiry():
+    window = ActivityWindow(60.0)
+    window.observe(obs(100.0))
+    window.observe(obs(200.0))
+
+    assert window.timestamps() == [200.0]
+
+
+def test_timestamps_on_an_empty_window():
+    assert ActivityWindow(60.0).timestamps() == []
+
+
+def test_index_accepts_a_composite_tuple_key():
+    """Beacon state keys on (src, dst, port, proto) - and a None port."""
+    index = WindowIndex(60.0)
+    ported = ("10.0.0.1", "10.0.0.2", 443, "tcp")
+    portless = ("10.0.0.1", "10.0.0.2", None, "tcp")
+
+    index.observe(ported, obs(100.0))
+    index.observe(portless, obs(101.0))
+
+    assert len(index) == 2
+    assert index.get(ported).attempts == 1
+    assert index.get(portless).attempts == 1
+
+
 def test_duration_spans_the_window_contents():
     window = ActivityWindow(60.0)
     window.observe(obs(100.0))

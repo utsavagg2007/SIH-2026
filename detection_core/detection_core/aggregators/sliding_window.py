@@ -16,6 +16,7 @@ so a PCAP replay behaves exactly like a live stream.
 from __future__ import annotations
 
 from collections import deque
+from collections.abc import Hashable
 from dataclasses import dataclass
 
 from ..schemas import FlowEvent
@@ -136,6 +137,15 @@ class ActivityWindow:
     def protocols(self) -> set[str]:
         return {e.proto for e in self._events if e.proto is not None}
 
+    def timestamps(self) -> list[float]:
+        """Observation timestamps, in arrival order.
+
+        Timing analysis (beacon periodicity) reads this. Order is arrival
+        order, which the project assumes is roughly non-decreasing event
+        time - see the module docstring.
+        """
+        return [e.timestamp for e in self._events]
+
     def time_span(self) -> tuple[float, float] | None:
         """(earliest, latest) timestamp in the window, or None if empty."""
         if not self._events:
@@ -168,7 +178,10 @@ class WindowIndex:
 
     Keys are fully isolated - one key's traffic can never influence another's
     counts. What the key *means* is the detector's choice: source IP for port
-    scanning, destination IP for DDoS.
+    scanning, destination IP for DDoS, a (src, dst, port, proto) tuple for
+    beaconing. Any hashable value works, so a composite key needs no
+    stringly-typed encoding - which also keeps a ``None`` port distinct from
+    every real port instead of collapsing it onto something like 0.
     """
 
     def __init__(self, window_seconds: float, *, sweep_every: int = 500) -> None:
@@ -176,10 +189,10 @@ class WindowIndex:
             raise ValueError("window_seconds must be positive")
         self.window_seconds = window_seconds
         self.sweep_every = sweep_every
-        self._windows: dict[str, ActivityWindow] = {}
+        self._windows: dict[Hashable, ActivityWindow] = {}
         self._since_sweep = 0
 
-    def observe(self, key: str, observation: FlowObservation) -> ActivityWindow:
+    def observe(self, key: Hashable, observation: FlowObservation) -> ActivityWindow:
         """Record an observation for ``key`` and return that key's window."""
         window = self._windows.get(key)
         if window is None:
@@ -194,7 +207,7 @@ class WindowIndex:
             self._sweep(observation.timestamp)
         return window
 
-    def get(self, key: str) -> ActivityWindow | None:
+    def get(self, key: Hashable) -> ActivityWindow | None:
         return self._windows.get(key)
 
     def clear(self) -> None:
