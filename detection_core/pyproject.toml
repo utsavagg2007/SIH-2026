@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "detection-core"
+version = "0.1.0"
+description = "Detection / ML layer: normalized FlowEvents -> detectors -> ThreatAlert v1.1"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "pydantic>=2.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+]
+# Reserved for the future ml/ layer. Not installed by default so the core
+# stays dependency-light.
+ml = [
+    "numpy>=1.26",
+    "scikit-learn>=1.4",
+]
+
+[tool.setuptools.packages.find]
+include = ["detection_core*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
