@@ -1,9 +1,13 @@
-"""Rolling per-source sliding windows.
+"""Rolling sliding windows, keyed by whatever a detector needs.
 
-Reusable state for any detector that needs "what has this source done
-recently?". Deliberately computed here rather than taken from ingestion's
-global window features, which are still being corrected upstream and are
-not keyed per source (see SCHEMA.md).
+Reusable state for any detector asking "what has this key done recently?".
+The key is deliberately just a string: port scanning keys by ``src_ip``
+("what has this source touched?"), DDoS keys by ``dst_ip`` ("who has been
+hitting this host?"). Keys are fully isolated from each other.
+
+Deliberately computed here rather than taken from ingestion's global window
+features, which are still being corrected upstream and are not keyed per
+entity at all (see SCHEMA.md).
 
 Time comes from ``FlowEvent.timestamp`` (epoch seconds), never wall clock,
 so a PCAP replay behaves exactly like a live stream.
@@ -16,17 +20,31 @@ from dataclasses import dataclass
 
 from ..schemas import FlowEvent
 
-__all__ = ["FlowObservation", "SourceActivityWindow", "SourceWindowIndex"]
+__all__ = ["FlowObservation", "ActivityWindow", "WindowIndex"]
 
 
 @dataclass(frozen=True)
 class FlowObservation:
-    """The slice of a flow that windowed detection cares about."""
+    """The slice of a flow that windowed detection cares about.
+
+    Volume is stored **originator-side only** - what ``src_ip`` sent toward
+    ``dst_ip`` - mirroring ``FlowEvent.orig_bytes`` / ``orig_pkts``. The
+    responder counters are deliberately excluded: they are the destination's
+    own outbound replies, so folding them in would let a busy-but-normal
+    server inflate its way past a volume threshold on the strength of the
+    traffic it is serving.
+
+    ``FlowEvent`` already guarantees these counters are non-negative
+    integers, so they cannot go negative.
+    """
 
     timestamp: float
     dst_ip: str
     dst_port: int | None = None
     proto: str | None = None
+    src_ip: str | None = None
+    orig_packets: int = 0
+    orig_bytes: int = 0
 
     @classmethod
     def from_flow(cls, flow: FlowEvent) -> FlowObservation:
@@ -35,11 +53,14 @@ class FlowObservation:
             dst_ip=flow.dst_ip,
             dst_port=flow.dst_port,
             proto=flow.proto,
+            src_ip=flow.src_ip,
+            orig_packets=flow.orig_pkts,
+            orig_bytes=flow.orig_bytes,
         )
 
 
-class SourceActivityWindow:
-    """Recent observations for ONE source, trimmed to ``window_seconds``.
+class ActivityWindow:
+    """Recent observations for ONE key, trimmed to ``window_seconds``.
 
     The window is half-open: an observation is kept while
     ``now - timestamp < window_seconds``, so one exactly ``window_seconds``
@@ -82,6 +103,10 @@ class SourceActivityWindow:
         """Distinct destination hosts."""
         return {e.dst_ip for e in self._events}
 
+    def src_ips(self) -> set[str]:
+        """Distinct source hosts."""
+        return {e.src_ip for e in self._events if e.src_ip is not None}
+
     def hosts_by_port(self) -> dict[int, set[str]]:
         """Distinct destination hosts, grouped by destination port.
 
@@ -96,6 +121,18 @@ class SourceActivityWindow:
             grouped.setdefault(event.dst_port, set()).add(event.dst_ip)
         return grouped
 
+    def total_orig_packets(self) -> int:
+        """Originator-side packets across every flow still in the window.
+
+        Keyed by destination, this is the packet volume *arriving at* that
+        host - not what it sent back. See :class:`FlowObservation`.
+        """
+        return sum(e.orig_packets for e in self._events)
+
+    def total_orig_bytes(self) -> int:
+        """Originator-side bytes across every flow still in the window."""
+        return sum(e.orig_bytes for e in self._events)
+
     def protocols(self) -> set[str]:
         return {e.proto for e in self._events if e.proto is not None}
 
@@ -105,6 +142,16 @@ class SourceActivityWindow:
             return None
         timestamps = [e.timestamp for e in self._events]
         return min(timestamps), max(timestamps)
+
+    def duration(self) -> float:
+        """Event-time seconds spanned by the window's contents.
+
+        Zero when the window holds one observation, or several sharing a
+        timestamp. Callers computing rates must treat zero as "not
+        measurable" rather than dividing by it.
+        """
+        span = self.time_span()
+        return 0.0 if span is None else span[1] - span[0]
 
     def is_empty(self) -> bool:
         return not self._events
@@ -116,11 +163,12 @@ class SourceActivityWindow:
         return len(self._events)
 
 
-class SourceWindowIndex:
-    """One :class:`SourceActivityWindow` per source key.
+class WindowIndex:
+    """One :class:`ActivityWindow` per key.
 
-    Sources are fully isolated - one source's traffic can never influence
-    another's counts.
+    Keys are fully isolated - one key's traffic can never influence another's
+    counts. What the key *means* is the detector's choice: source IP for port
+    scanning, destination IP for DDoS.
     """
 
     def __init__(self, window_seconds: float, *, sweep_every: int = 500) -> None:
@@ -128,25 +176,25 @@ class SourceWindowIndex:
             raise ValueError("window_seconds must be positive")
         self.window_seconds = window_seconds
         self.sweep_every = sweep_every
-        self._windows: dict[str, SourceActivityWindow] = {}
+        self._windows: dict[str, ActivityWindow] = {}
         self._since_sweep = 0
 
-    def observe(self, key: str, observation: FlowObservation) -> SourceActivityWindow:
-        """Record an observation for ``key`` and return that source's window."""
+    def observe(self, key: str, observation: FlowObservation) -> ActivityWindow:
+        """Record an observation for ``key`` and return that key's window."""
         window = self._windows.get(key)
         if window is None:
-            window = SourceActivityWindow(self.window_seconds)
+            window = ActivityWindow(self.window_seconds)
             self._windows[key] = window
         window.observe(observation)
 
-        # Sources that go quiet still hold an (empty) window; sweep them out
-        # periodically so a long capture with many one-off sources stays bounded.
+        # Keys that go quiet still hold an (empty) window; sweep them out
+        # periodically so a long capture with many one-off keys stays bounded.
         self._since_sweep += 1
         if self._since_sweep >= self.sweep_every:
             self._sweep(observation.timestamp)
         return window
 
-    def get(self, key: str) -> SourceActivityWindow | None:
+    def get(self, key: str) -> ActivityWindow | None:
         return self._windows.get(key)
 
     def clear(self) -> None:

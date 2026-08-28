@@ -159,8 +159,9 @@ downstream may depend on these values. They are listed in
 warning.
 
 Correct rolling state is computed inside `aggregators/sliding_window.py`,
-keyed per source and driven by `FlowEvent.timestamp`, so a PCAP replay behaves
-exactly like a live stream. `PortScanDetector` is its first consumer.
+driven by `FlowEvent.timestamp`, so a PCAP replay behaves exactly like a live
+stream. The window is keyed by whatever entity a detector cares about:
+`PortScanDetector` keys it by `src_ip`, `DDoSDetector` by `dst_ip`.
 
 ---
 

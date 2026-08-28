@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..aggregators import FlowObservation, SourceWindowIndex
+from ..aggregators import FlowObservation, WindowIndex
 from ..engine import Detector
 from ..schemas import (
     MITRE_BY_CLASS,
@@ -28,38 +28,9 @@ from ..schemas import (
     ThreatClass,
     epoch_to_utc,
 )
+from .scoring import normalize_score, severity_for, severity_rank
 
 __all__ = ["PortScanConfig", "PortScanDetector"]
-
-
-# Decimal places the rule score is rounded to before anything compares it.
-# Without this, a score that is mathematically exactly 0.9 arrives as
-# 0.8999999999999999 (e.g. 17 ports against a threshold of 5) and silently
-# lands one severity band too low. Six places is far finer than a rule score
-# can meaningfully resolve, so this only removes binary-float noise.
-_SCORE_PRECISION = 6
-
-# Score -> Severity. Deterministic and documented; the enum is unchanged.
-# A score of exactly 0.5 means "the threshold was just met".
-_SEVERITY_CUTOFFS: tuple[tuple[float, Severity], ...] = (
-    (0.90, Severity.CRITICAL),
-    (0.75, Severity.HIGH),
-    (0.60, Severity.MEDIUM),
-)
-
-
-def _normalize_score(value: float) -> float:
-    """Clamp to [0.0, 1.0] and round, so boundary comparisons are exact."""
-    return round(min(max(value, 0.0), 1.0), _SCORE_PRECISION)
-
-# Ordering for escalation checks. Local to this detector - the Severity enum
-# itself is a frozen part of the v1.1 contract and is not modified.
-_SEVERITY_RANK: dict[Severity, int] = {
-    Severity.LOW: 0,
-    Severity.MEDIUM: 1,
-    Severity.HIGH: 2,
-    Severity.CRITICAL: 3,
-}
 
 
 @dataclass(frozen=True)
@@ -135,7 +106,7 @@ class PortScanDetector(Detector):
 
     def __init__(self, config: PortScanConfig | None = None) -> None:
         self.config = config or PortScanConfig()
-        self._windows = SourceWindowIndex(self.config.window_seconds)
+        self._windows = WindowIndex(self.config.window_seconds)
         self._state: dict[str, _SourceState] = {}
 
     # --- detection ------------------------------------------------------
@@ -215,7 +186,7 @@ class PortScanDetector(Detector):
             return True
         if state.last_severity is None:
             return True
-        return _SEVERITY_RANK[severity] > _SEVERITY_RANK[state.last_severity]
+        return severity_rank(severity) > severity_rank(state.last_severity)
 
     def _scan_type(self, vertical: bool, horizontal: bool) -> str:
         if vertical and horizontal:
@@ -244,21 +215,12 @@ class PortScanDetector(Detector):
         score = 0.5 + 0.5 * (ratio - 1.0) / span
         if vertical and horizontal:
             score += self.config.combined_bonus
-        return _normalize_score(score)
+        return normalize_score(score)
 
     @staticmethod
     def _severity(score: float) -> Severity:
-        """Map a rule score to a band: >=0.90 critical, >=0.75 high, >=0.60 medium.
-
-        Normalizes first so a score sitting exactly on a documented boundary
-        classifies the same way however the arithmetic that produced it
-        rounded.
-        """
-        score = _normalize_score(score)
-        for cutoff, severity in _SEVERITY_CUTOFFS:
-            if score >= cutoff:
-                return severity
-        return Severity.LOW
+        """Project-standard severity bands - see ``scoring.severity_for``."""
+        return severity_for(score)
 
     @staticmethod
     def _only(values: set) -> object | None:

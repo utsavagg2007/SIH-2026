@@ -278,9 +278,14 @@ def test_detector_defaults():
     assert detector.reset() is None
 
 
-def test_only_the_port_scan_detector_is_shipped():
-    """Port scan is the first and so far only real detector."""
+def test_shipped_detectors():
+    """Port scan and DDoS are the real detectors so far; no ML yet."""
     from detection_core import detectors, ml
 
-    assert detectors.__all__ == ["PortScanConfig", "PortScanDetector"]
+    assert detectors.__all__ == [
+        "DDoSConfig",
+        "DDoSDetector",
+        "PortScanConfig",
+        "PortScanDetector",
+    ]
     assert ml.__all__ == []

@@ -1,20 +1,36 @@
-"""Rolling per-source window tests."""
+"""Rolling window tests.
+
+The window is key-agnostic: port scanning keys it by source IP, DDoS by
+destination IP. These tests exercise it directly.
+"""
 
 from __future__ import annotations
 
 import pytest
 
-from detection_core.aggregators import (
-    FlowObservation,
-    SourceActivityWindow,
-    SourceWindowIndex,
-)
+from detection_core.aggregators import ActivityWindow, FlowObservation, WindowIndex
 
 from .conftest import make_flow
 
 
-def obs(ts: float, dst_ip: str = "10.0.0.9", port: int | None = 80, proto: str = "tcp"):
-    return FlowObservation(timestamp=ts, dst_ip=dst_ip, dst_port=port, proto=proto)
+def obs(
+    ts: float,
+    dst_ip: str = "10.0.0.9",
+    port: int | None = 80,
+    proto: str = "tcp",
+    src_ip: str | None = None,
+    orig_packets: int = 0,
+    orig_bytes: int = 0,
+):
+    return FlowObservation(
+        timestamp=ts,
+        dst_ip=dst_ip,
+        dst_port=port,
+        proto=proto,
+        src_ip=src_ip,
+        orig_packets=orig_packets,
+        orig_bytes=orig_bytes,
+    )
 
 
 # --------------------------------------------------------------------------
@@ -31,23 +47,41 @@ def test_observation_from_flow():
     assert observation.proto == "tcp"
 
 
+def test_observation_carries_source_and_originator_volume():
+    """Responder counters are excluded - they are the destination's replies."""
+    flow = make_flow(
+        src_ip="10.9.9.9", orig_pkts=4, resp_pkts=6, orig_bytes=100, resp_bytes=250
+    )
+    observation = FlowObservation.from_flow(flow)
+    assert observation.src_ip == "10.9.9.9"
+    assert observation.orig_packets == 4
+    assert observation.orig_bytes == 100
+
+
+def test_observation_volume_defaults_to_zero():
+    observation = FlowObservation(timestamp=1.0, dst_ip="10.0.0.1")
+    assert observation.src_ip is None
+    assert observation.orig_packets == 0
+    assert observation.orig_bytes == 0
+
+
 def test_observation_from_flow_without_port():
     observation = FlowObservation.from_flow(make_flow(dst_port=None))
     assert observation.dst_port is None
 
 
 # --------------------------------------------------------------------------
-# SourceActivityWindow
+# ActivityWindow
 # --------------------------------------------------------------------------
 
 
 def test_window_rejects_non_positive_span():
     with pytest.raises(ValueError):
-        SourceActivityWindow(0)
+        ActivityWindow(0)
 
 
 def test_window_counts_distinct_values_only():
-    window = SourceActivityWindow(60.0)
+    window = ActivityWindow(60.0)
     for _ in range(5):
         window.observe(obs(100.0, dst_ip="10.0.0.9", port=80))
 
@@ -57,7 +91,7 @@ def test_window_counts_distinct_values_only():
 
 
 def test_window_tracks_multiple_ports_and_hosts():
-    window = SourceActivityWindow(60.0)
+    window = ActivityWindow(60.0)
     window.observe(obs(100.0, "10.0.0.1", 22))
     window.observe(obs(101.0, "10.0.0.2", 80))
     window.observe(obs(102.0, "10.0.0.3", 443))
@@ -68,7 +102,7 @@ def test_window_tracks_multiple_ports_and_hosts():
 
 
 def test_missing_port_is_not_counted_as_a_port():
-    window = SourceActivityWindow(60.0)
+    window = ActivityWindow(60.0)
     window.observe(obs(100.0, "10.0.0.1", None))
     window.observe(obs(101.0, "10.0.0.2", None))
 
@@ -77,7 +111,7 @@ def test_missing_port_is_not_counted_as_a_port():
 
 
 def test_expiry_drops_old_observations():
-    window = SourceActivityWindow(60.0)
+    window = ActivityWindow(60.0)
     window.observe(obs(100.0, "10.0.0.1", 22))
     window.observe(obs(120.0, "10.0.0.2", 80))
     assert window.attempts == 2
@@ -91,21 +125,21 @@ def test_expiry_drops_old_observations():
 
 def test_window_is_half_open_at_the_boundary():
     """An observation exactly window_seconds old has expired."""
-    window = SourceActivityWindow(60.0)
+    window = ActivityWindow(60.0)
     window.observe(obs(100.0, "10.0.0.1", 22))
     window.observe(obs(160.0, "10.0.0.2", 80))
     assert window.dst_ports() == {80}
 
 
 def test_expire_can_be_called_without_a_new_observation():
-    window = SourceActivityWindow(60.0)
+    window = ActivityWindow(60.0)
     window.observe(obs(100.0))
     window.expire(1000.0)
     assert window.is_empty()
 
 
 def test_time_span():
-    window = SourceActivityWindow(60.0)
+    window = ActivityWindow(60.0)
     assert window.time_span() is None
     window.observe(obs(100.0))
     window.observe(obs(130.0))
@@ -113,7 +147,7 @@ def test_time_span():
 
 
 def test_hosts_by_port_groups_fanout():
-    window = SourceActivityWindow(60.0)
+    window = ActivityWindow(60.0)
     window.observe(obs(100.0, "10.0.0.1", 22))
     window.observe(obs(101.0, "10.0.0.2", 22))
     window.observe(obs(102.0, "10.0.0.3", 80))
@@ -122,7 +156,7 @@ def test_hosts_by_port_groups_fanout():
 
 
 def test_hosts_by_port_deduplicates_repeat_visits():
-    window = SourceActivityWindow(60.0)
+    window = ActivityWindow(60.0)
     for _ in range(10):
         window.observe(obs(100.0, "10.0.0.1", 22))
 
@@ -130,7 +164,7 @@ def test_hosts_by_port_deduplicates_repeat_visits():
 
 
 def test_hosts_by_port_excludes_portless_observations():
-    window = SourceActivityWindow(60.0)
+    window = ActivityWindow(60.0)
     window.observe(obs(100.0, "10.0.0.1", None))
     window.observe(obs(101.0, "10.0.0.2", None))
     window.observe(obs(102.0, "10.0.0.3", 22))
@@ -139,7 +173,7 @@ def test_hosts_by_port_excludes_portless_observations():
 
 
 def test_hosts_by_port_respects_expiry():
-    window = SourceActivityWindow(60.0)
+    window = ActivityWindow(60.0)
     window.observe(obs(100.0, "10.0.0.1", 22))
     window.observe(obs(200.0, "10.0.0.2", 22))
 
@@ -147,18 +181,96 @@ def test_hosts_by_port_respects_expiry():
 
 
 def test_hosts_by_port_empty_window():
-    assert SourceActivityWindow(60.0).hosts_by_port() == {}
+    assert ActivityWindow(60.0).hosts_by_port() == {}
+
+
+def test_src_ips_are_distinct():
+    window = ActivityWindow(60.0)
+    for _ in range(5):
+        window.observe(obs(100.0, src_ip="10.0.0.1"))
+    window.observe(obs(101.0, src_ip="10.0.0.2"))
+
+    assert window.src_ips() == {"10.0.0.1", "10.0.0.2"}
+
+
+def test_src_ips_ignores_observations_without_a_source():
+    window = ActivityWindow(60.0)
+    window.observe(obs(100.0, src_ip=None))
+    window.observe(obs(101.0, src_ip="10.0.0.1"))
+
+    assert window.src_ips() == {"10.0.0.1"}
+
+
+def test_volume_totals_accumulate():
+    window = ActivityWindow(60.0)
+    window.observe(obs(100.0, orig_packets=10, orig_bytes=500))
+    window.observe(obs(101.0, orig_packets=5, orig_bytes=250))
+
+    assert window.total_orig_packets() == 15
+    assert window.total_orig_bytes() == 750
+
+
+def test_volume_totals_are_zero_on_an_empty_window():
+    window = ActivityWindow(60.0)
+    assert window.total_orig_packets() == 0
+    assert window.total_orig_bytes() == 0
+
+
+def test_volume_totals_respect_expiry():
+    window = ActivityWindow(60.0)
+    window.observe(obs(100.0, orig_packets=999, orig_bytes=9999))
+    window.observe(obs(200.0, orig_packets=3, orig_bytes=30))
+
+    assert window.total_orig_packets() == 3
+    assert window.total_orig_bytes() == 30
+
+
+def test_window_volume_ignores_responder_traffic():
+    """A heavy-response flow contributes only its originator counters."""
+    window = ActivityWindow(60.0)
+    window.observe(
+        FlowObservation.from_flow(
+            make_flow(orig_pkts=2, resp_pkts=500, orig_bytes=200, resp_bytes=900_000)
+        )
+    )
+
+    assert window.total_orig_packets() == 2
+    assert window.total_orig_bytes() == 200
+
+
+def test_duration_is_zero_for_a_single_observation():
+    window = ActivityWindow(60.0)
+    window.observe(obs(100.0))
+    assert window.duration() == 0.0
+
+
+def test_duration_is_zero_for_simultaneous_observations():
+    window = ActivityWindow(60.0)
+    for _ in range(5):
+        window.observe(obs(100.0))
+    assert window.duration() == 0.0
+
+
+def test_duration_is_zero_on_an_empty_window():
+    assert ActivityWindow(60.0).duration() == 0.0
+
+
+def test_duration_spans_the_window_contents():
+    window = ActivityWindow(60.0)
+    window.observe(obs(100.0))
+    window.observe(obs(130.0))
+    assert window.duration() == pytest.approx(30.0)
 
 
 def test_protocols():
-    window = SourceActivityWindow(60.0)
+    window = ActivityWindow(60.0)
     window.observe(obs(100.0, proto="tcp"))
     window.observe(obs(101.0, proto="udp"))
     assert window.protocols() == {"tcp", "udp"}
 
 
 def test_clear_empties_the_window():
-    window = SourceActivityWindow(60.0)
+    window = ActivityWindow(60.0)
     window.observe(obs(100.0))
     window.clear()
     assert window.is_empty()
@@ -166,12 +278,12 @@ def test_clear_empties_the_window():
 
 
 # --------------------------------------------------------------------------
-# SourceWindowIndex
+# WindowIndex
 # --------------------------------------------------------------------------
 
 
 def test_index_isolates_sources():
-    index = SourceWindowIndex(60.0)
+    index = WindowIndex(60.0)
     index.observe("10.0.0.1", obs(100.0, "10.1.1.1", 22))
     index.observe("10.0.0.2", obs(100.0, "10.2.2.2", 80))
 
@@ -181,17 +293,17 @@ def test_index_isolates_sources():
 
 
 def test_index_returns_the_touched_window():
-    index = SourceWindowIndex(60.0)
+    index = WindowIndex(60.0)
     window = index.observe("10.0.0.1", obs(100.0))
     assert window is index.get("10.0.0.1")
 
 
 def test_index_get_unknown_source():
-    assert SourceWindowIndex(60.0).get("10.0.0.99") is None
+    assert WindowIndex(60.0).get("10.0.0.99") is None
 
 
 def test_index_clear():
-    index = SourceWindowIndex(60.0)
+    index = WindowIndex(60.0)
     index.observe("10.0.0.1", obs(100.0))
     index.clear()
     assert len(index) == 0
@@ -200,7 +312,7 @@ def test_index_clear():
 
 def test_index_sweeps_out_silent_sources():
     """Memory stays bounded when many sources appear once and go quiet."""
-    index = SourceWindowIndex(60.0, sweep_every=1)
+    index = WindowIndex(60.0, sweep_every=1)
     index.observe("10.0.0.1", obs(100.0))
     index.observe("10.0.0.2", obs(101.0))
     assert len(index) == 2
@@ -213,7 +325,7 @@ def test_index_sweeps_out_silent_sources():
 
 
 def test_index_keeps_sources_that_are_still_active():
-    index = SourceWindowIndex(60.0, sweep_every=1)
+    index = WindowIndex(60.0, sweep_every=1)
     index.observe("10.0.0.1", obs(100.0))
     index.observe("10.0.0.2", obs(110.0))
     assert len(index) == 2
@@ -221,4 +333,4 @@ def test_index_keeps_sources_that_are_still_active():
 
 def test_index_rejects_non_positive_window():
     with pytest.raises(ValueError):
-        SourceWindowIndex(-1)
+        WindowIndex(-1)

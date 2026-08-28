@@ -18,9 +18,9 @@ file format, and that knowledge is confined to `detection_core/adapters/`.
 
 ## Status
 
-Schemas, adapter, engine and tests are complete. **`PortScanDetector` is the
-first and so far only detector.** No ML model yet — `ml/` is still a reserved
-namespace.
+Schemas, adapter, engine and tests are complete. Two detectors ship:
+**`PortScanDetector`** and **`DDoSDetector`**. No ML model yet — `ml/` is still
+a reserved namespace.
 
 ## Layout
 
@@ -29,8 +29,8 @@ detection_core/
 ├── schemas/          FlowEvent, ThreatAlert v1.1, frozen enums, time helpers
 ├── adapters/         the ONLY code that understands features.jsonl
 ├── engine/           Detector interface + DetectionEngine
-├── aggregators/      rolling per-source sliding windows
-├── detectors/        port_scan (vertical + horizontal)
+├── aggregators/      rolling sliding windows, keyed by whatever a detector needs
+├── detectors/        port_scan, ddos, and the shared scoring helpers
 └── ml/               reserved - empty
 ```
 
@@ -149,6 +149,62 @@ cooldown, so a widening scan produces at most one alert per band:
 `unique_dst_ips`, `connection_attempts`, `window_seconds`,
 `horizontal_dst_port` (the swept port, `None` unless horizontal fired),
 `max_hosts_per_port`, plus the two thresholds in force.
+
+## DDoS detector
+
+Where port scanning asks *"what has this source touched?"*, DDoS asks *"who has
+been hitting this destination?"* — so its rolling state is keyed by `dst_ip`.
+
+A destination qualifies only when **both** hold inside the window:
+
+* **breadth** — `unique_src_ips >= min_unique_sources`
+* **intensity** — `flow_count >= min_flows` **or** `packet_count >= min_packets`
+
+```python
+from detection_core import DDoSConfig, DDoSDetector
+
+detector = DDoSDetector(DDoSConfig(
+    window_seconds=10.0,       # short - a flood is a burst
+    min_unique_sources=50,     # breadth
+    min_flows=200,             # intensity, either-or
+    min_packets=1000,
+    cooldown_seconds=60.0,
+))
+```
+
+> These defaults are **initial heuristics for demo traffic, not tuned values.**
+> They must be re-derived against real captures of this network's normal and
+> attack traffic before anyone trusts them operationally.
+
+* Requiring breadth stops one large legitimate transfer looking like an attack;
+  requiring intensity stops a merely popular host doing so. **Bytes are tracked
+  and reported but deliberately do not gate the decision** — a single big
+  download would otherwise qualify.
+* **Volume is counted originator-side only** (`orig_pkts` / `orig_bytes`) — what
+  the sources sent *at* the victim. The responder counters are the victim's own
+  replies; folding them in let 60 ordinary clients fetching one page each cross
+  `min_packets` on the strength of the pages the server was serving.
+* Repeat flows from one source never inflate `unique_src_ips`; destinations are
+  fully isolated from each other.
+* `dst_ip` is always the attacked host. `src_ip` is `None` whenever more than
+  one attacker is involved; `dst_port` and `protocol` are populated only when
+  unambiguous across the window. No placeholders, ever.
+* `score` averages the breadth ratio and the stronger intensity ratio, then maps
+  onto the same curve and severity bands as port scan. Cooldown and
+  severity-escalation behave identically, keyed per destination.
+
+### Evidence
+
+`unique_src_ips`, `flow_count`, `packet_count`, `byte_count`, `window_seconds`,
+`observed_span_seconds`, `flows_per_second`, `packets_per_second`, plus
+`min_unique_sources` / `min_flows` / `min_packets`.
+
+`packet_count` and `byte_count` are originator-side: traffic arriving at the
+victim, not traffic it sent back.
+
+Rates are `None` when the window spans no event time (one flow, or several
+sharing a timestamp). That is the honest answer — dividing by a fudged epsilon
+is how ingestion ends up publishing `flow_rate: 1000000.0` on its first record.
 
 ## Writing a detector
 
