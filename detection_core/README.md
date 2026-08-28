@@ -262,6 +262,117 @@ Rates are `None` when the window spans no event time (one flow, or several
 sharing a timestamp). That is the honest answer — dividing by a fudged epsilon
 is how ingestion ends up publishing `flow_rate: 1000000.0` on its first record.
 
+## DGA ML baseline (offline — Part 1)
+
+**What DGA is.** Malware often does not hardcode its controller's address.
+Instead it runs a *domain generation algorithm*: both the malware and the
+attacker derive the same list of pseudo-random domains from a shared seed
+(often the date), and the malware tries them until one resolves. Blocking a
+single domain therefore achieves nothing — the next batch appears tomorrow.
+The tell is that generated names look nothing like names humans register:
+`kqxvbzmwjrph.com` versus `wikipedia.org`.
+
+**Pipeline.** `raw domain → lexical features → Random Forest → dga_score`
+
+> ### ⚠ Live integration is NOT complete
+> `injestion_core`'s `features.jsonl` does **not** expose the raw
+> `dns.query` string. It carries only derived values — `query_entropy`,
+> `query_length`, `subdomain_entropy`, `is_txt`, `label_count`. A classifier
+> needs the actual domain text, and reconstructing it from an entropy number
+> is impossible, so **there is no live `DGADetector` wired to the engine.**
+> This milestone is offline training infrastructure only. When ingestion
+> supplies `dns.query`, only an adapter change and a thin detector are
+> needed — the model and features are ready.
+
+### Features, in plain terms
+
+Each domain becomes 19 numbers. The character statistics are computed on the
+**body** (everything except the final label), since the TLD is picked from a
+tiny fixed set and says nothing about how the name was generated.
+
+| feature | what it means | why it helps |
+|---|---|---|
+| **entropy** | how unpredictable the characters are, in bits. `aaaaaa` scores 0; a varied string scores high | generated names are near-random, so they score higher than real words |
+| **digit_ratio** | fraction of characters that are digits | many DGAs splice in digits; `github.com` has none |
+| **length** | total characters | generated names are often longer than memorable brands |
+| **vowel_ratio** | fraction of letters that are a/e/i/o/u | human-chosen names are pronounceable (~40% vowels); random ones are vowel-starved |
+| **unique_char_ratio** | distinct characters ÷ length | random strings rarely repeat characters, so this sits near 1.0 |
+| **longest_consonant_run** | longest unbroken consonant stretch | `kqxvbz` is a classic generated-looking cluster |
+
+The rest: `body_length`, `tld_length`, `label_count`, `max_label_length`,
+`mean_label_length`, `digit_count`, `alpha_ratio`, `consonant_ratio`,
+`hyphen_count`, `hyphen_ratio`, `unique_char_count`, `longest_digit_run`,
+`longest_alpha_run`.
+
+### Dataset format
+
+A CSV with exactly two required columns. `0 = benign`, `1 = DGA` (DGA is
+always the positive class):
+
+```csv
+domain,label
+google.com,0
+github.com,0
+xj3kq9zv.com,1
+```
+
+Labels also accept `benign`/`dga` spellings. The loader rejects a missing
+column, an unusable label, an empty domain, and — importantly — a duplicate
+domain carrying *conflicting* labels, rather than silently picking one.
+
+**No leakage:** domains are normalized, *then* deduplicated, *then* split. Since
+duplicates are removed outright, the same normalized domain cannot appear in
+both train and test. The split is stratified whenever class counts allow, with
+`random_state=42`.
+
+### Training
+
+```bash
+pip install -e ".[ml]"
+
+python -m detection_core.ml.dga.training \
+    --input domains.csv \
+    --output artifacts/dga_model.joblib
+```
+
+Reports raw rows, rows after deduplication, benign/DGA counts, train/test
+sizes, accuracy, precision, recall, F1, confusion matrix, and ROC-AUC when the
+test set contains both classes. Add `--json` for machine-readable metrics.
+
+The output is a `joblib` bundle carrying the estimator plus metadata — format
+version, feature names and order, model type, training config, class mapping,
+sklearn version. Loading validates that the feature schema still matches this
+build and **refuses** a stale bundle rather than predicting on a mismatched
+vector. Artifacts are git-ignored; retrain rather than committing binaries.
+
+```python
+from detection_core.ml.dga import DGAModel
+
+model = DGAModel.load("artifacts/dga_model.joblib")
+print(model.predict_domain("kqxvbzmwjrph.com"))   # label + dga_score
+model.feature_importances()                        # for the demo/explanation
+```
+
+### Limitations — read before quoting any number
+
+* **`dga_score` is not a calibrated probability.** It is a Random Forest vote
+  fraction in `[0, 1]`. That is why it is not called a probability and why no
+  `ThreatAlert.score_type` is assigned yet — `calibrated_model` would be a
+  false claim until calibration is actually done.
+* **Metrics from a small or synthetic dataset prove the plumbing works, not
+  that the model is good.** The test fixture exists to exercise code paths.
+  Real performance depends entirely on representative benign *and* DGA
+  training data, which will be supplied separately.
+* **Dictionary-based DGAs evade lexical models.** Families that assemble real
+  words (`correct-horse-battery.com`) look statistically like human names.
+  Catching those needs different signals — resolution behaviour, NXDOMAIN
+  rates, registration age.
+* **No Public Suffix List.** `shop.example.co.uk` treats `uk` as the TLD and
+  `shopexampleco` as the body. Deterministic, but imprecise for multi-part
+  suffixes. Adding a PSL dependency was judged not worth it here.
+* **Punycode is not decoded.** An `xn--` label is scored as the literal ASCII
+  it already is.
+
 ## Writing a detector
 
 Subclass `Detector` and implement `process()`. A detector that keeps rolling

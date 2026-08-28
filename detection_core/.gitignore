@@ -15,3 +15,8 @@ dist/
 .ruff_cache/
 .coverage
 htmlcov/
+
+# Trained model artifacts - never commit binaries, retrain from the CSV
+artifacts/
+*.joblib
+*.pkl
