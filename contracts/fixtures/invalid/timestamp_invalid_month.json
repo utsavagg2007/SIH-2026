@@ -1,0 +1,18 @@
+{
+  "schema_version": "1.0",
+  "record_id": "co-v1:invalid:timestamp-month",
+  "observation_type": "flow",
+  "telemetry_source": "zeek",
+  "sensor_id": "sensor-fixture-invalid",
+  "observed_at": "2026-13-01T10:00:00Z",
+  "quality": { "fidelity": "exact", "truncated": false, "loss_detected": false },
+  "provenance": { "input_mode": "pcap_file", "parser_name": "fixture", "parser_version": "1" },
+  "data": {
+    "start_time": "2026-08-30T13:02:59Z",
+    "src_ip": "192.0.2.106",
+    "dst_ip": "198.51.100.106",
+    "ip_protocol": 6,
+    "direction_mode": "unidirectional",
+    "counters": { "src_to_dst": { "packets": 1 } }
+  }
+}

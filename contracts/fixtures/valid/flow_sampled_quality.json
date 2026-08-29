@@ -1,0 +1,39 @@
+{
+  "schema_version": "1.0",
+  "record_id": "co-v1:fixture:flow:sampled-quality-001",
+  "observation_type": "flow",
+  "telemetry_source": "ipfix",
+  "sensor_id": "collector-fixture-03",
+  "observed_at": "2026-08-30T10:07:10Z",
+  "quality": {
+    "fidelity": "sampled",
+    "sampling_rate": 100,
+    "sampling_probability": 0.01,
+    "truncated": false,
+    "loss_detected": true
+  },
+  "provenance": {
+    "input_mode": "export_stream",
+    "parser_name": "fixture-ipfix-normalizer",
+    "parser_version": "fixture-1",
+    "exporter_id": "exporter-fixture-03",
+    "observation_domain_id": 7,
+    "template_id": 300
+  },
+  "data": {
+    "start_time": "2026-08-30T10:07:00Z",
+    "end_time": "2026-08-30T10:07:09Z",
+    "src_ip": "192.0.2.80",
+    "dst_ip": "198.51.100.80",
+    "src_port": 62000,
+    "dst_port": 443,
+    "ip_protocol": 6,
+    "direction_mode": "unidirectional",
+    "counters": {
+      "src_to_dst": {
+        "packets": 25,
+        "ip_bytes": 25000
+      }
+    }
+  }
+}

@@ -1,0 +1,45 @@
+{
+  "schema_version": "1.0",
+  "record_id": "co-v1:fixture:flow:tcp-001",
+  "source_record_id": "CfixtureTcp001",
+  "observation_type": "flow",
+  "telemetry_source": "zeek",
+  "sensor_id": "sensor-fixture-01",
+  "observed_at": "2026-08-30T10:00:02.000001Z",
+  "quality": {
+    "fidelity": "exact",
+    "truncated": false,
+    "loss_detected": false
+  },
+  "provenance": {
+    "input_mode": "pcap_file",
+    "parser_name": "ingestion_core-zeek-normalizer",
+    "parser_version": "fixture-1"
+  },
+  "data": {
+    "start_time": "2026-08-30T10:00:01Z",
+    "end_time": "2026-08-30T10:00:01.750000Z",
+    "src_ip": "192.0.2.10",
+    "dst_ip": "198.51.100.20",
+    "src_port": 49152,
+    "dst_port": 443,
+    "ip_protocol": 6,
+    "direction_mode": "originator_responder",
+    "service": "ssl",
+    "connection_state": "SF",
+    "connection_history": "ShADadFf",
+    "tcp_flags": ["syn", "ack", "fin"],
+    "counters": {
+      "src_to_dst": {
+        "packets": 10,
+        "payload_bytes": 1024,
+        "ip_bytes": 1504
+      },
+      "dst_to_src": {
+        "packets": 8,
+        "payload_bytes": 2048,
+        "ip_bytes": 2432
+      }
+    }
+  }
+}

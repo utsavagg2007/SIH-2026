@@ -1,0 +1,41 @@
+{
+  "schema_version": "1.0",
+  "record_id": "co-v1:fixture:flow:ipv6-001",
+  "observation_type": "flow",
+  "telemetry_source": "zeek",
+  "sensor_id": "sensor-fixture-02",
+  "observed_at": "2026-08-30T10:02:05.123456Z",
+  "quality": {
+    "fidelity": "exact",
+    "truncated": false,
+    "loss_detected": false
+  },
+  "provenance": {
+    "input_mode": "live_interface",
+    "parser_name": "ingestion_core-zeek-normalizer",
+    "parser_version": "fixture-1",
+    "capture_interface": "fixture0"
+  },
+  "data": {
+    "start_time": "2026-08-30T10:02:00.000001Z",
+    "end_time": "2026-08-30T10:02:04.999999Z",
+    "src_ip": "2001:db8::10",
+    "dst_ip": "2001:db8:1::20",
+    "src_port": 50000,
+    "dst_port": 443,
+    "ip_protocol": 6,
+    "direction_mode": "originator_responder",
+    "counters": {
+      "src_to_dst": {
+        "packets": 4,
+        "payload_bytes": 500,
+        "ip_bytes": 740
+      },
+      "dst_to_src": {
+        "packets": 3,
+        "payload_bytes": 900,
+        "ip_bytes": 1080
+      }
+    }
+  }
+}
