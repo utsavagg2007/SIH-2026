@@ -123,6 +123,11 @@ class ActivityWindow:
         self._proto_counts: dict[str, int] = {}
         # port -> host -> occurrences. Emptied containers are removed.
         self._hosts_by_port: dict[int, dict[str, int]] = {}
+        # How many ports currently reach exactly N distinct hosts, so the
+        # widest fanout is a lookup rather than a scan over every port. An
+        # emptied bucket is deleted, so the keys are exactly the live fanouts.
+        self._fanout_buckets: dict[int, int] = {}
+        self._max_fanout: int | None = 0
         # Extremes cannot be undone by subtraction, so they are cached with
         # lazy invalidation: recomputed only when the extreme itself leaves.
         self._orig_bytes_counts: dict[int, int] = {}
@@ -146,6 +151,27 @@ class ActivityWindow:
         else:
             del counts[key]
 
+    def _fanout_moved(self, previous: int, current: int) -> None:
+        """Record that one port's distinct-host count moved.
+
+        Only called when it really moved: a repeat of a ``(port, host)`` pair
+        already seen leaves the port's fanout alone, and so must leave these
+        buckets alone.
+        """
+        if previous:
+            self._decrement(self._fanout_buckets, previous)
+        if current:
+            self._increment(self._fanout_buckets, current)
+
+        if current > previous:
+            # Growth can only raise the maximum, and only to this value.
+            if self._max_fanout is not None and current > self._max_fanout:
+                self._max_fanout = current
+        elif previous == self._max_fanout and previous not in self._fanout_buckets:
+            # The last port holding the record just lost a host. What the new
+            # maximum is depends on the other ports, so recompute on demand.
+            self._max_fanout = None
+
     def _add(self, observation: FlowObservation) -> None:
         """Fold one observation into every aggregate."""
         self._orig_packets_total += observation.orig_packets
@@ -160,7 +186,10 @@ class ActivityWindow:
             hosts = self._hosts_by_port.get(observation.dst_port)
             if hosts is None:
                 hosts = self._hosts_by_port[observation.dst_port] = {}
+            before = len(hosts)
             self._increment(hosts, observation.dst_ip)
+            if len(hosts) != before:  # a host this port had not seen
+                self._fanout_moved(before, len(hosts))
         if observation.src_ip is not None:
             self._increment(self._src_ip_counts, observation.src_ip)
         if observation.proto is not None:
@@ -186,7 +215,11 @@ class ActivityWindow:
         if observation.dst_port is not None:
             self._decrement(self._dst_port_counts, observation.dst_port)
             hosts = self._hosts_by_port[observation.dst_port]
+            before = len(hosts)
             self._decrement(hosts, observation.dst_ip)
+            after = len(hosts)
+            if after != before:  # that host's last occurrence on this port
+                self._fanout_moved(before, after)
             if not hosts:
                 del self._hosts_by_port[observation.dst_port]
         if observation.src_ip is not None:
@@ -225,6 +258,43 @@ class ActivityWindow:
     def attempts(self) -> int:
         """Connection attempts still inside the window."""
         return len(self._events)
+
+    def unique_dst_port_count(self) -> int:
+        """How many distinct destination ports are live, without building a set.
+
+        The scalar counterpart to :meth:`dst_ports`, and always equal to
+        ``len(self.dst_ports())``. It exists because a detector deciding
+        "has this source touched enough ports?" needs the number, not the
+        ports - and materializing a set of every port on every flow is
+        exactly the work a port scan makes expensive, since a scan's whole
+        character is that each flow brings a port nobody has seen.
+        """
+        return len(self._dst_port_counts)
+
+    def unique_dst_ip_count(self) -> int:
+        """Distinct destination hosts, as a number. See above."""
+        return len(self._dst_ip_counts)
+
+    def unique_src_ip_count(self) -> int:
+        """Distinct source hosts, as a number - what a flood grows."""
+        return len(self._src_ip_counts)
+
+    def unique_protocol_count(self) -> int:
+        """Distinct protocols, as a number."""
+        return len(self._proto_counts)
+
+    def max_hosts_per_port(self) -> int:
+        """Widest distinct-host fanout reached by any single port, 0 if none.
+
+        Always equal to ``max((len(h) for h in self.hosts_by_port().values()),
+        default=0)``, but without rebuilding that mapping. Maintained through
+        :meth:`_fanout_moved`: growth updates the cached maximum directly,
+        and only losing the last port at the top forces a recomputation -
+        over the distinct fanout values, not over every port.
+        """
+        if self._max_fanout is None:
+            self._max_fanout = max(self._fanout_buckets, default=0)
+        return self._max_fanout
 
     def dst_ports(self) -> set[int]:
         """Distinct destination ports. A missing port is not a port."""

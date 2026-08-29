@@ -119,19 +119,30 @@ class PortScanDetector(Detector):
         # then goes quiet must still have its cooldown released eventually.
         self._sweep_cooldowns(flow.timestamp)
 
-        ports = window.dst_ports()
-        hosts = window.dst_ips()
-        scanned_port, fanout = self._widest_fanout(window.hosts_by_port())
+        # Counts, not collections. A scan's defining feature is that every
+        # flow brings a port nobody has seen, so materializing the set of
+        # ports on every flow costs 1 + 2 + 3 + ... - quadratic in exactly
+        # the traffic this detector exists to catch. The window already
+        # maintains these numbers; the ports themselves are only needed if
+        # an alert is actually built, below.
+        port_count = window.unique_dst_port_count()
+        fanout = window.max_hosts_per_port()
 
-        vertical = len(ports) >= self.config.min_unique_ports
+        vertical = port_count >= self.config.min_unique_ports
         horizontal = fanout >= self.config.min_unique_hosts
         if not (vertical or horizontal):
             return []
 
-        score = self._rule_score(len(ports), fanout, vertical, horizontal)
+        score = self._rule_score(port_count, fanout, vertical, horizontal)
         severity = self._severity(score)
         if not self._should_emit(flow.src_ip, flow.timestamp, severity):
             return []
+
+        # The alert path, reached far less often than the qualification path,
+        # is where the actual values are worth building.
+        ports = window.dst_ports()
+        hosts = window.dst_ips()
+        scanned_port, _ = self._widest_fanout(window.hosts_by_port())
 
         alert = self._build_alert(
             flow=flow,

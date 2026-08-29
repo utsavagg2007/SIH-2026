@@ -130,20 +130,25 @@ class DDoSDetector(Detector):
         # once and then goes quiet must still have its cooldown released.
         self._sweep_cooldowns(flow.timestamp)
 
-        sources = window.src_ips()
+        # The count, not the addresses: a flood is a stream of sources
+        # nobody has seen, so building the set on every flow is quadratic in
+        # precisely the traffic this detector is for. The addresses are only
+        # needed when an alert is built, below.
+        source_count = window.unique_src_ip_count()
         flows = window.attempts
         packets = window.total_orig_packets()
 
-        broad = len(sources) >= self.config.min_unique_sources
+        broad = source_count >= self.config.min_unique_sources
         intense = flows >= self.config.min_flows or packets >= self.config.min_packets
         if not (broad and intense):
             return []
 
-        score = self._rule_score(len(sources), flows, packets)
+        score = self._rule_score(source_count, flows, packets)
         severity = severity_for(score)
         if not self._should_emit(flow.dst_ip, flow.timestamp, severity):
             return []
 
+        sources = window.src_ips()
         alert = self._build_alert(
             flow=flow,
             window=window,

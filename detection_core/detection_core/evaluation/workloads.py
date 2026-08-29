@@ -224,7 +224,18 @@ def mixed_flows(count: int, *, start: float = 1_700_000_000.0) -> list[FlowEvent
 
 #: Shapes :func:`stress_flows` can generate. Each isolates one cost the
 #: rolling-window structures could plausibly have.
-STRESS_SHAPES = ("hot_key", "many_keys")
+#:
+#: The first two are synthetic probes of the bookkeeping. The last three are
+#: the shapes the detectors actually exist to catch, and they are the ones
+#: where a per-flow cost that grows with *distinct values* hurts: a scan or a
+#: flood is, by definition, a stream of values nobody has seen before.
+STRESS_SHAPES = (
+    "hot_key",
+    "many_keys",
+    "vertical_scan",
+    "horizontal_scan",
+    "distinct_source_flood",
+)
 
 
 def stress_flows(
@@ -232,7 +243,7 @@ def stress_flows(
     *,
     shape: str = "hot_key",
     start: float = 1_700_000_000.0,
-    step: float = 0.001,
+    step: float = 0.0005,
 ) -> list[FlowEvent]:
     """Workloads that isolate rolling-window cost, for diagnosis only.
 
@@ -249,8 +260,21 @@ def stress_flows(
       holds one observation. This isolates index growth from scan length.
       Both endpoints must vary: holding the destination constant would make
       the DDoS window a hot key and quietly measure scan length again.
+    * ``vertical_scan`` - one source sweeping one host, **a new destination
+      port on every flow**. This is what PortScanDetector's vertical rule
+      counts, and the port must genuinely change: a fixed port would leave
+      the distinct-port count at 1 and measure nothing.
+    * ``horizontal_scan`` - one source, one port, a new destination host on
+      every flow: the per-port host fanout the horizontal rule reads.
+    * ``distinct_source_flood`` - one destination, a new source on every
+      flow, which is DDoSDetector's unique-source count.
 
-    Deliberately non-alerting in both shapes: a 1ms cadence is far below
+    The three attack shapes pack their timestamps tightly enough that
+    nothing expires inside the relevant window, so resident distinct values
+    climb to ``count`` and the cost of counting them is what gets measured.
+
+    ``hot_key`` and ``many_keys`` are deliberately non-alerting: a sub-ms
+    cadence is far below
     C2's ``min_mean_interval_seconds``, one port cannot be a scan, one source
     cannot be a flood, and the byte counts never approach the exfiltration
     bar. What is being measured is the cost of *bookkeeping*, not of
@@ -264,18 +288,30 @@ def stress_flows(
     flows: list[FlowEvent] = []
     for index in range(count):
         timestamp = start + index * step
+        port = 443
         if shape == "hot_key":
             src, dst = "10.20.30.40", "10.20.30.99"
-        else:
+        elif shape == "many_keys":
             src = f"10.{index // 65536 % 256}.{index // 256 % 256}.{index % 256}"
             dst = f"172.{index // 65536 % 256}.{index // 256 % 256}.{index % 256}"
+        elif shape == "vertical_scan":
+            # One source, one victim, a port nobody has tried yet.
+            src, dst = "10.0.0.1", "10.0.0.50"
+            port = 1 + index
+        elif shape == "horizontal_scan":
+            # One source sweeping one port across the estate.
+            src, port = "10.0.0.1", 22
+            dst = f"10.{index // 65536 % 256}.{index // 256 % 256}.{index % 256}"
+        else:  # distinct_source_flood
+            src = f"198.{index // 65536 % 256}.{index // 256 % 256}.{index % 256}"
+            dst = "10.0.0.80"
         flows.append(
             FlowEvent(
-                flow_id=f"{src}:{dst}:443:tcp:{timestamp:.3f}",
+                flow_id=f"{src}:{dst}:{port}:tcp:{timestamp:.3f}",
                 timestamp=timestamp,
                 src_ip=src,
                 dst_ip=dst,
-                dst_port=443,
+                dst_port=port,
                 proto="tcp",
                 duration=0.05,
                 orig_bytes=200,
