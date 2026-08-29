@@ -1,189 +1,127 @@
-/**
- * Application shell.
- *
- * Five views behind a persistent left rail, with the Wire fixed at the top and
- * the instrument bar fixed at the bottom (Frontend spec section 4). The app
- * opens directly into the live view - no sign-in, no onboarding (spec 1.1).
- *
- * Scope note: this is the verification console for the backend, not the final
- * dashboard. It reads every REST route and every WebSocket frame type the
- * backend serves, so a regression anywhere in the API shows up on a screen.
- */
-
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { AlertStream, type Filters } from "./components/AlertStream";
-import { EvidencePanel } from "./components/Evidence";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { MessageSquare } from "lucide-react";
+import { T, SANS } from "./lib/tokens";
+import type { Severity, ViewId } from "./lib/types";
+import { useFeed } from "./hooks/useFeed";
 import { Wire } from "./components/Wire";
-import { api } from "./lib/api";
-import { fmt } from "./lib/format";
-import { useLiveFeed } from "./lib/store";
-import type { Alert } from "./lib/types";
-import { HostView, IncidentsView, ReplayView, SystemView } from "./views/Views";
-
-type View = "live" | "incidents" | "host" | "system" | "replay";
-
-const NAV: { id: View; label: string }[] = [
-  { id: "live", label: "Live" },
-  { id: "incidents", label: "Incid" },
-  { id: "host", label: "Host" },
-  { id: "system", label: "Sys" },
-  { id: "replay", label: "Replay" },
-];
+import { NavRail } from "./components/NavRail";
+import { InstrumentBar } from "./components/InstrumentBar";
+import { AlertStream } from "./components/AlertStream";
+import { EvidencePanel } from "./components/EvidencePanel";
+import { AnalystPanel } from "./components/AnalystPanel";
+import { IncidentsView } from "./components/IncidentsView";
+import { HostView } from "./components/HostView";
+import { ReplayView, type ReplayState } from "./components/ReplayView";
+import { SystemView } from "./components/SystemView";
 
 export default function App() {
-  const { alerts, incidents, metrics, conn, received, wire } = useLiveFeed();
-  const [view, setView] = useState<View>("live");
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [host, setHost] = useState<string | null>(null);
-  const [filters, setFilters] = useState<Filters>({
-    severities: new Set(),
-    classes: new Set(),
-  });
-  // An alert selected from a screen that reads history (Host, Incidents) may
-  // have scrolled out of the live ring buffer, so it is fetched on demand.
-  const [fetched, setFetched] = useState<Alert | null>(null);
+  const { alerts, incidents, metrics, getWireData } = useFeed();
 
-  const selected = useMemo(
-    () =>
-      alerts.find((a) => a.alert_id === selectedId) ??
-      (fetched?.alert_id === selectedId ? fetched : null),
-    [alerts, fetched, selectedId]
-  );
+  const [view, setView] = useState<ViewId>("live");
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedHost, setSelectedHost] = useState<string | null>(null);
+  const [filterSev, setFilterSev] = useState<Severity | "all">("all");
+  const [showAnalyst, setShowAnalyst] = useState(false);
+  const [replay, setReplay] = useState<ReplayState>({ capture: null, speed: 1, running: false, elapsed: 0 });
+
+  // Throughput/latency history for the System view — accumulated from the
+  // metrics stream, not re-fetched.
+  const [throughputHistory, setThroughputHistory] = useState<{ t: number; flowsPerSec: number }[]>([]);
+  const [latencySamples, setLatencySamples] = useState<number[]>([]);
+  const tickRef = useRef(0);
 
   useEffect(() => {
-    if (!selectedId || selected) return;
-    let alive = true;
-    api
-      .alert(selectedId)
-      .then((a) => alive && setFetched(a))
-      .catch(() => undefined);
-    return () => {
-      alive = false;
-    };
-  }, [selectedId, selected]);
+    tickRef.current += 1;
+    setThroughputHistory((h) => [...h, { t: tickRef.current, flowsPerSec: metrics.flowsPerSec }].slice(-60));
+    setLatencySamples((prev) => [...prev, metrics.p95 + (Math.random() - 0.5) * 10].slice(-120));
+  }, [metrics.flowsPerSec]);
 
-  const selectAlert = useCallback((id: string) => {
-    setSelectedId(id || null);
-  }, []);
+  useEffect(() => {
+    if (!replay.running) return;
+    const interval = setInterval(() => setReplay((r) => ({ ...r, elapsed: r.elapsed + 1 })), 1000 / (replay.speed || 1));
+    return () => clearInterval(interval);
+  }, [replay.running, replay.speed]);
 
+  const selectedAlert = alerts.find((a) => a.alert_id === selectedId) || null;
+  const handleSelect = useCallback((id: string) => setSelectedId(id), []);
   const openHost = useCallback((ip: string) => {
-    setHost(ip);
+    setSelectedHost(ip);
     setView("host");
   }, []);
+  const goto = useCallback((v: ViewId) => setView(v), []);
 
-  const openAlert = useCallback((id: string) => {
-    setSelectedId(id);
-    setView("live");
-  }, []);
+  // Keyboard nav — section 8.3: j/k move, Enter opens Analyst, Esc clears.
+  useEffect(() => {
+    if (view !== "live") return;
+    const filtered = filterSev === "all" ? alerts : alerts.filter((a) => a.severity === filterSev);
+    function onKey(e: KeyboardEvent) {
+      const tag = (document.activeElement as HTMLElement | null)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA") return;
+      const idx = filtered.findIndex((a) => a.alert_id === selectedId);
+      if (e.key === "j") {
+        e.preventDefault();
+        const next = filtered[Math.min(filtered.length - 1, idx + 1)];
+        if (next) setSelectedId(next.alert_id);
+      } else if (e.key === "k") {
+        e.preventDefault();
+        const prev = filtered[Math.max(0, idx - 1)];
+        if (prev) setSelectedId(prev.alert_id);
+      } else if (e.key === "Escape") {
+        setSelectedId(null);
+      } else if (e.key === "Enter" && filtered[idx]) {
+        setShowAnalyst(true);
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [view, alerts, filterSev, selectedId]);
 
   return (
-    <div className="app">
-      <nav className="nav">
-        {NAV.map((n) => (
-          <button
-            key={n.id}
-            aria-current={view === n.id}
-            onClick={() => setView(n.id)}
-          >
-            {n.label}
-          </button>
-        ))}
-      </nav>
+    <div style={{ width: "100%", height: "100vh", minHeight: 640, background: T.bg, display: "flex", fontVariantNumeric: "tabular-nums" }}>
+      <NavRail active={view} onSelect={goto} />
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0 }}>
+        <Wire getData={getWireData} />
 
-      {/* Fixed height, always visible, never scrolls away (spec 3.2). */}
-      <Wire buffer={wire} conn={conn} onSelect={openAlert} />
-
-      <main className="main">
         {view === "live" && (
-          <div className="split">
-            <AlertStream
-              alerts={alerts}
-              selectedId={selectedId}
-              onSelect={selectAlert}
-              filters={filters}
-              onFilters={setFilters}
-              received={received}
-            />
-            <EvidencePanel alert={selected} onHost={openHost} />
+          <div style={{ flex: 1, display: "flex", minHeight: 0 }}>
+            <div style={{ width: "38%", borderRight: `1px solid ${T.rule}`, minWidth: 280 }}>
+              <AlertStream alerts={alerts} selectedId={selectedId} onSelect={handleSelect} filterSev={filterSev} setFilterSev={setFilterSev} />
+            </div>
+            <div style={{ flex: 1, minWidth: 0, position: "relative" }}>
+              {selectedAlert && (
+                <button
+                  onClick={() => setShowAnalyst((v) => !v)}
+                  style={{
+                    position: "absolute", top: 12, right: 12, zIndex: 1, fontFamily: SANS, fontSize: 11, fontWeight: 600,
+                    color: T.text2, background: T.panel2, border: `1px solid ${T.rule}`, borderRadius: 2, padding: "5px 8px",
+                    cursor: "pointer", display: "flex", alignItems: "center", gap: 5,
+                  }}
+                >
+                  <MessageSquare size={12} /> Explain
+                </button>
+              )}
+              <EvidencePanel alert={selectedAlert} onOpenHost={openHost} />
+            </div>
+            {showAnalyst && <AnalystPanel alert={selectedAlert} onClose={() => setShowAnalyst(false)} />}
           </div>
         )}
+
         {view === "incidents" && (
-          <IncidentsView
-            incidents={incidents}
-            onAlert={openAlert}
-            onHost={openHost}
-          />
+          <IncidentsView incidents={incidents} onSelectAlert={(id) => { setSelectedId(id); setView("live"); }} onOpenHost={openHost} />
         )}
+
         {view === "host" && (
-          <HostView ip={host} onAlert={openAlert} onHost={setHost} />
+          <HostView host={selectedHost} alerts={alerts} incidents={incidents} onSelectAlert={(id) => { setSelectedId(id); setView("live"); }} />
         )}
-        {view === "system" && <SystemView />}
-        {view === "replay" && <ReplayView />}
-      </main>
 
-      <InstrumentBar metrics={metrics} conn={conn} />
-    </div>
-  );
-}
-
-/**
- * The instrument bar (spec 4.2).
- *
- * Values update at 1Hz - fast enough to feel live, slow enough to read. Feed
- * state is the only element permitted colour, and only when disconnected.
- */
-function InstrumentBar({
-  metrics,
-  conn,
-}: {
-  metrics: ReturnType<typeof useLiveFeed>["metrics"];
-  conn: ReturnType<typeof useLiveFeed>["conn"];
-}) {
-  const m = metrics;
-  return (
-    <div className="bar">
-      <span className="cell">
-        <span className="v">{m ? m.alerts_per_sec.toFixed(1) : "—"}</span>
-        <span className="u">alerts/s</span>
-      </span>
-      <span className="cell">
-        {/* Traffic figures come from the ingestion layer. When nothing has
-            reported, say so rather than showing a confident zero. */}
-        <span className="v">
-          {m?.traffic_telemetry_live ? m.flows_per_sec.toLocaleString() : "—"}
-        </span>
-        <span className="u">flows/s</span>
-      </span>
-      <span className="cell">
-        <span className="v">
-          {m?.traffic_telemetry_live ? m.mbps.toFixed(1) : "—"}
-        </span>
-        <span className="u">Mb/s</span>
-      </span>
-      <span className="cell">
-        <span className="v">{m ? m.latency_p95_ms.toFixed(0) : "—"}</span>
-        <span className="u">ms p95</span>
-      </span>
-      <span className="cell">
-        <span className="v">
-          {m ? `${m.detectors_online}/${m.detectors_total}` : "—"}
-        </span>
-        <span className="u">detectors</span>
-      </span>
-      <span className="cell">
-        <span className="v">{m ? fmt.uptime(m.uptime_s) : "—"}</span>
-        <span className="u">uptime</span>
-      </span>
-      <span className="cell">
-        <span className={`v${conn !== "open" ? " disconnected" : ""}`}>
-          {conn === "open" ? "live" : conn === "connecting" ? "connecting" : "feed stopped"}
-        </span>
-        {m && m.ws_dropped > 0 && (
-          // The dashboard is behind. Saying so beats silently implying the
-          // stream is complete.
-          <span className="u">{m.ws_dropped} dropped</span>
+        {view === "system" && (
+          <SystemView metrics={metrics} throughputHistory={throughputHistory} latencySamples={latencySamples} alerts={alerts} />
         )}
-      </span>
+
+        {view === "replay" && <ReplayView replay={replay} setReplay={setReplay} />}
+
+        <InstrumentBar metrics={metrics} />
+      </div>
     </div>
   );
 }

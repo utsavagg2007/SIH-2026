@@ -13,182 +13,122 @@
  */
 
 import { useEffect, useRef } from "react";
-import type { ConnState } from "../lib/api";
-import type { WireBuffer } from "../lib/store";
+import { T, MONO } from "../lib/tokens";
 
-const WINDOW_S = 60;
-const HEIGHT = 88;
+interface WireData {
+  samples: { t: number; v: number }[];
+  marks: { t: number; code: string; color: string }[];
+  connected: boolean;
+}
 
-const SEV_COLOR: Record<string, string> = {
-  low: "#4e9c7f",
-  medium: "#d2a03e",
-  high: "#db7038",
-  critical: "#c8453d",
-};
-
-export function Wire({
-  buffer,
-  conn,
-  onSelect,
-}: {
-  buffer: React.MutableRefObject<WireBuffer>;
-  conn: ConnState;
-  onSelect: (alertId: string) => void;
-}) {
+export function Wire({ getData, height = 88 }: { getData: () => WireData; height?: number }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const connRef = useRef(conn);
-  connRef.current = conn;
-  const hitRef = useRef<{ x: number; id: string }[]>([]);
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
+    const canvas = canvasRef.current!;
+    const ctx = canvas.getContext("2d")!;
+    let raf: number;
+    let lastStep = 0;
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-    const reduced = window.matchMedia(
-      "(prefers-reduced-motion: reduce)"
-    ).matches;
-
-    let raf = 0;
-    let stopped = false;
-    let lastDraw = 0;
-
-    const draw = (now: number) => {
-      if (stopped) return;
-      // Under reduced motion the trace redraws in one-second steps instead of
-      // continuously (spec 2.5). Everything remains functional.
-      if (reduced && now - lastDraw < 1000) {
-        raf = requestAnimationFrame(draw);
-        return;
-      }
-      lastDraw = now;
-
+    function resize() {
+      const rect = canvas.getBoundingClientRect();
       const dpr = window.devicePixelRatio || 1;
-      const w = canvas.clientWidth;
-      if (canvas.width !== w * dpr || canvas.height !== HEIGHT * dpr) {
-        canvas.width = w * dpr;
-        canvas.height = HEIGHT * dpr;
-      }
+      canvas.width = rect.width * dpr;
+      canvas.height = height * dpr;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+    resize();
+    window.addEventListener("resize", resize);
 
-      const css = getComputedStyle(document.documentElement);
-      const panel = css.getPropertyValue("--panel").trim() || "#14181b";
-      const rule = css.getPropertyValue("--rule").trim() || "#252c31";
-      const text3 = css.getPropertyValue("--text-3").trim() || "#5a646b";
-
-      ctx.fillStyle = panel;
-      ctx.fillRect(0, 0, w, HEIGHT);
-
-      // When the feed is stopped the trace freezes at the moment it stopped -
-      // it never fakes movement (spec 3.2).
-      const live = connRef.current === "open";
-      const nowS = live
-        ? Date.now() / 1000
-        : (buffer.current.marks.at(-1)?.t ?? Date.now() / 1000);
-      const t0 = nowS - WINDOW_S;
-      const xOf = (t: number) => ((t - t0) / WINDOW_S) * w;
-
-      // Time axis: ticks every fifteen seconds, right edge is now.
-      ctx.strokeStyle = rule;
-      ctx.fillStyle = text3;
-      ctx.font = '11px "IBM Plex Mono", monospace';
-      ctx.lineWidth = 1;
-      for (let s = 0; s <= WINDOW_S; s += 15) {
-        const x = Math.round(xOf(nowS - s)) + 0.5;
-        ctx.beginPath();
-        ctx.moveTo(x, HEIGHT - 16);
-        ctx.lineTo(x, HEIGHT - 11);
-        ctx.stroke();
-        const label = s === 0 ? "now" : `-${s}s`;
-        ctx.textAlign = s === 0 ? "right" : s === WINDOW_S ? "left" : "center";
-        ctx.fillText(label, s === 0 ? x - 3 : x, HEIGHT - 3);
+    function draw(now: number) {
+      // Under prefers-reduced-motion: redraw in one-second steps, section 2.5
+      if (reducedMotion) {
+        if (now - lastStep < 1000) {
+          raf = requestAnimationFrame(draw);
+          return;
+        }
+        lastStep = now;
       }
 
-      // Baseline rule.
-      ctx.strokeStyle = rule;
+      const rect = canvas.getBoundingClientRect();
+      const w = rect.width;
+      const h = height;
+      const windowSec = 60;
+      const pxPerSec = w / windowSec;
+      ctx.clearRect(0, 0, w, h);
+
+      const { samples, marks, connected } = getData();
+      const nowMs = performance.now();
+      const baselineY = h - 22;
+
+      ctx.strokeStyle = T.rule;
+      ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.moveTo(0, HEIGHT - 16.5);
-      ctx.lineTo(w, HEIGHT - 16.5);
+      ctx.moveTo(0, baselineY);
+      ctx.lineTo(w, baselineY);
       ctx.stroke();
 
-      // Density trace: a thin line whose height encodes alerts per second.
-      // Drawn in --text-3; this is the ambient signal, never saturated.
-      const density = buffer.current.density.filter((d) => d.t >= t0);
-      if (density.length > 1) {
-        const peak = Math.max(1, ...density.map((d) => d.v));
-        ctx.strokeStyle = text3;
+      ctx.fillStyle = T.text3;
+      ctx.font = `11px ${MONO}`;
+      ctx.textBaseline = "top";
+      [60, 30, 0].forEach((s) => {
+        const x = w - s * pxPerSec;
+        const lbl = s === 0 ? "now" : `\u2190 ${s}s`;
+        const tw = ctx.measureText(lbl).width;
+        const clampedX = Math.max(2, Math.min(w - tw - 2, x - (s === 0 ? tw : 0)));
+        ctx.fillText(lbl, clampedX, 4);
+      });
+
+      if (samples.length > 1) {
+        ctx.strokeStyle = T.text3;
+        ctx.lineWidth = 1.25;
         ctx.beginPath();
-        density.forEach((d, i) => {
-          const x = xOf(d.t);
-          const y = HEIGHT - 20 - (d.v / peak) * 34;
+        const maxDensity = Math.max(1, ...samples.map((s) => s.v));
+        samples.forEach((s, i) => {
+          const ageMs = nowMs - s.t;
+          const x = w - (ageMs / 1000) * pxPerSec;
+          const y = 30 - (s.v / maxDensity) * 20;
+          if (x < -10) return;
           if (i === 0) ctx.moveTo(x, y);
           else ctx.lineTo(x, y);
         });
         ctx.stroke();
       }
 
-      // Detection marks: a 2px vertical tick in the severity colour with the
-      // two-letter threat code beside it. Marks persist as they scroll left.
-      const marks = buffer.current.marks.filter((m) => m.t >= t0);
-      const hits: { x: number; id: string }[] = [];
-      let lastLabelX = -Infinity;
-      ctx.font = '10px "IBM Plex Mono", monospace';
-      ctx.textAlign = "left";
-      for (const m of marks) {
-        const x = Math.round(xOf(m.t));
-        if (x < 0 || x > w) continue;
-        ctx.fillStyle = SEV_COLOR[m.severity] ?? text3;
-        ctx.fillRect(x, 8, 2, 40);
-        // Only label when there is room; at flood rates the codes would
-        // otherwise overprint into an unreadable smear.
-        if (x - lastLabelX > 22) {
-          ctx.fillStyle = text3;
-          ctx.fillText(m.code, x + 4, 18);
-          lastLabelX = x;
-        }
-        hits.push({ x, id: m.alertId });
-      }
-      hitRef.current = hits;
+      marks.forEach((m) => {
+        const ageMs = nowMs - m.t;
+        const x = w - (ageMs / 1000) * pxPerSec;
+        if (x < -20 || x > w + 20) return;
+        const color = m.color || T.sevMed;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(x, 12);
+        ctx.lineTo(x, baselineY);
+        ctx.stroke();
+        ctx.fillStyle = T.text2;
+        ctx.font = `10px ${MONO}`;
+        ctx.fillText(m.code, x + 3, 12);
+      });
 
-      // Drop marks that have scrolled off, so the buffer does not grow.
-      if (marks.length !== buffer.current.marks.length) {
-        buffer.current.marks = marks;
+      if (!connected) {
+        ctx.fillStyle = T.text3;
+        ctx.font = `12px ${MONO}`;
+        ctx.textAlign = "right";
+        ctx.fillText("feed stopped", w - 8, h - 16);
+        ctx.textAlign = "left";
       }
 
       raf = requestAnimationFrame(draw);
-    };
-
-    raf = requestAnimationFrame(draw);
-    return () => {
-      stopped = true;
-      cancelAnimationFrame(raf);
-    };
-  }, [buffer]);
-
-  const handleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
-    const rect = e.currentTarget.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    let best: { x: number; id: string } | null = null;
-    for (const h of hitRef.current) {
-      if (!best || Math.abs(h.x - x) < Math.abs(best.x - x)) best = h;
     }
-    if (best && Math.abs(best.x - x) < 8) onSelect(best.id);
-  };
+    raf = requestAnimationFrame(draw);
 
-  return (
-    <div className="wire-slot">
-      <canvas
-        ref={canvasRef}
-        onClick={handleClick}
-        role="img"
-        aria-label="Live detection trace, last 60 seconds"
-      />
-      {conn !== "open" && (
-        <span className="wire-status data-sm">
-          {conn === "connecting" ? "connecting" : "feed stopped"}
-        </span>
-      )}
-    </div>
-  );
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener("resize", resize);
+    };
+  }, [getData, height]);
+
+  return <canvas ref={canvasRef} style={{ width: "100%", height, display: "block", background: T.bg, flexShrink: 0 }} />;
 }

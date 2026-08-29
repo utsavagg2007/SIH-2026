@@ -1,18 +1,16 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
-// The frontend talks to FastAPI directly - REST for history, WebSocket for the
-// live feed. The dev proxy exists only so both run on one origin during
-// development; it is not a Node tier in front of the API, which the design spec
-// explicitly rules out ("inserting a Node proxy in front of a Python API adds a
-// network hop and latency to the one path where latency is graded").
+// Section 8.1: React talks to FastAPI directly, no Node proxy in the request
+// path. The dev server just proxies /ws and /api to the mock server (or the
+// real backend later) so the browser can use relative URLs.
 export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
     proxy: {
-      "/api": { target: "http://127.0.0.1:8000", changeOrigin: true },
-      "/ws": { target: "ws://127.0.0.1:8000", ws: true },
+      "/ws": { target: "ws://localhost:8787", ws: true },
+      "/api": { target: "http://localhost:8787", changeOrigin: true, rewrite: (p) => p.replace(/^\/api/, "") },
     },
   },
 });
