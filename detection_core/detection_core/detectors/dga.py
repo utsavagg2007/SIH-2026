@@ -7,6 +7,20 @@ online half and deliberately nothing more - it takes a queried domain off a
 :class:`~detection_core.ml.dga.DGAModel`, and turns a strong verdict into a
 ``ThreatAlert``.
 
+Findings are correlated by source
+--------------------------------
+A single infected host walks through a generated list until something
+resolves, so a per-domain alert means one alert per name tried - twenty
+alerts describing one event. Classification stays per domain, but reporting
+is per source: an eligible positive domain is folded into that source's
+recent picture and the source emits at most one ``source_host`` alert per
+``cooldown_seconds``. The domain-level cooldown is untouched and still runs
+underneath, so a name queried in a loop contributes once.
+
+Nothing about *what counts as DGA* changed. The model, its features and the
+0.75 decision threshold are exactly as they were; only the scope and count
+of the alerts describing those decisions are.
+
 **No DGA feature logic lives here.** Normalization and feature extraction are
 imported from Phase 1 and called, never reimplemented - a second copy of that
 arithmetic would drift from whatever the model was trained on and quietly
@@ -36,7 +50,7 @@ detector stays dependency-free; building *this* one needs the extra.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
@@ -54,6 +68,11 @@ from ..schemas import (
 from .scoring import normalize_score, severity_for
 
 __all__ = ["DGAConfig", "DGADetector", "DomainClassifier"]
+
+#: How many domain names one alert carries. Evidence is read by a human and
+#: shipped over the wire, so it is a bounded sample - never the full set.
+#: ``distinct_dga_domain_count`` reports the real total.
+MAX_SAMPLE_DOMAINS = 10
 
 
 @runtime_checkable
@@ -91,6 +110,12 @@ class DGAConfig:
     #: After reporting a ``(src_ip, domain)`` pair, stay quiet about it this
     #: long. Malware re-queries the same name constantly; the finding is the
     #: domain, not each individual lookup.
+    #:
+    #: The same figure governs source-level correlation, deliberately: it is
+    #: how long a positive domain stays part of a source's recent picture,
+    #: and how long the source stays quiet after reporting. Reusing it avoids
+    #: inventing a second timing constant nobody has validated - "how often
+    #: to repeat yourself" is one question, asked at two scopes.
     cooldown_seconds: float = 300.0
 
     def __post_init__(self) -> None:
@@ -100,6 +125,49 @@ class DGAConfig:
             raise ValueError("score_threshold must be within (0.0, 1.0]")
         if self.cooldown_seconds < 0:
             raise ValueError("cooldown_seconds must not be negative")
+
+
+@dataclass(frozen=True)
+class _DomainFinding:
+    """One eligible positive domain, as this detector saw it."""
+
+    timestamp: float
+    domain: str
+    normalized: str
+    model_score: float
+    score: float
+    dst_ip: str
+    dst_port: int | None
+    proto: str | None
+
+
+@dataclass
+class _SourceCorrelation:
+    """One source's recent DGA-positive domains, and when it last reported.
+
+    Keyed by normalized domain, so a name queried a hundred times is one
+    entry - the distinct count is the finding, not the query volume. Entries
+    are dropped on event time, so this holds a rolling picture rather than a
+    growing history.
+    """
+
+    findings: dict[str, _DomainFinding] = field(default_factory=dict)
+    last_emitted_at: float | None = None
+
+    def record(self, finding: _DomainFinding) -> None:
+        self.findings[finding.normalized] = finding
+
+    def expire(self, cutoff: float) -> None:
+        """Drop findings at or before ``cutoff`` - the window's own rule."""
+        for normalized, finding in list(self.findings.items()):
+            if finding.timestamp <= cutoff:
+                del self.findings[normalized]
+
+    def is_idle(self, cutoff: float) -> bool:
+        """Nothing recent to correlate and no emission left to suppress."""
+        return not self.findings and (
+            self.last_emitted_at is None or self.last_emitted_at <= cutoff
+        )
 
 
 class DGADetector(Detector):
@@ -140,6 +208,7 @@ class DGADetector(Detector):
         self._verify_usable()
 
         self._last_alert_at: dict[tuple[str, str], float] = {}
+        self._sources: dict[str, _SourceCorrelation] = {}
         self._since_sweep = 0
 
     # --- construction helpers -------------------------------------------
@@ -200,28 +269,46 @@ class DGADetector(Detector):
         key = (flow.src_ip, normalized)
         if not self._should_emit(key, flow.timestamp):
             return []
+        # The domain has contributed. Stamped whether or not the source goes
+        # on to report, so a name queried in a loop is counted once either
+        # way - this is the existing per-domain cooldown, unchanged.
         self._last_alert_at[key] = flow.timestamp
 
         score = self._threat_score(model_score)
-        return [
-            self._build_alert(
-                flow=flow,
-                domain=domain,
-                normalized=normalized,
-                prediction=prediction,
-                model_score=model_score,
-                score=score,
-                severity=severity_for(score),
-            )
-        ]
+        correlation = self._correlate(
+            flow=flow,
+            domain=domain,
+            normalized=normalized,
+            model_score=model_score,
+            score=score,
+        )
+        if not self._source_may_emit(correlation, flow.timestamp):
+            # Folded into the source's picture; the alert that already went
+            # out for this source still describes it. The next one, once the
+            # source cooldown lapses, carries the accumulated count.
+            return []
+
+        alert = self._build_alert(
+            flow=flow,
+            correlation=correlation,
+            domain=domain,
+            normalized=normalized,
+            prediction=prediction,
+            model_score=model_score,
+            score=score,
+            severity=severity_for(score),
+        )
+        correlation.last_emitted_at = flow.timestamp
+        return [alert]
 
     def flush(self) -> list[ThreatAlert]:
         """Nothing is held back - ``process()`` decides per domain."""
         return []
 
     def reset(self) -> None:
-        """Drop all cooldown state."""
+        """Drop all cooldown and correlation state."""
         self._last_alert_at.clear()
+        self._sources.clear()
         self._since_sweep = 0
 
     # --- input handling -------------------------------------------------
@@ -284,6 +371,59 @@ class DGADetector(Detector):
         """Project-standard severity bands - see ``scoring.severity_for``."""
         return severity_for(score)
 
+    # --- source correlation ---------------------------------------------
+
+    def _correlate(
+        self,
+        *,
+        flow: FlowEvent,
+        domain: str,
+        normalized: str,
+        model_score: float,
+        score: float,
+    ) -> _SourceCorrelation:
+        """Fold one eligible positive domain into its source's picture."""
+        correlation = self._sources.get(flow.src_ip)
+        if correlation is None:
+            correlation = self._sources[flow.src_ip] = _SourceCorrelation()
+        correlation.expire(flow.timestamp - self.config.cooldown_seconds)
+        correlation.record(
+            _DomainFinding(
+                timestamp=flow.timestamp,
+                domain=domain,
+                normalized=normalized,
+                model_score=model_score,
+                score=score,
+                dst_ip=flow.dst_ip,
+                dst_port=flow.dst_port,
+                proto=flow.proto,
+            )
+        )
+        return correlation
+
+    def _source_may_emit(
+        self, correlation: _SourceCorrelation, now: float
+    ) -> bool:
+        """Whether this source may report again.
+
+        One report per ``cooldown_seconds`` per source. There is no
+        severity-escalation escape hatch, matching the per-domain rule
+        directly above it and for the same reason: the model is
+        deterministic, so more domains is more of the same finding.
+        """
+        last = correlation.last_emitted_at
+        return last is None or (now - last) >= self.config.cooldown_seconds
+
+    @staticmethod
+    def _only(values: set) -> object | None:
+        """The single member of a set, or None when it is not unambiguous.
+
+        The project-wide convention for aggregate alerts: a finding spanning
+        several destinations reports ``dst_ip: None`` rather than picking one
+        or inventing a placeholder.
+        """
+        return next(iter(values)) if len(values) == 1 else None
+
     # --- cooldown -------------------------------------------------------
 
     def _should_emit(self, key: tuple[str, str], now: float) -> bool:
@@ -312,6 +452,12 @@ class DGADetector(Detector):
         for key, last in list(self._last_alert_at.items()):
             if last <= cutoff:
                 del self._last_alert_at[key]
+        # A source with nothing recent and no live emission suppression is
+        # just a name taking up room.
+        for src_ip, correlation in list(self._sources.items()):
+            correlation.expire(cutoff)
+            if correlation.is_idle(cutoff):
+                del self._sources[src_ip]
 
     # --- alert ----------------------------------------------------------
 
@@ -319,6 +465,7 @@ class DGADetector(Detector):
         self,
         *,
         flow: FlowEvent,
+        correlation: _SourceCorrelation,
         domain: str,
         normalized: str,
         prediction: Any,
@@ -326,12 +473,20 @@ class DGADetector(Detector):
         score: float,
         severity: Severity,
     ) -> ThreatAlert:
+        config = self.config
+        findings = list(correlation.findings.values())
+        timestamps = [finding.timestamp for finding in findings]
+        # A bounded, deterministically ordered sample - not a ranking, and
+        # not the whole set. The count below is the real total.
+        sample = sorted(correlation.findings)[:MAX_SAMPLE_DOMAINS]
+
         evidence: dict[str, Any] = {
+            # --- the domain that triggered this report --------------------
             "domain": domain,
             "normalized_domain": normalized,
             # The model's own output, unmodified.
             "dga_model_score": model_score,
-            "score_threshold": self.config.score_threshold,
+            "score_threshold": config.score_threshold,
             # Said plainly so nobody downstream reads the model score as a
             # probability. Phase 1 documents predict_scores() the same way.
             "model_score_is_calibrated": False,
@@ -340,6 +495,14 @@ class DGADetector(Detector):
                 "fraction, not a probability; the alert score is a rule_score "
                 "derived from how far it exceeds score_threshold"
             ),
+            # --- what this source has been doing --------------------------
+            # Distinct normalized names this source queried inside the
+            # aggregation window and which passed the model threshold. A
+            # name re-queried in a loop counts once.
+            "distinct_dga_domain_count": len(findings),
+            "sample_domains": sample,
+            "sample_domain_limit": MAX_SAMPLE_DOMAINS,
+            "aggregation_window_seconds": config.cooldown_seconds,
         }
 
         label = getattr(prediction, "label", None)
@@ -368,16 +531,23 @@ class DGADetector(Detector):
                 evidence["rcode"] = dns.rcode
 
         return ThreatAlert(
-            event_start=epoch_to_utc(flow.timestamp),
-            event_end=epoch_to_utc(flow.timestamp),
-            # The verdict really is about this one query.
-            event_scope=EventScope.FLOW,
-            # Populated only when the flow actually carries one.
-            flow_id=flow.flow_id,
+            # The span the correlated findings actually cover.
+            event_start=epoch_to_utc(min(timestamps)),
+            event_end=epoch_to_utc(max(timestamps)),
+            # The finding is this host's behaviour across several names, not
+            # any single lookup.
+            event_scope=EventScope.SOURCE_HOST,
+            # No one flow represents a correlated source event, so none is
+            # named - the aggregate contract every other detector follows.
+            flow_id=None,
             src_ip=flow.src_ip,
-            dst_ip=flow.dst_ip,
-            dst_port=flow.dst_port,
-            protocol=flow.proto,
+            # Only when every correlated finding agrees; otherwise None,
+            # never a placeholder.
+            dst_ip=self._only({finding.dst_ip for finding in findings}),
+            dst_port=self._only(
+                {f.dst_port for f in findings if f.dst_port is not None}
+            ),
+            protocol=self._only({f.proto for f in findings if f.proto is not None}),
             threat_class=ThreatClass.DGA_DOMAIN,
             severity=severity,
             score=score,

@@ -283,14 +283,21 @@ def test_qtype_and_rcode_reach_the_alert_evidence(detector):
 
 
 def test_alert_conformance(detector):
-    """Class, scope, endpoints, score type, MITRE mapping, flow_id."""
+    """Class, scope, endpoints, score type, MITRE mapping, flow_id.
+
+    Scope is SOURCE_HOST: findings are correlated per source, so an alert
+    describes a host's behaviour across the names it queried rather than one
+    lookup. ``flow_id`` is therefore None, the aggregate contract every other
+    correlating detector follows. The endpoints survive here because every
+    correlated finding so far agrees on them.
+    """
     alert = detector.process(dns_flow(1000.0, DGA_QUERY))[0]
 
     assert isinstance(alert, ThreatAlert)
     assert alert.schema_version == "1.1"
     assert alert.threat_class is ThreatClass.DGA_DOMAIN
-    assert alert.event_scope is EventScope.FLOW
-    assert alert.flow_id is not None
+    assert alert.event_scope is EventScope.SOURCE_HOST
+    assert alert.flow_id is None
     assert alert.src_ip == SRC and alert.dst_ip == RESOLVER
     assert alert.dst_port == 53 and alert.protocol == "udp"
     assert alert.detector == "dga_domain"
@@ -329,12 +336,20 @@ def test_raw_model_score_is_kept_separately(detector):
     assert alert.evidence["model_type"] == "RandomForestClassifier"
 
 
-def test_flow_id_is_none_when_the_flow_has_none(detector):
-    """Populated only when the flow really carries one."""
-    alert = detector.process(dns_flow(1000.0, DGA_QUERY, flow_id=None))[0]
+def test_flow_id_is_never_set_on_a_correlated_alert(detector):
+    """No single flow represents a correlated source finding.
 
-    assert alert.flow_id is None
-    assert alert.event_scope is EventScope.FLOW
+    A flow arriving without an id must still produce a well-formed alert -
+    the original point of this test - and the id is now absent either way,
+    because the alert is source-scoped.
+    """
+    without_id = detector.process(dns_flow(1000.0, DGA_QUERY, flow_id=None))[0]
+    assert without_id.flow_id is None
+    assert without_id.event_scope is EventScope.SOURCE_HOST
+
+    detector.reset()
+    with_id = detector.process(dns_flow(2000.0, DGA_QUERY))[0]
+    assert with_id.flow_id is None
 
 
 # --------------------------------------------------------------------------
@@ -349,15 +364,36 @@ def test_cooldown_suppresses_the_same_source_and_domain(detector):
 
 
 def test_different_domains_do_not_share_a_cooldown(detector):
-    """Two generated domains from one host are two findings."""
+    """Two generated domains from one host are two distinct findings.
+
+    Still true, and still the point of this test - but they are now two
+    findings correlated into one source, not two separate alerts. The
+    per-domain cooldown is what this guards: the second domain must not be
+    suppressed *as a domain*, which is visible in the source's recorded
+    findings and in the count the next alert carries.
+    """
     alerts = feed(
         detector,
         [dns_flow(1000.0, DGA_QUERY), dns_flow(1001.0, "zzqxwvbnmlkjhg.org")],
     )
-    assert len(alerts) == 2
-    assert {a.evidence["normalized_domain"] for a in alerts} == {
-        DGA_QUERY, "zzqxwvbnmlkjhg.org"
-    }
+
+    # The second domain was not swallowed by the first domain's cooldown.
+    findings = detector._sources[SRC].findings
+    assert len(findings) == 2
+    assert set(findings) == {DGA_QUERY, "zzqxwvbnmlkjhg.org"}
+
+    # It did not raise a second alert, because the source had just reported.
+    assert len(alerts) == 1
+
+    # Once the source cooldown lapses, the accumulated picture is reported.
+    later = feed(detector, [dns_flow(1000.0 + 400.0, "vbnmqwertyuiopas.com")])
+    assert len(later) == 1
+    assert later[0].evidence["distinct_dga_domain_count"] >= 1
+
+    # The one alert names the domain that triggered it. The other domain is
+    # not lost - it is in the source's findings above, and would appear in a
+    # later alert's count and sample while still inside the window.
+    assert alerts[0].evidence["normalized_domain"] == DGA_QUERY
 
 
 def test_different_sources_do_not_share_a_cooldown(detector):
