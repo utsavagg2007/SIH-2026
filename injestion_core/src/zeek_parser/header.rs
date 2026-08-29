@@ -12,6 +12,20 @@ pub struct ZeekHeader {
     pub unset_field: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ZeekCell<'a> {
+    Missing,
+    Unset,
+    Empty,
+    Value(&'a str),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ZeekDataRow<'a> {
+    pub ordinal: u64,
+    pub line: &'a str,
+}
+
 /// Parse the `#`-prefixed header lines of a Zeek log into a [`ZeekHeader`].
 pub fn parse_header(header_lines: &[&str]) -> Result<ZeekHeader, String> {
     let mut field_index: HashMap<String, usize> = HashMap::new();
@@ -56,14 +70,57 @@ pub fn field_value<'a>(cols: &'a [&'a str], header: &ZeekHeader, name: &str) -> 
     }
 }
 
+/// Return a field without collapsing missing, unset, and Zeek-empty states.
+pub fn field_cell<'a>(cols: &'a [&'a str], header: &ZeekHeader, name: &str) -> ZeekCell<'a> {
+    let Some(idx) = header.field_index.get(name).copied() else {
+        return ZeekCell::Missing;
+    };
+    let Some(value) = cols.get(idx).copied() else {
+        return ZeekCell::Missing;
+    };
+
+    if value == header.unset_field {
+        ZeekCell::Unset
+    } else if value == header.empty_field {
+        ZeekCell::Empty
+    } else {
+        ZeekCell::Value(value)
+    }
+}
+
 /// Split a data line into columns by tab and extract the header lines.
 pub fn split_log(content: &str) -> (Vec<&str>, Vec<&str>) {
     let lines: Vec<&str> = content.lines().collect();
-    let header_lines: Vec<&str> = lines.iter().filter(|l| l.starts_with('#')).copied().collect();
+    let header_lines: Vec<&str> = lines
+        .iter()
+        .filter(|l| l.starts_with('#'))
+        .copied()
+        .collect();
     let data_lines: Vec<&str> = lines
         .iter()
         .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
         .copied()
         .collect();
     (header_lines, data_lines)
+}
+
+/// Split a Zeek log while assigning ordinals only to physical data rows.
+///
+/// Header/comment and blank lines do not consume ordinals. Malformed data rows do.
+pub fn split_log_rows(content: &str) -> (Vec<&str>, Vec<ZeekDataRow<'_>>) {
+    let mut header_lines = Vec::new();
+    let mut data_rows = Vec::new();
+
+    for line in content.lines() {
+        if line.starts_with('#') {
+            header_lines.push(line);
+        } else if !line.trim().is_empty() {
+            data_rows.push(ZeekDataRow {
+                ordinal: data_rows.len() as u64,
+                line,
+            });
+        }
+    }
+
+    (header_lines, data_rows)
 }

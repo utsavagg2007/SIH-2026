@@ -1,4 +1,5 @@
 pub mod types;
+pub mod source_types;
 pub mod header;
 pub mod conn_log;
 pub mod dns_log;

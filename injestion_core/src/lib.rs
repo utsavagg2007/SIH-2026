@@ -2,6 +2,7 @@ use pyo3::prelude::*;
 use pyo3::types::PyModule;
 
 pub mod zeek_parser;
+pub mod canonical;
 pub mod features;
 pub mod utils;
 
