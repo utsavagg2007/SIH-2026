@@ -36,6 +36,8 @@ detection_core/
 ├── detectors/        port_scan, ddos, c2_beaconing, dns_tunnelling,
 │                      data_exfiltration, encrypted_malware, dga
 │                      + shared scoring helpers
+├── pipeline.py       detector factory, alert sinks, streaming run loop
+├── runner.py         `python -m detection_core.runner` CLI
 └── ml/               offline DGA baseline (Phase 1)
 ```
 
@@ -95,6 +97,68 @@ source = IngestionJsonlAdapter(path="features.jsonl")
 for alert in engine.run(source):
     print(alert.to_wire())                        # ThreatAlert v1.1 JSON
 ```
+
+## Running Detection
+
+The whole subsystem runs as one command — adapter, engine, every detector,
+and alert output:
+
+```bash
+# Basic: alert JSONL to stdout
+python -m detection_core.runner ../injestion_core/features.jsonl
+
+# Include the DGA detector (needs a trained model; none ships here)
+python -m detection_core.runner input.jsonl --dga-model artifacts/dga_model.joblib
+
+# Write alerts to a file
+python -m detection_core.runner input.jsonl --output alerts.jsonl
+
+# Also POST each alert to the backend
+python -m detection_core.runner input.jsonl \
+  --api-url http://localhost:8000/api/v1/alerts
+```
+
+**stdout is alert JSONL and nothing else.** Every log line goes to stderr, so
+`| jq` and `> alerts.jsonl` work without extra flags. Records stream: nothing
+loads the whole capture into memory, and each alert is flushed as it is
+produced.
+
+`--api-url` POSTs one ThreatAlert per request as `application/json`, using
+only the standard library. It is an *additional* destination — the JSONL
+output still happens — so a run that feeds the backend also leaves a local
+record of exactly what was sent. A POST that fails raises a clear delivery
+error and stops the run; nothing is retried and no alert is ever reported as
+delivered when it was not.
+
+### Which detectors run
+
+```python
+from detection_core import build_default_detectors
+
+build_default_detectors()                                   # six rule detectors
+build_default_detectors(dga_model_path="artifacts/dga.joblib")   # + dga_domain
+```
+
+The six rule/heuristic detectors always run on their shipped defaults. **DGA
+is opt-in**: it cannot work without a trained model, this package ships none,
+and a missing artifact must not take the rest of the subsystem offline. Pass
+`--dga-model` / `dga_model_path=` to include it. An *invalid* path is a
+different matter and fails loudly at startup — you asked for DGA explicitly.
+
+### What ingestion still needs to supply
+
+Four detectors work on today's feed. Three are built, tested and dormant,
+waiting on raw fields the current ingestion build does not emit yet:
+
+| detector | needs |
+|---|---|
+| `port_scan`, `ddos`, `c2_beaconing`, `data_exfiltration` | — works today |
+| `dns_tunnelling` | works today on derived DNS features |
+| `dga_domain` | **`dns.query`** (the raw queried name) |
+| `encrypted_malware` | **`tls.server_name`** or `tls.sni_length`/`sni_entropy`; JA3/JA3S/JA4 for the signature path |
+
+The adapter already preserves all of these the moment they appear, so nothing
+on the detection side changes when ingestion starts emitting them.
 
 ## Port scan detector
 

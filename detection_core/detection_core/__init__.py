@@ -43,6 +43,16 @@ from .detectors import (
     TlsPairKey,
 )
 from .engine import DetectionEngine, Detector
+from .pipeline import (
+    AlertDeliveryError,
+    AlertSink,
+    HttpAlertSink,
+    JsonlAlertSink,
+    MultiSink,
+    RunStats,
+    build_default_detectors,
+    run_detection,
+)
 from .schemas import (
     ALERT_SCHEMA_VERSION,
     DnsInfo,
@@ -60,6 +70,8 @@ __version__ = "0.1.0"
 
 __all__ = [
     "ALERT_SCHEMA_VERSION",
+    "AlertDeliveryError",
+    "AlertSink",
     "BeaconKey",
     "C2BeaconingConfig",
     "C2BeaconingDetector",
@@ -86,10 +98,14 @@ __all__ = [
     "FingerprintKey",
     "FlowEvent",
     "FlowSource",
+    "HttpAlertSink",
     "HttpInfo",
     "IngestionJsonlAdapter",
+    "JsonlAlertSink",
+    "MultiSink",
     "PortScanConfig",
     "PortScanDetector",
+    "RunStats",
     "ScoreType",
     "Severity",
     "ThreatAlert",
@@ -99,4 +115,6 @@ __all__ = [
     "TlsObservation",
     "TlsPairKey",
     "__version__",
+    "build_default_detectors",
+    "run_detection",
 ]
