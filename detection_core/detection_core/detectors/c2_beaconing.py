@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import math
 import statistics
+from collections import deque
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from ..aggregators import FlowObservation, WindowIndex
@@ -44,7 +46,7 @@ from .scoring import normalize_score, severity_for, severity_rank
 __all__ = ["BeaconKey", "C2BeaconingConfig", "C2BeaconingDetector"]
 
 
-def _population_stddev(values: list[float], mean: float) -> float:
+def _population_stddev(values: Sequence[float], mean: float) -> float:
     """Population standard deviation of ``values``, given their mean.
 
     The textbook two-pass formula, and it replaced ``statistics.pstdev``
@@ -172,6 +174,91 @@ class C2BeaconingConfig:
             raise ValueError("regularity_weight must be within [0.0, 1.0]")
 
 
+#: Mirrors are only pruned once they exceed twice the live windows plus this
+#: slack, so a small or steady key set never pays for a scan.
+_MIRROR_SLACK = 64
+
+
+class _IntervalState:
+    """One relationship's timestamps and the gaps between them.
+
+    A mirror of the resident timestamps in that relationship's
+    :class:`~detection_core.aggregators.ActivityWindow`, carried alongside
+    the adjacent intervals derived from them, so a new flow appends one
+    interval instead of rebuilding the whole sequence. Profiling after the
+    window optimization left this reconstruction as the last per-flow O(n)
+    cost in the detection layer.
+
+    Three sequences, kept in step:
+
+    * ``timestamps`` - what the window holds, in arrival order.
+    * ``raw`` - the gap between each adjacent pair, so ``len(raw)`` is
+      ``len(timestamps) - 1``. **Every** gap is kept, including the zero and
+      negative ones, because expiry needs to know which interval a departing
+      timestamp owned. Dropping them would lose exactly the structural
+      knowledge that keeps the two sequences aligned.
+    * ``positive`` - only the gaps greater than zero, in the same order.
+      This is the sequence the statistics are computed over, and it is
+      element-for-element what the previous implementation rebuilt on every
+      flow: duplicate timestamps (gap 0) and out-of-order arrivals (gap < 0)
+      are excluded here exactly as the old filter excluded them.
+
+    Nothing is sorted and nothing is reordered - arrival order is the
+    detector's existing semantics and this class preserves it verbatim.
+    """
+
+    __slots__ = ("timestamps", "raw", "positive")
+
+    def __init__(self) -> None:
+        self.timestamps: deque[float] = deque()
+        self.raw: deque[float] = deque()
+        self.positive: deque[float] = deque()
+
+    def rebuild(self, timestamps: list[float]) -> None:
+        """Recompute everything from the window. The resynchronization path."""
+        self.timestamps = deque(timestamps)
+        self.raw = deque()
+        self.positive = deque()
+        for earlier, later in zip(timestamps, timestamps[1:]):
+            gap = later - earlier
+            self.raw.append(gap)
+            if gap > 0:
+                self.positive.append(gap)
+
+    def append(self, timestamp: float) -> None:
+        """Add one contact, creating exactly one new adjacent interval."""
+        if self.timestamps:
+            gap = timestamp - self.timestamps[-1]
+            self.raw.append(gap)
+            if gap > 0:
+                self.positive.append(gap)
+        self.timestamps.append(timestamp)
+
+    def expire(self, cutoff: float) -> None:
+        """Drop timestamps at or before ``cutoff``, and their intervals.
+
+        Removing the oldest timestamp removes exactly the interval joining it
+        to the next one - the leftmost entry in ``raw`` - and, when that gap
+        was positive, the leftmost entry in ``positive``. The intervals
+        between the survivors are untouched, so no gap is ever recomputed
+        between two timestamps that were never adjacent.
+
+        The boundary is ``<= cutoff``, matching ``ActivityWindow.expire``
+        exactly: half-open, so a timestamp precisely ``window_seconds`` old
+        has left.
+        """
+        while self.timestamps and self.timestamps[0] <= cutoff:
+            self.timestamps.popleft()
+            if self.raw:
+                if self.raw.popleft() > 0:
+                    self.positive.popleft()
+
+    def clear(self) -> None:
+        self.timestamps.clear()
+        self.raw.clear()
+        self.positive.clear()
+
+
 @dataclass
 class _BeaconState:
     """Per-relationship bookkeeping the window itself does not hold."""
@@ -205,6 +292,7 @@ class C2BeaconingDetector(Detector):
         self.config = config or C2BeaconingConfig()
         self._windows = WindowIndex(self.config.window_seconds)
         self._state: dict[BeaconKey, _BeaconState] = {}
+        self._intervals: dict[BeaconKey, _IntervalState] = {}
         self._since_sweep = 0
 
     # --- detection ------------------------------------------------------
@@ -217,7 +305,7 @@ class C2BeaconingDetector(Detector):
         # once and then goes quiet must still have its cooldown released.
         self._sweep_cooldowns(flow.timestamp)
 
-        stats = self._interval_stats(window.timestamps())
+        stats = self._interval_stats(self._interval_state(key, window, flow.timestamp))
         if stats is None or not self._qualifies(stats):
             return []
 
@@ -244,38 +332,89 @@ class C2BeaconingDetector(Detector):
         """Drop every relationship's history, cooldown and escalation state."""
         self._windows.clear()
         self._state.clear()
+        self._intervals.clear()
         self._since_sweep = 0
 
     # --- timing ---------------------------------------------------------
 
-    def _interval_stats(self, timestamps: list[float]) -> IntervalStats | None:
+    def _interval_state(
+        self, key: BeaconKey, window, now: float
+    ) -> _IntervalState:
+        """This relationship's intervals, advanced to include ``now``.
+
+        The window remains the authority on what is resident; this only
+        mirrors it. The mirror is maintained incrementally - one append and
+        whatever expiry the new timestamp forces - and then checked against
+        the window's own count. They can legitimately diverge: ``WindowIndex``
+        sweeps empty windows out entirely, so a relationship that goes quiet
+        long enough gets a *new* window on its next flow while this state
+        still remembers the old one. A length mismatch is that case, and the
+        answer is simply to rebuild from the window.
+        """
+        state = self._intervals.get(key)
+        if state is None:
+            state = self._intervals[key] = _IntervalState()
+            state.rebuild(window.timestamps())
+            return state
+
+        state.append(now)
+        state.expire(now - self.config.window_seconds)
+        if len(state.timestamps) != window.attempts:
+            state.rebuild(window.timestamps())
+        return state
+
+    def _interval_stats(self, state: _IntervalState) -> IntervalStats | None:
         """Summarize the gaps between consecutive contacts.
 
         Only strictly positive gaps are used, so duplicate timestamps (and
         any mildly out-of-order arrival) are skipped rather than producing a
-        zero or negative interval. Returns ``None`` when there is not enough
-        left to say anything - which is also what keeps the CV division
-        safe, since a positive mean is guaranteed by construction.
+        zero or negative interval. ``state.positive`` already holds exactly
+        those gaps, in the same order the previous implementation produced by
+        filtering a freshly-built list, so ``fmean`` and
+        :func:`_population_stddev` see identical input and return identical
+        values.
+
+        Returns ``None`` when the relationship cannot qualify, which
+        includes - but is no longer limited to - having too little to say.
+        The gates below are the cheap conjuncts of :meth:`_qualifies`,
+        checked in increasing order of cost so that a window failing on
+        counts or on cadence never pays for a standard deviation it cannot
+        use. ``_qualifies`` still makes the final decision on the completed
+        stats, so the thresholds live in exactly one place; ordering the
+        checks cannot change the outcome because they are all ANDed.
         """
-        if len(timestamps) < 2:
+        config = self.config
+        observation_count = len(state.timestamps)
+        if observation_count < 2:
             return None
 
-        intervals = [
-            later - earlier
-            for earlier, later in zip(timestamps, timestamps[1:])
-            if later - earlier > 0
-        ]
-        if len(intervals) < 2:
+        intervals = state.positive
+        interval_count = len(intervals)
+        if interval_count < 2:
+            return None
+
+        # Persistence, from counts alone - no arithmetic over the window.
+        if observation_count < config.min_observations:
+            return None
+        if interval_count < config.min_observations - 1:
             return None
 
         mean = statistics.fmean(intervals)
         if mean <= 0:  # unreachable given the filter above, but never divide blind
             return None
+        # Cadence, before the spread: a relationship beaconing every 20ms or
+        # every hour is out regardless of how regular it is.
+        if not (
+            config.min_mean_interval_seconds
+            <= mean
+            <= config.max_mean_interval_seconds
+        ):
+            return None
 
         stddev = _population_stddev(intervals, mean)
         return IntervalStats(
-            observation_count=len(timestamps),
-            interval_count=len(intervals),
+            observation_count=observation_count,
+            interval_count=interval_count,
             mean_interval=mean,
             stddev_interval=stddev,
             coefficient_of_variation=stddev / mean,
@@ -391,6 +530,21 @@ class C2BeaconingDetector(Detector):
                 and (now - state.last_alert_at) >= self.config.cooldown_seconds
             ):
                 del self._state[key]
+        # Interval mirrors follow their windows: once ``WindowIndex`` has
+        # swept a relationship's window away there is nothing left to mirror,
+        # and holding the timestamps would be a slow leak on a long capture.
+        #
+        # Only when the mirrors have actually outgrown the windows, though.
+        # Walking every mirror on every sweep is O(keys) work charged to a
+        # capture with many relationships - measurably so at 50k flows - and
+        # it buys nothing while the two dicts are the same size. Each pass
+        # that does run removes at least half the entries, so the pruning
+        # cost stays amortized O(1) per key while memory stays bounded at
+        # roughly twice the live window count.
+        if len(self._intervals) > 2 * len(self._windows) + _MIRROR_SLACK:
+            for key in list(self._intervals):
+                if key not in self._windows:
+                    del self._intervals[key]
 
     # --- alert ----------------------------------------------------------
 
