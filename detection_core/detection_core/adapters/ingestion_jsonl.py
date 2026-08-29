@@ -240,6 +240,52 @@ def record_to_flow_event(record: Mapping[str, Any]) -> FlowEvent:
     )
 
 
+#: How many field errors one skipped record may report before the rest are
+#: summarized. A malformed record can fail every field at once, and a log
+#: line long enough to wrap is a log line nobody reads.
+_MAX_REPORTED_ERRORS = 5
+
+
+def describe_record_error(exc: Exception) -> str:
+    """A one-line, field-first explanation of why a record was rejected.
+
+    ``str(ValidationError)`` is written for a traceback, not a log stream:
+    it spans several lines per record and spends one of them per error on a
+    ``https://errors.pydantic.dev/...`` link, which pushes the part an
+    analyst actually needs - the field and the reason - into the middle of a
+    block. Every other line the adapter emits is one record, one line, so a
+    skipped record should read the same way::
+
+        src_ip: Value error, must be a non-empty string; dst_port: Input
+        should be less than or equal to 65535
+
+    Anything that is not a Pydantic ``ValidationError`` is returned as-is:
+    the adapter's own ``ValueError``/``TypeError`` messages are already
+    single-line and specific, and rewording them here would only obscure
+    them. Nothing about which records are rejected changes - this formats an
+    exception that has already been raised.
+    """
+    reporter = getattr(exc, "errors", None)
+    if reporter is None:
+        return str(exc)
+    try:
+        details = list(reporter())
+    except Exception:  # pragma: no cover - not a pydantic-shaped errors()
+        return str(exc)
+    if not details:  # pragma: no cover - a ValidationError always has one
+        return str(exc)
+
+    parts = []
+    for error in details[:_MAX_REPORTED_ERRORS]:
+        location = ".".join(str(item) for item in error.get("loc", ())) or "<record>"
+        parts.append(f"{location}: {error.get('msg', 'invalid value')}")
+    summary = "; ".join(parts)
+    remaining = len(details) - len(parts)
+    if remaining > 0:
+        summary += f"; (+{remaining} more field error(s))"
+    return summary
+
+
 class IngestionJsonlAdapter:
     """Streams ingestion's ``features.jsonl`` as ``FlowEvent`` objects.
 
@@ -320,9 +366,13 @@ class IngestionJsonlAdapter:
             except Exception as exc:  # ValidationError, ValueError, TypeError
                 self.stats.validation_errors += 1
                 self.log.warning(
-                    "line %d: could not build FlowEvent, skipping (%s)", line_no, exc
+                    "line %d: could not build FlowEvent, skipping (%s)",
+                    line_no,
+                    describe_record_error(exc),
                 )
                 if self.strict:
+                    # Re-raised unchanged: a caller catching this still gets
+                    # the original exception, not the formatted summary.
                     raise
                 continue
 
