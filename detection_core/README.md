@@ -7,7 +7,7 @@ ingestion output (features.jsonl)
     -> adapter
     -> normalized FlowEvent
     -> DetectionEngine
-    -> statistical detectors / ML models      <- not implemented yet
+    -> statistical detectors / ML models
     -> standardized ThreatAlert v1.1
 ```
 
@@ -18,12 +18,16 @@ file format, and that knowledge is confined to `detection_core/adapters/`.
 
 ## Status
 
-Schemas, adapter, engine and tests are complete. Six rule detectors ship:
-**`PortScanDetector`**, **`DDoSDetector`**, **`C2BeaconingDetector`**,
-**`DnsTunnellingDetector`**, **`DataExfiltrationDetector`**,
-**`EncryptedMalwareDetector`** and **`DGADetector`**. Every threat class in
-the v1.1 enum now has a detector. No model binary ships — `DGADetector` is
-given one at construction.
+Schemas, adapter, engine and tests are complete. Seven detectors ship: the
+six rule/heuristic ones — **`PortScanDetector`**, **`DDoSDetector`**,
+**`C2BeaconingDetector`**, **`DnsTunnellingDetector`**,
+**`DataExfiltrationDetector`**, **`EncryptedMalwareDetector`** — plus the ML
+**`DGADetector`**. Every threat class in the v1.1 enum has a detector.
+
+DGA is opt-in for two reasons: **no trained model binary ships here**, and its
+ML dependencies are an optional extra. So `build_default_detectors()` returns
+the six rule detectors, and `--dga-model` / `dga_model_path=` adds the
+seventh. With a valid model artifact all seven threat classes can be active.
 
 ## Layout
 
@@ -126,9 +130,29 @@ produced.
 `--api-url` POSTs one ThreatAlert per request as `application/json`, using
 only the standard library. It is an *additional* destination — the JSONL
 output still happens — so a run that feeds the backend also leaves a local
-record of exactly what was sent. A POST that fails raises a clear delivery
-error and stops the run; nothing is retried and no alert is ever reported as
-delivered when it was not.
+record of exactly what was sent. A POST that fails is logged as an error and
+counted in `RunStats.delivery_failures`, and the run **continues** — a backend
+being down must not turn into a detection outage. Nothing is queued or
+retried, and no alert is ever reported as delivered when it was not, so the
+local JSONL is the record of anything the backend missed.
+
+### Startup safety and exit codes
+
+* **`--output` cannot destroy an input.** A path that resolves to the same
+  file as the input JSONL, or as the supplied `--dga-model`, is rejected
+  *before* the output is opened — opening it truncates it. Relative and
+  absolute aliases resolve to the same target, so `data/../data/x.jsonl` is
+  caught too.
+* **The six rule detectors need no ML dependency.** `--dga-model` needs the
+  `ml` extra (`numpy`, `scikit-learn`, `joblib`); when it is absent the run
+  fails at startup with a message naming the extra, rather than an
+  `ImportError` traceback or a silently dropped detector.
+
+| exit | meaning |
+|---|---|
+| `0` | ran to completion, nothing failed |
+| `1` | startup or fatal error — missing input, unsafe `--output`, missing ML extra, invalid `--dga-model`, unopenable output, I/O failure mid-run |
+| `2` | the whole capture was processed, but one or more alerts failed delivery to `--api-url`; the local output is complete |
 
 ### Which detectors run
 
@@ -147,18 +171,25 @@ different matter and fails loudly at startup — you asked for DGA explicitly.
 
 ### What ingestion still needs to supply
 
-Four detectors work on today's feed. Three are built, tested and dormant,
-waiting on raw fields the current ingestion build does not emit yet:
+All seven detectors are built and tested. Five work on today's feed; two wait
+on raw strings the current ingestion build does not emit yet:
 
 | detector | needs |
 |---|---|
 | `port_scan`, `ddos`, `c2_beaconing`, `data_exfiltration` | — works today |
-| `dns_tunnelling` | works today on derived DNS features |
-| `dga_domain` | **`dns.query`** (the raw queried name) |
-| `encrypted_malware` | **`tls.server_name`** or `tls.sni_length`/`sni_entropy`; JA3/JA3S/JA4 for the signature path |
+| `dns_tunnelling` | works today on derived DNS features; a raw `dns.query` is **not** required to qualify |
+| `dga_domain` | **`dns.query`** (the raw queried name) — nothing derived can stand in |
+| `encrypted_malware` | **`tls.server_name`** (or `tls.sni_length` / `sni_entropy`) for the metadata path; `tls.ja3` / `ja3s` / `ja4` for the signature path |
 
-The adapter already preserves all of these the moment they appear, so nothing
-on the detection side changes when ingestion starts emitting them.
+**The remaining integration work is ingestion's, not detection's.** The
+adapter already accepts and preserves every one of these fields the moment a
+record carries them, and leaves them `None` when it does not — no schema,
+adapter or detector change is pending on this side.
+
+Also useful when ingestion can emit them: `dns.qtype`, `dns.rcode`,
+`tls.version`, top-level `uid`, `src_port`, `service`, the raw `conn_state`
+string and a numeric `timestamp`. Encoded placeholder values are not
+substitutes for the raw strings. See "Integration TODOs" in `SCHEMA.md`.
 
 ## Port scan detector
 
@@ -486,13 +517,20 @@ detector = DnsTunnellingDetector(DnsTunnellingConfig(
 > DNS *and* real tunnelling traffic (iodine, dnscat2, dns2tcp) before trusting
 > them.
 
-**Working from derived features only.** Ingestion does not emit `dns.query`,
-`dns.qtype` or `dns.rcode`, so this detector reads exactly the five features
-that *are* normalized — `query_length`, `query_entropy`, `subdomain_entropy`,
-`label_count`, `is_txt`. Nothing reconstructs a query string, and every alert
-carries `raw_query_available: false` to make that explicit. It follows that
-this cannot confirm data actually left, identify the tunnel domain or tool, or
-tell one repeated name from fifty distinct ones.
+**Working from derived features only.** Qualification reads exactly the five
+normalized features — `query_length`, `query_entropy`, `subdomain_entropy`,
+`label_count`, `is_txt` — and a raw `dns.query` is **not required** for this
+detector to work. Today's ingestion build emits no `dns.query` / `qtype` /
+`rcode`, and nothing here reconstructs a query string.
+
+The evidence key `raw_query_available` reports truthfully whether any query in
+the *contributing rolling window* carried a real name, with
+`raw_query_observation_count` giving how many. It reads `false` on today's
+feed and `true` the day ingestion starts emitting names — the verdict is
+identical either way, because the raw name is evidence for the analyst, not an
+input to the rule. It follows that this cannot confirm data actually left,
+identify the tunnel domain or tool, or tell one repeated name from fifty
+distinct ones.
 
 ## Encrypted malware detector
 
@@ -617,15 +655,16 @@ The tell is that generated names look nothing like names humans register:
 
 **Pipeline.** `raw domain → lexical features → Random Forest → dga_score`
 
-> ### ⚠ Live integration is NOT complete
-> `injestion_core`'s `features.jsonl` does **not** expose the raw
-> `dns.query` string. It carries only derived values — `query_entropy`,
-> `query_length`, `subdomain_entropy`, `is_txt`, `label_count`. A classifier
-> needs the actual domain text, and reconstructing it from an entropy number
-> is impossible, so **there is no live `DGADetector` wired to the engine.**
-> This milestone is offline training infrastructure only. When ingestion
-> supplies `dns.query`, only an adapter change and a thin detector are
-> needed — the model and features are ready.
+> ### ⚠ Waiting on a raw query name from ingestion
+> The live `DGADetector` **is** implemented and wired into the factory — see
+> "Phase 2 — the live detector" below. What is missing is upstream:
+> `injestion_core`'s `features.jsonl` does not expose the raw `dns.query`
+> string yet, only derived values — `query_entropy`, `query_length`,
+> `subdomain_entropy`, `is_txt`, `label_count`. A classifier needs the actual
+> domain text and reconstructing it from an entropy number is impossible, so
+> against today's feed the detector is correctly silent. The adapter already
+> preserves `dns.query` whenever it appears; nothing further is needed on the
+> detection side.
 
 ### Features, in plain terms
 
@@ -699,9 +738,9 @@ model.feature_importances()                        # for the demo/explanation
 ### Limitations — read before quoting any number
 
 * **`dga_score` is not a calibrated probability.** It is a Random Forest vote
-  fraction in `[0, 1]`. That is why it is not called a probability and why no
-  `ThreatAlert.score_type` is assigned yet — `calibrated_model` would be a
-  false claim until calibration is actually done.
+  fraction in `[0, 1]`. That is why it is not called a probability, and why
+  the live detector publishes `score_type: rule_score` — `calibrated_model`
+  would be a false claim until calibration is actually done.
 * **Metrics from a small or synthetic dataset prove the plumbing works, not
   that the model is good.** The test fixture exists to exercise code paths.
   Real performance depends entirely on representative benign *and* DGA
@@ -739,6 +778,11 @@ detector = DGADetector(model=fitted_model)              # or
 detector = DGADetector(model_path="artifacts/dga.joblib",
                        config=DGAConfig(score_threshold=0.75))
 ```
+
+> **Trust the artifact.** A bundle is loaded with `joblib`, a pickle-style
+> format that can execute code on load. Load only model files you produced
+> yourself or otherwise trust — never one from an untrusted source, and never
+> one fetched at runtime from somewhere unverified.
 
 One of `model=` / `model_path=` is required. There is deliberately **no
 fallback to an untrained or stub model**: a detector that silently scores
@@ -839,5 +883,10 @@ first. Pass `reset_first=False` to deliberately accumulate across calls.
   See "Integration TODOs" in `SCHEMA.md`.
 * **Frozen models.** The engine hands one `FlowEvent` to every detector, so
   immutability prevents cross-detector contamination.
+* **Event time, approximately in order.** Every rolling window, cooldown and
+  expiry is driven by `FlowEvent.timestamp`, never wall clock, so a PCAP
+  replay behaves exactly like a live stream. Records are expected to arrive in
+  approximately non-decreasing event-time order. There is **no reorder
+  buffer**: a badly out-of-order record is simply measured where it lands.
 * **Ingestion's global window features are deliberately ignored** — that
   upstream logic is still being corrected. See `SCHEMA.md`.

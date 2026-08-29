@@ -976,3 +976,30 @@ def test_default_config_is_valid():
     # A single transfer gets no corroboration from repetition, so its bar
     # must sit above the sustained one.
     assert config.min_single_flow_orig_bytes > config.min_total_orig_bytes
+
+
+# --------------------------------------------------------------------------
+# Alert-state ordering: state is written only after the alert exists
+# --------------------------------------------------------------------------
+
+
+def test_a_failed_alert_records_no_cooldown(detector, monkeypatch):
+    """A ThreatAlert that never got built must not start a cooldown."""
+    key = ExfilKey(SRC, DST)
+
+    def explode(*args, **kwargs):
+        raise ValueError("simulated ThreatAlert validation failure")
+
+    monkeypatch.setattr(detector, "_build_alert", explode)
+    with pytest.raises(ValueError, match="simulated"):
+        feed(detector, upload_burst(12, 5 * MIB))
+
+    assert key not in detector._state, "cooldown recorded for an unemitted alert"
+
+    # The next qualifying transfer still reports, and cools down normally.
+    monkeypatch.undo()
+    alerts = feed(detector, upload_burst(1, 5 * MIB, start=1012.0))
+
+    assert alerts, "a failed alert silenced the pair for a full cooldown"
+    assert detector._state[key].last_alert_at == 1012.0
+    assert detector._state[key].last_severity is alerts[0].severity

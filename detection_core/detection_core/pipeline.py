@@ -202,17 +202,34 @@ class HttpAlertSink:
 class MultiSink:
     """Fan one alert out to several sinks, in order.
 
-    Used when alerts are both written locally and posted to the backend. A
-    sink that raises stops the fan-out: partial delivery is reported rather
-    than hidden.
+    Used when alerts are both written locally and posted to the backend.
+
+    A *delivery* failure in one sink must not cost the others their copy of
+    the alert: the backend being down is no reason for the local JSONL
+    record to lose a line, and the fan-out order should not decide which
+    sinks get served. So :class:`AlertDeliveryError` is held back until
+    every sink has been offered the alert, then re-raised - the failure is
+    reported, never hidden.
+
+    Any other exception (a local file-write failing, say) still stops the
+    fan-out immediately, exactly as before. That is not a delivery problem
+    and absorbing it would hide a broken output.
     """
 
     def __init__(self, sinks: Iterable[AlertSink]) -> None:
         self.sinks = list(sinks)
 
     def emit(self, alert: ThreatAlert) -> None:
+        failures: list[AlertDeliveryError] = []
         for sink in self.sinks:
-            sink.emit(alert)
+            try:
+                sink.emit(alert)
+            except AlertDeliveryError as exc:
+                failures.append(exc)
+        if failures:
+            # The first failure carries the backend's own words. Raised only
+            # once the remaining sinks have their copy.
+            raise failures[0]
 
     def close(self) -> None:
         for sink in self.sinks:
@@ -240,6 +257,10 @@ class RunStats:
     flows: int = 0
     alerts: int = 0
     detector_errors: int = 0
+    #: Alerts at least one sink could not deliver. With the CLI's single
+    #: HTTP sink this is exactly the number of alerts the backend never
+    #: received - they were produced, and any local sink still has them.
+    delivery_failures: int = 0
 
 
 def run_detection(
@@ -258,20 +279,42 @@ def run_detection(
     Detector exceptions stay contained by ``DetectionEngine`` exactly as they
     do everywhere else - one misbehaving detector must not end the run - and
     are counted in the returned stats.
+
+    :class:`AlertDeliveryError` is contained the same way, and for the same
+    reason: a sensor that stops detecting because a dashboard is down has
+    turned a delivery problem into a detection outage, and every flow after
+    the first bad POST would go unexamined. The alert is never treated as
+    delivered - each failure is logged as an error and counted in
+    ``delivery_failures`` - so a degraded run is loud rather than silent.
+    Nothing is queued or retried here; the run simply continues.
+
+    Other sink exceptions are deliberately NOT caught. A local JSONL write
+    failing is a broken output, not a network hiccup, and must still stop
+    the run.
     """
     log = log or logger
     engine = DetectionEngine(detectors)
     stats = RunStats()
 
     for alert in engine.run(_counting(source, stats)):
-        sink.emit(alert)
         stats.alerts += 1
+        try:
+            sink.emit(alert)
+        except AlertDeliveryError as exc:
+            stats.delivery_failures += 1
+            log.error("alert delivery failed, continuing: %s", exc)
 
     stats.detector_errors = engine.stats.detector_errors
     if stats.detector_errors:
         log.warning(
             "%d detector error(s) during the run; see the log above",
             stats.detector_errors,
+        )
+    if stats.delivery_failures:
+        log.error(
+            "%d of %d alert(s) were not delivered; the backend is missing them",
+            stats.delivery_failures,
+            stats.alerts,
         )
     return stats
 

@@ -236,21 +236,23 @@ class DataExfiltrationDetector(Detector):
         if not self._should_emit(key, flow.timestamp, severity):
             return []
 
+        alert = self._build_alert(
+            key=key,
+            pair_window=pair_window,
+            stats=stats,
+            sustained=sustained,
+            single=single,
+            score=score,
+            severity=severity,
+        )
+
+        # Only once the alert exists. If building or validating it raises,
+        # nothing was emitted, so nothing may enter the cooldown - otherwise
+        # the failure would also silence the next several real transfers.
         state = self._state.setdefault(key, _PairState())
         state.last_alert_at = flow.timestamp
         state.last_severity = severity
-
-        return [
-            self._build_alert(
-                key=key,
-                pair_window=pair_window,
-                stats=stats,
-                sustained=sustained,
-                single=single,
-                score=score,
-                severity=severity,
-            )
-        ]
+        return [alert]
 
     def flush(self) -> list[ThreatAlert]:
         """Nothing is ever held back - ``process()`` already alerted."""

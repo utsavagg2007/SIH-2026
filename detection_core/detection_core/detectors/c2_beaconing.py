@@ -175,6 +175,7 @@ class C2BeaconingDetector(Detector):
         self.config = config or C2BeaconingConfig()
         self._windows = WindowIndex(self.config.window_seconds)
         self._state: dict[BeaconKey, _BeaconState] = {}
+        self._since_sweep = 0
 
     # --- detection ------------------------------------------------------
 
@@ -182,6 +183,9 @@ class C2BeaconingDetector(Detector):
         """Update this relationship's history and alert if it looks timed."""
         key = BeaconKey.from_flow(flow)
         window = self._windows.observe(key, FlowObservation.from_flow(flow))
+        # On every flow, not only when alerting: a relationship that alerts
+        # once and then goes quiet must still have its cooldown released.
+        self._sweep_cooldowns(flow.timestamp)
 
         stats = self._interval_stats(window.timestamps())
         if stats is None or not self._qualifies(stats):
@@ -192,11 +196,15 @@ class C2BeaconingDetector(Detector):
         if not self._should_emit(key, flow.timestamp, severity):
             return []
 
+        alert = self._build_alert(key, window, stats, score, severity)
+
+        # Only once the alert exists. If building or validating it raises,
+        # nothing was emitted, so nothing may enter the cooldown - otherwise
+        # the failure would also silence the next several real beacons.
         state = self._state.setdefault(key, _BeaconState())
         state.last_alert_at = flow.timestamp
         state.last_severity = severity
-
-        return [self._build_alert(key, window, stats, score, severity)]
+        return [alert]
 
     def flush(self) -> list[ThreatAlert]:
         """Nothing is ever held back - ``process()`` already alerted."""
@@ -206,6 +214,7 @@ class C2BeaconingDetector(Detector):
         """Drop every relationship's history, cooldown and escalation state."""
         self._windows.clear()
         self._state.clear()
+        self._since_sweep = 0
 
     # --- timing ---------------------------------------------------------
 
@@ -327,6 +336,31 @@ class C2BeaconingDetector(Detector):
         if state.last_severity is None:
             return True
         return severity_rank(severity) > severity_rank(state.last_severity)
+
+    def _sweep_cooldowns(self, now: float, every: int = 500) -> None:
+        """Release cooldowns that can no longer suppress anything.
+
+        A relationship's cooldown can outlive its own history: a beacon that
+        stops leaves an entry no window expiry would ever clear, and a key
+        here is a full ``(src, dst, port, proto)`` tuple - the widest key
+        space of the three rolling detectors. Entries are therefore dropped
+        on elapsed cooldown, never on an empty window, which still bounds the
+        dict since only relationships that actually alerted ever get an entry.
+        (``WindowIndex`` sweeps the far larger window dict itself.)
+
+        Event time only, from ``FlowEvent.timestamp``: a PCAP replay must
+        expire state exactly as the live stream did.
+        """
+        self._since_sweep += 1
+        if self._since_sweep < every:
+            return
+        self._since_sweep = 0
+        for key, state in list(self._state.items()):
+            if (
+                state.last_alert_at is not None
+                and (now - state.last_alert_at) >= self.config.cooldown_seconds
+            ):
+                del self._state[key]
 
     # --- alert ----------------------------------------------------------
 

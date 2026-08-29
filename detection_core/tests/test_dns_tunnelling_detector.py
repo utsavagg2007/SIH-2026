@@ -6,8 +6,10 @@ and escalation, reset, and coexistence with the other three detectors.
 
 Every DNS field used here is one the CURRENT adapter actually produces -
 ``query_length``, ``query_entropy``, ``subdomain_entropy``, ``label_count``,
-``is_txt``. Nothing below sets ``dns.query`` / ``qtype`` / ``rcode``, which
-ingestion does not emit.
+``is_txt``. ``dns.query`` is set only by the raw-query tests at the end, which
+exist precisely to prove a FUTURE feed emitting it is reported honestly; no
+other test sets ``query`` / ``qtype`` / ``rcode``, which ingestion does not
+emit today.
 """
 
 from __future__ import annotations
@@ -56,9 +58,14 @@ def dns_flow(
     is_txt: bool | None = False,
     dst_port: int | None = 53,
     proto: str = "udp",
+    query: str | None = None,
     **overrides,
 ):
-    """A DNS flow carrying only the derived features ingestion supplies."""
+    """A DNS flow carrying the derived features ingestion supplies.
+
+    ``query`` stays ``None`` unless a test is deliberately modelling a
+    future feed that emits raw query names.
+    """
     return make_flow(
         timestamp=timestamp,
         src_ip=src,
@@ -67,6 +74,7 @@ def dns_flow(
         proto=proto,
         dns=DnsInfo(
             uid=f"Cdns{timestamp}",
+            query=query,
             query_length=query_length,
             query_entropy=query_entropy,
             subdomain_entropy=subdomain_entropy,
@@ -454,8 +462,8 @@ def test_alert_time_span_covers_the_measured_window(detector):
     assert alert.event_start <= alert.event_end
 
 
-def test_port_and_protocol_come_from_the_triggering_flow(detector):
-    """Populated only from what the flow really carried - never invented."""
+def test_a_unanimous_window_reports_its_port_and_protocol(detector):
+    """Every contributing query used :53/udp, so the aggregate may say so."""
     alert = feed(detector, [tunnel_dns(1000.0 + i) for i in range(20)])[0]
     assert alert.dst_port == 53
     assert alert.protocol == "udp"
@@ -942,3 +950,190 @@ def test_sweep_releases_an_expired_cooldown():
                     for i in range(1200)])
 
     assert DnsTunnelKey(SRC, RESOLVER) not in detector._state
+
+
+# --------------------------------------------------------------------------
+# Alert-state ordering: state is written only after the alert exists
+# --------------------------------------------------------------------------
+
+
+def test_a_failed_alert_records_no_cooldown(escalation_config, monkeypatch):
+    """A ThreatAlert that never got built must not start a cooldown.
+
+    With the state write ahead of ``_build_alert``, a validation error left
+    the pair muted for a full cooldown despite nothing being emitted - the
+    detector going silent precisely when it had found something.
+    """
+    detector = DnsTunnellingDetector(escalation_config)
+    key = DnsTunnelKey(SRC, RESOLVER)
+
+    def explode(*args, **kwargs):
+        raise ValueError("simulated ThreatAlert validation failure")
+
+    monkeypatch.setattr(detector, "_build_alert", explode)
+    with pytest.raises(ValueError, match="simulated"):
+        feed(detector, [tunnel_dns(1000.0 + i) for i in range(10)])
+
+    assert key not in detector._state, "cooldown recorded for an unemitted alert"
+
+    # The next qualifying query still reports, and cools down normally.
+    monkeypatch.undo()
+    alerts = feed(detector, [tunnel_dns(1010.0)])
+
+    assert alerts, "a failed alert silenced the pair for a full cooldown"
+    assert detector._state[key].last_alert_at == 1010.0
+    assert detector._state[key].last_severity is alerts[0].severity
+
+
+# --------------------------------------------------------------------------
+# Aggregate port / protocol - the alert describes the window, not one flow
+# --------------------------------------------------------------------------
+
+
+def test_mixed_destination_ports_report_no_port(detector):
+    """A pair split across two resolvers' ports may not claim either.
+
+    The alert is HOST_PAIR scoped over the whole window, so naming the port
+    of whichever flow happened to cross the threshold would be a coin toss
+    presented as a fact.
+    """
+    flows = [
+        tunnel_dns(1000.0 + i, dst_port=53 if i % 2 else 5353) for i in range(20)
+    ]
+    alert = feed(detector, flows)[0]
+
+    assert alert.dst_port is None
+    # Protocol was unanimous, so it survives independently.
+    assert alert.protocol == "udp"
+
+
+def test_mixed_protocols_report_no_protocol(detector):
+    """DNS over both udp and tcp in one window: neither is the answer."""
+    flows = [
+        tunnel_dns(1000.0 + i, proto="udp" if i % 2 else "tcp") for i in range(20)
+    ]
+    alert = feed(detector, flows)[0]
+
+    assert alert.protocol is None
+    # Port was unanimous, so it survives independently.
+    assert alert.dst_port == 53
+
+
+def test_an_unknown_port_does_not_make_a_known_one_ambiguous(detector):
+    """A missing port is not a port, so it cannot disagree with one.
+
+    The project's convention throughout - ``ActivityWindow.dst_ports`` skips
+    ``None`` for the other detectors - is that unsupplied means "not
+    measured", never a distinct value. So a window whose known ports all say
+    53 reports 53, even though one record arrived without one.
+    """
+    flows = [
+        tunnel_dns(1000.0 + i, dst_port=None if i == 0 else 53) for i in range(20)
+    ]
+    alert = feed(detector, flows)[0]
+
+    assert alert.dst_port == 53
+
+
+def test_an_expired_port_no_longer_makes_the_window_ambiguous(detector, config):
+    """Only the live window decides ambiguity."""
+    feed(detector, [tunnel_dns(1000.0 + i, dst_port=5353) for i in range(20)])
+
+    # A second, wholly separate window: the :5353 burst has expired out.
+    later = 1000.0 + config.window_seconds + 100.0
+    alerts = feed(detector, [tunnel_dns(later + i) for i in range(20)])
+
+    assert alerts, "the second window must qualify on its own"
+    assert alerts[0].dst_port == 53
+    assert alerts[0].evidence["observation_count"] == 20
+
+
+# --------------------------------------------------------------------------
+# raw_query_available describes the contributing window
+# --------------------------------------------------------------------------
+
+
+def test_raw_query_availability_follows_the_window(detector):
+    """False without raw names, true with them - and it changes no verdict."""
+    plain = feed(detector, [tunnel_dns(1000.0 + i) for i in range(20)])[0]
+    assert plain.evidence["raw_query_available"] is False
+    assert plain.evidence["raw_query_observation_count"] == 0
+
+    detector.reset()
+    with_names = feed(
+        detector,
+        [
+            tunnel_dns(2000.0 + i, query=f"{'q7x2m9' * 7}{i}.example.com")
+            for i in range(20)
+        ],
+    )[0]
+
+    assert with_names.evidence["raw_query_available"] is True
+    assert with_names.evidence["raw_query_observation_count"] == 20
+    # The raw name is evidence for the analyst, NOT an input to the rule:
+    # identical derived features must still produce an identical verdict.
+    assert with_names.score == plain.score
+    assert with_names.severity is plain.severity
+    assert with_names.evidence["suspicious_ratio"] == plain.evidence["suspicious_ratio"]
+
+
+def test_a_blank_raw_query_does_not_count_as_available(detector):
+    """Whitespace is not a query name."""
+    alert = feed(detector, [tunnel_dns(1000.0 + i, query="   ") for i in range(20)])[0]
+
+    assert alert.evidence["raw_query_available"] is False
+    assert alert.evidence["raw_query_observation_count"] == 0
+
+
+def test_an_expired_raw_query_no_longer_counts_as_available(detector, config):
+    """A name that has rolled out of the window cannot back a later alert."""
+    feed(
+        detector,
+        [tunnel_dns(1000.0 + i, query=f"payload{i}.tunnel.example") for i in range(20)],
+    )
+
+    later = 1000.0 + config.window_seconds + 100.0
+    alerts = feed(detector, [tunnel_dns(later + i) for i in range(20)])
+
+    assert alerts, "the second window must qualify on its own"
+    assert alerts[0].evidence["raw_query_available"] is False
+    assert alerts[0].evidence["raw_query_observation_count"] == 0
+
+
+def test_partial_raw_query_coverage_is_counted_honestly(detector):
+    """Some records carrying a name is still "available", and says how many."""
+    flows = [
+        tunnel_dns(1000.0 + i, query=f"payload{i}.tunnel.example" if i < 5 else None)
+        for i in range(20)
+    ]
+    alert = feed(detector, flows)[0]
+
+    assert alert.evidence["raw_query_available"] is True
+    assert alert.evidence["raw_query_observation_count"] == 5
+
+
+# --------------------------------------------------------------------------
+# Today's ingestion-style records are completely unaffected
+# --------------------------------------------------------------------------
+
+
+def test_current_ingestion_records_keep_their_exact_verdict(detector):
+    """The known-positive fixture: same threshold, same score, same severity.
+
+    These records carry only the derived features today's ingestion emits -
+    no ``dns.query`` anywhere - and must behave exactly as they did before
+    port/protocol and raw-query evidence became window-derived.
+    """
+    assert feed(detector, [tunnel_dns(1000.0 + i) for i in range(19)]) == []
+
+    alerts = feed(detector, [tunnel_dns(1019.0)])
+    assert len(alerts) == 1
+
+    alert = alerts[0]
+    assert alert.evidence["observation_count"] == 20
+    assert alert.evidence["suspicious_ratio"] == 1.0
+    assert alert.score == 0.75
+    assert alert.severity is Severity.HIGH
+    assert alert.dst_port == 53
+    assert alert.protocol == "udp"
+    assert alert.evidence["raw_query_available"] is False

@@ -119,12 +119,16 @@ class DDoSDetector(Detector):
         self.config = config or DDoSConfig()
         self._windows = WindowIndex(self.config.window_seconds)
         self._state: dict[str, _DestinationState] = {}
+        self._since_sweep = 0
 
     # --- detection ------------------------------------------------------
 
     def process(self, flow: FlowEvent) -> list[ThreatAlert]:
         """Update this destination's window and alert immediately if flooded."""
         window = self._windows.observe(flow.dst_ip, FlowObservation.from_flow(flow))
+        # On every flow, not only when alerting: a destination that alerts
+        # once and then goes quiet must still have its cooldown released.
+        self._sweep_cooldowns(flow.timestamp)
 
         sources = window.src_ips()
         flows = window.attempts
@@ -140,21 +144,23 @@ class DDoSDetector(Detector):
         if not self._should_emit(flow.dst_ip, flow.timestamp, severity):
             return []
 
+        alert = self._build_alert(
+            flow=flow,
+            window=window,
+            sources=sources,
+            flows=flows,
+            packets=packets,
+            score=score,
+            severity=severity,
+        )
+
+        # Only once the alert exists. If building or validating it raises,
+        # nothing was emitted, so nothing may enter the cooldown - otherwise
+        # the failure would also silence the next several real floods.
         state = self._state.setdefault(flow.dst_ip, _DestinationState())
         state.last_alert_at = flow.timestamp
         state.last_severity = severity
-
-        return [
-            self._build_alert(
-                flow=flow,
-                window=window,
-                sources=sources,
-                flows=flows,
-                packets=packets,
-                score=score,
-                severity=severity,
-            )
-        ]
+        return [alert]
 
     def flush(self) -> list[ThreatAlert]:
         """Nothing is ever held back - ``process()`` already alerted."""
@@ -164,6 +170,7 @@ class DDoSDetector(Detector):
         """Drop every destination's window, cooldown and escalation state."""
         self._windows.clear()
         self._state.clear()
+        self._since_sweep = 0
 
     # --- internals ------------------------------------------------------
 
@@ -184,6 +191,31 @@ class DDoSDetector(Detector):
         if state.last_severity is None:
             return True
         return severity_rank(severity) > severity_rank(state.last_severity)
+
+    def _sweep_cooldowns(self, now: float, every: int = 500) -> None:
+        """Release cooldowns that can no longer suppress anything.
+
+        A destination's cooldown deliberately outlives its traffic window -
+        it is six times longer by default - so a victim could otherwise fall
+        quiet, be hit again, and immediately re-alert inside the cooldown it
+        was still serving. Entries are therefore dropped on elapsed cooldown,
+        never on an empty window. That still bounds the dict, since only
+        destinations that actually alerted ever get an entry.
+        (``WindowIndex`` sweeps the far larger window dict itself.)
+
+        Event time only, from ``FlowEvent.timestamp``: a PCAP replay must
+        expire state exactly as the live stream did.
+        """
+        self._since_sweep += 1
+        if self._since_sweep < every:
+            return
+        self._since_sweep = 0
+        for key, state in list(self._state.items()):
+            if (
+                state.last_alert_at is not None
+                and (now - state.last_alert_at) >= self.config.cooldown_seconds
+            ):
+                del self._state[key]
 
     def _rule_score(self, sources: int, flows: int, packets: int) -> float:
         """Deterministic 0.0-1.0 rule score. Not a calibrated probability.

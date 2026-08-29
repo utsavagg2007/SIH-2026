@@ -14,19 +14,25 @@ Alerts always go to a JSONL stream - stdout by default, a file with
 ``--output``. ``--api-url`` adds the backend as a *second* destination rather
 than replacing the first, so a run that posts alerts still leaves a local
 record of what was sent.
+
+``--output`` is never allowed to name one of the run's own inputs: opening it
+truncates it, so ``--output`` pointed at the input JSONL or at ``--dga-model``
+would destroy the file before it is read. That is checked at startup, before
+anything is opened.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import logging
+import os
 import sys
 from pathlib import Path
 
 from .adapters import IngestionJsonlAdapter
 from .pipeline import (
     DEFAULT_API_TIMEOUT,
-    AlertDeliveryError,
     AlertSink,
     HttpAlertSink,
     JsonlAlertSink,
@@ -41,6 +47,22 @@ logger = logging.getLogger("detection_core.runner")
 
 EXIT_OK = 0
 EXIT_ERROR = 1
+#: The capture was processed end to end, but some alerts never reached the
+#: ``--api-url`` backend. Distinct from EXIT_ERROR so a caller can tell "the
+#: run did not happen" from "the run happened and the backend missed some".
+EXIT_DELIVERY_DEGRADED = 2
+
+#: Modules the DGA detector needs, all supplied by the ``ml`` extra. Checked
+#: by name rather than imported, so the six rule detectors keep running on a
+#: core-only install and this module stays cheap to import.
+ML_DEPENDENCIES = ("numpy", "sklearn", "joblib")
+
+#: Said the same way wherever a missing ML extra surfaces.
+ML_EXTRA_HINT = (
+    "DGA requires this project's optional ML dependencies "
+    "(numpy, scikit-learn, joblib), which are not part of the core install. "
+    'Install them with: pip install -e ".[ml]"'
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -117,9 +139,31 @@ def _run(args: argparse.Namespace) -> int:
         logger.error("input file not found: %s", args.input)
         return EXIT_ERROR
 
-    # --- startup: anything misconfigured must fail before any flow is read.
+    # --- startup: anything misconfigured must fail before any flow is read,
+    # and - critically - before the output file is opened, since opening it
+    # truncates whatever is already there.
+    collision = _output_collision(args)
+    if collision is not None:
+        logger.error("%s", collision)
+        return EXIT_ERROR
+
+    missing = _missing_ml_dependencies() if args.dga_model is not None else []
+    if missing:
+        logger.error(
+            "--dga-model was supplied but %s not importable. %s",
+            _phrase(missing),
+            ML_EXTRA_HINT,
+        )
+        return EXIT_ERROR
+
     try:
         detectors = build_default_detectors(dga_model_path=args.dga_model)
+    except ImportError as exc:
+        # find_spec found the modules but importing one failed - a broken or
+        # half-installed extra. Still the user's dependency problem, so it
+        # gets the same clear message rather than an internal traceback.
+        logger.error("DGA could not be loaded: %s. %s", exc, ML_EXTRA_HINT)
+        return EXIT_ERROR
     except (FileNotFoundError, ValueError, RuntimeError, TypeError) as exc:
         logger.error("could not build detectors: %s", exc)
         return EXIT_ERROR
@@ -137,11 +181,10 @@ def _run(args: argparse.Namespace) -> int:
 
     adapter = IngestionJsonlAdapter(path=args.input)
     try:
+        # Delivery failures no longer end the run: run_detection logs and
+        # counts them, and the whole capture is still processed. They are
+        # reported below, and in the exit code.
         stats = run_detection(adapter, sink, detectors, log=logger)
-    except AlertDeliveryError as exc:
-        # Do not pretend the alert reached the backend.
-        logger.error("alert delivery failed, aborting: %s", exc)
-        return EXIT_ERROR
     except OSError as exc:
         logger.error("i/o error during run: %s", exc)
         return EXIT_ERROR
@@ -161,7 +204,118 @@ def _run(args: argparse.Namespace) -> int:
     if args.output is not None and jsonl_sink is not None:
         logger.info("wrote %d alert(s) to %s", jsonl_sink.count, args.output)
 
+    if stats.delivery_failures:
+        # The run finished; the backend's copy did not. Say so plainly and
+        # exit non-zero, so a scheduled replay cannot look successful while
+        # the backend is missing alerts.
+        logger.error(
+            "DEGRADED: %d of %d alert(s) failed delivery to %s%s",
+            stats.delivery_failures,
+            stats.alerts,
+            args.api_url,
+            (
+                f"; all {stats.alerts} alert(s) are in {args.output}"
+                if args.output is not None
+                else "; alert JSONL on stdout is complete"
+            ),
+        )
+        return EXIT_DELIVERY_DEGRADED
+
     return EXIT_OK
+
+
+# --------------------------------------------------------------------------
+# Startup validation
+# --------------------------------------------------------------------------
+
+
+def _output_collision(args: argparse.Namespace) -> str | None:
+    """Reject an ``--output`` that would destroy one of the run's own inputs.
+
+    ``open(path, "w")`` truncates on open, so by the time the sink exists an
+    ``--output`` aimed at the input JSONL has already emptied it - the run
+    then reads zero flows from a file the user still had. Same for the
+    ``--dga-model`` bundle, which is loaded once and cannot be rebuilt from
+    the alerts written over it.
+
+    Returns the message to log, or ``None`` when the destinations are
+    genuinely distinct. Nothing here opens, creates or modifies a file.
+    """
+    if args.output is None:  # stdout: nothing on disk to overwrite
+        return None
+
+    for label, source in (
+        ("input file", args.input),
+        ("--dga-model file", args.dga_model),
+    ):
+        if source is None:
+            continue
+        if _same_target(args.output, source):
+            return (
+                f"--output {args.output} resolves to the same file as the "
+                f"{label} {source}; writing alerts there would destroy it. "
+                "Choose a different --output path."
+            )
+    return None
+
+
+def _same_target(a: Path, b: Path) -> bool:
+    """Whether two paths name one file on disk.
+
+    ``os.path.samefile`` is the authority whenever both sides exist: it sees
+    through symlinks, hard links and junctions that no amount of string
+    comparison would catch. The usual case is an ``--output`` that does not
+    exist yet, where there is nothing to stat - there the canonical-path
+    comparison decides.
+    """
+    try:
+        if a.exists() and b.exists():
+            return os.path.samefile(a, b)
+    except OSError:  # pragma: no cover - stat refused; fall back to paths
+        pass
+    return _canonical(a) == _canonical(b)
+
+
+def _canonical(path: Path) -> str:
+    """A comparable spelling of *path*.
+
+    ``resolve()`` makes it absolute, collapses ``..`` segments and follows
+    symlinks, so ``./data/x.jsonl`` and ``data/../data/x.jsonl`` become one
+    string. ``normcase`` then folds the case- and separator-insensitivity
+    Windows adds. An unresolvable path still normalizes to an absolute one,
+    so this never quietly degrades into "these differ".
+    """
+    try:
+        resolved = path.resolve()
+    except OSError:  # pragma: no cover - e.g. a nonexistent drive letter
+        resolved = Path(os.path.abspath(path))
+    return os.path.normcase(str(resolved))
+
+
+def _missing_ml_dependencies() -> list[str]:
+    """Which of :data:`ML_DEPENDENCIES` cannot be imported, in order.
+
+    Uses ``find_spec`` rather than importing: the answer is needed at
+    startup, importing scikit-learn is expensive, and a runner that has not
+    been asked for DGA must not pay for the ML extra at all.
+    """
+    missing: list[str] = []
+    for module in ML_DEPENDENCIES:
+        try:
+            found = importlib.util.find_spec(module) is not None
+        except (ImportError, ValueError):
+            # A broken or shadowed package on the path counts as missing.
+            found = False
+        if not found:
+            missing.append(module)
+    return missing
+
+
+def _phrase(missing: list[str]) -> str:
+    """``"sklearn is"`` / ``"sklearn and joblib are"`` - for one log line."""
+    names = ", ".join(missing[:-1])
+    joined = f"{names} and {missing[-1]}" if names else missing[-1]
+    return f"{joined} {'is' if len(missing) == 1 else 'are'}"
 
 
 def _attach_stderr_logging(*, quiet: bool) -> logging.Handler:

@@ -59,7 +59,7 @@ The conversion to alert time happens once, in `schemas/timeutil.py`.
 * **`DnsInfo`** — `uid`, `query`, `qtype`, `rcode`, `query_length`,
   `query_entropy`, `subdomain_entropy`, `is_txt`, `label_count`
 * **`TlsInfo`** — `uid`, `ja3`, `ja3s`, `ja4`, `server_name`, `version`,
-  `has_ja3`, `has_ja3s`
+  `has_ja3`, `has_ja3s`, `sni_length`, `sni_entropy`
 * **`HttpInfo`** — `uid`, `host`, `uri`, `user_agent`, `method`,
   `host_length`, `uri_length`, `uri_entropy`, `has_user_agent`,
   `user_agent_length`, `request_body_len`, `response_body_len`, `status_code`
@@ -172,17 +172,29 @@ beacon timing is computed per relationship here, not globally upstream.
 ## 4. Integration TODOs
 
 Fields `FlowEvent` has slots for that current ingestion does not emit. They
-stay `None` — never invented. When ingestion supplies them, **only the adapter
-changes**; no detector needs rewriting.
+stay `None` — never invented.
 
-| field | blocks |
+**These are ingestion-side TODOs, not detection-side ones.** The adapter
+already reads and preserves every field below the moment a record carries it
+(`adapters/ingestion_jsonl.py` passes `query` / `qtype` / `rcode` and
+`ja3` / `ja3s` / `ja4` / `server_name` / `sni_length` / `sni_entropy`
+straight through), and `FlowEvent` already has the slots. Nothing here needs
+rewriting when they start arriving — the detectors simply gain signal.
+
+| field | unlocks |
 |---|---|
 | `uid` (top level) | reliable flow correlation for flows with no dns/tls/http block |
 | `src_port` | source-port based scan/exfil heuristics |
 | `service` | protocol-aware detection |
-| `dns.query`, `dns.qtype`, `dns.rcode` | **real DGA and DNS-tunnelling detection** — only entropy/length features exist today |
-| `tls.ja3`, `tls.ja3s`, `tls.ja4`, `tls.server_name` | **JA3/JA4 fingerprint matching** for encrypted malware — only `has_ja3` booleans exist today |
+| `dns.query` | **DGA classification**, which cannot run without the raw name. DNS tunnelling already works without it, on derived metadata |
+| `dns.qtype`, `dns.rcode` | richer DNS evidence; neither detector requires them |
+| `tls.server_name` (or `sni_length` / `sni_entropy`) | the encrypted-malware **metadata** path — handshake analysis only, nothing is decrypted |
+| `tls.ja3`, `tls.ja3s`, `tls.ja4` | **JA3/JA4 fingerprint matching** for encrypted malware — only the `has_ja3` / `has_ja3s` booleans arrive today |
 | `http.host`, `http.uri`, `http.user_agent` | C2-over-HTTP heuristics on raw strings |
+
+An encoded placeholder is never a substitute for the raw string: a decoded
+version number or a boolean says nothing a classifier or a fingerprint match
+can use.
 
 Also worth noting: ingestion's `conn_state` encoding has **no entry for Zeek's
 `S0`** (connection attempt, no reply). `S0` therefore encodes to `0` and is

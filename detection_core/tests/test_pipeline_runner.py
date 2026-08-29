@@ -27,7 +27,9 @@ from detection_core import (
 )
 from detection_core.ml.dga import LABEL_BENIGN, LABEL_DGA, DGAModel
 
-from .conftest import make_alert, make_flow
+from .conftest import DummyDetector, make_alert, make_flow
+
+EXIT_OK_CODE = 0
 
 RULE_DETECTOR_NAMES = [
     "port_scan",
@@ -443,10 +445,19 @@ class _Collector(BaseHTTPRequestHandler):
     received: list[dict] = []
     headers_seen: list[str] = []
     status = 202
+    #: Reject this many of the next POSTs with 503, then behave normally.
+    #: A rejected POST is deliberately NOT recorded in ``received``: the
+    #: backend really did not accept that alert.
+    fail_next = 0
 
     def do_POST(self):  # noqa: N802 - BaseHTTPRequestHandler API
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length)
+        if type(self).fail_next > 0:
+            type(self).fail_next -= 1
+            self.send_response(503)
+            self.end_headers()
+            return
         type(self).received.append(json.loads(body))
         type(self).headers_seen.append(self.headers.get("Content-Type", ""))
         self.send_response(type(self).status)
@@ -462,6 +473,7 @@ def backend():
     _Collector.received = []
     _Collector.headers_seen = []
     _Collector.status = 202
+    _Collector.fail_next = 0
     server = HTTPServer(("127.0.0.1", 0), _Collector)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -509,7 +521,12 @@ def test_unreachable_backend_is_surfaced():
         sink.emit(make_alert())
 
 
-def test_runner_reports_delivery_failure_instead_of_succeeding(tmp_path, capsys):
+def test_runner_reports_delivery_failure_without_ending_the_run(tmp_path, capsys):
+    """A dead backend degrades the run; it must not abort it.
+
+    This used to exit 1 on the first failed POST, leaving the rest of the
+    capture unexamined - a delivery problem turned into a detection outage.
+    """
     path = write(tmp_path, "scan.jsonl", scan_records())
 
     code = runner.main(
@@ -517,8 +534,13 @@ def test_runner_reports_delivery_failure_instead_of_succeeding(tmp_path, capsys)
          "--api-timeout", "1"]
     )
 
-    assert code == 1
-    assert "alert delivery failed" in capsys.readouterr().err
+    captured = capsys.readouterr()
+    assert code == runner.EXIT_DELIVERY_DEGRADED
+    assert code != 0, "a run the backend never received must not look clean"
+    assert "alert delivery failed, continuing" in captured.err
+    assert "DEGRADED" in captured.err
+    # The alert JSONL on stdout is still complete.
+    assert [json.loads(line) for line in captured.out.splitlines() if line]
 
 
 def test_multisink_fans_out(tmp_path, backend):
@@ -586,3 +608,145 @@ def test_factory_covers_every_threat_class(dga_model_path):
     """
     names = {d.name for d in build_default_detectors(dga_model_path=dga_model_path)}
     assert names == {threat.value for threat in ThreatClass}
+
+
+
+# --------------------------------------------------------------------------
+# 23-30. Delivery resilience: a failing backend degrades, never aborts
+# --------------------------------------------------------------------------
+
+
+def flows(count: int) -> list:
+    """``count`` flows, one canned alert each via DummyDetector."""
+    return [make_flow(timestamp=1000.0 + i) for i in range(count)]
+
+
+def test_a_rejected_delivery_is_counted_and_the_run_continues(backend):
+    """HTTP 500 on every POST: all five flows are still processed."""
+    _, url = backend
+    _Collector.status = 500
+    sink = HttpAlertSink(url, timeout=5.0)
+
+    stats = run_detection(iter(flows(5)), sink, [DummyDetector()])
+
+    assert stats.flows == 5, "the run stopped at the first rejection"
+    assert stats.alerts == 5
+    assert stats.delivery_failures == 5
+    # Nothing is pretended delivered: the sink counts 2xx only.
+    assert sink.count == 0
+
+
+def test_an_unreachable_backend_is_counted_and_the_run_continues():
+    """A closed port is the same story: counted, logged, run completes."""
+    sink = HttpAlertSink("http://127.0.0.1:9/api/v1/alerts", timeout=1.0)
+
+    stats = run_detection(iter(flows(2)), sink, [DummyDetector()])
+
+    assert stats.flows == 2
+    assert stats.alerts == 2
+    assert stats.delivery_failures == 2
+
+
+def test_a_later_alert_still_reaches_a_recovered_backend(backend):
+    """Recovery needs no intervention - the next alert is simply POSTed."""
+    _, url = backend
+    _Collector.fail_next = 1
+
+    stats = run_detection(
+        iter(flows(3)), HttpAlertSink(url, timeout=5.0), [DummyDetector()]
+    )
+
+    assert stats.alerts == 3
+    assert stats.delivery_failures == 1
+    # The two after the failure genuinely arrived.
+    assert len(_Collector.received) == 2
+
+
+def test_a_failed_post_does_not_cost_the_local_record(backend):
+    """JSONL keeps every alert even when the backend rejects all of them."""
+    import io
+
+    _, url = backend
+    _Collector.status = 503
+    stream = io.StringIO()
+    jsonl = JsonlAlertSink(stream)
+    sink = MultiSink([jsonl, HttpAlertSink(url, timeout=5.0)])
+
+    stats = run_detection(iter(flows(3)), sink, [DummyDetector()])
+
+    assert stats.delivery_failures == 3
+    assert jsonl.count == 3
+    assert len(stream.getvalue().strip().splitlines()) == 3
+
+
+def test_sink_order_does_not_decide_which_sinks_are_served(backend):
+    """HTTP first, JSONL second: the local sink must still get the alert.
+
+    Fan-out used to stop at the first raising sink, so the local record
+    silently depended on being listed before the network.
+    """
+    import io
+
+    _, url = backend
+    _Collector.status = 503
+    stream = io.StringIO()
+    jsonl = JsonlAlertSink(stream)
+    sink = MultiSink([HttpAlertSink(url, timeout=5.0), jsonl])
+
+    stats = run_detection(iter(flows(2)), sink, [DummyDetector()])
+
+    assert stats.delivery_failures == 2
+    assert jsonl.count == 2, "a failing HTTP sink starved the local sink"
+
+
+def test_a_local_write_failure_still_stops_the_run():
+    """Only *delivery* failures are absorbed. A broken output is not."""
+
+    class BrokenSink:
+        def emit(self, alert):
+            raise OSError("disk full")
+
+        def close(self):
+            pass
+
+    with pytest.raises(OSError, match="disk full"):
+        run_detection(iter(flows(3)), BrokenSink(), [DummyDetector()])
+
+
+def test_cli_processes_the_whole_capture_despite_delivery_failures(
+    tmp_path, capsys, backend
+):
+    """END TO END: every record read, every alert local, exit degraded."""
+    _, url = backend
+    _Collector.status = 500
+    path = write(tmp_path, "scan.jsonl", scan_records())
+    out = tmp_path / "alerts.jsonl"
+
+    code = runner.main([str(path), "--output", str(out), "--api-url", url])
+
+    err = capsys.readouterr().err
+    assert code == runner.EXIT_DELIVERY_DEGRADED
+    # The whole input was consumed, not just up to the first bad POST.
+    assert f"read {len(scan_records())} record(s)" in err
+    assert "DEGRADED" in err
+
+    # And the local file holds exactly what a run with no backend produces.
+    plain = tmp_path / "plain.jsonl"
+    assert runner.main([str(path), "--output", str(plain), "--quiet"]) == EXIT_OK_CODE
+    degraded_classes = [a["threat_class"] for a in read_alerts(out)]
+    assert degraded_classes, "expected alerts in the local record"
+    assert degraded_classes == [a["threat_class"] for a in read_alerts(plain)]
+
+
+def test_a_healthy_backend_still_exits_clean(tmp_path, backend):
+    """No failures, no degradation: the normal path is untouched."""
+    _, url = backend
+    path = write(tmp_path, "scan.jsonl", scan_records())
+    out = tmp_path / "alerts.jsonl"
+
+    code = runner.main(
+        [str(path), "--output", str(out), "--api-url", url, "--quiet"]
+    )
+
+    assert code == EXIT_OK_CODE
+    assert _Collector.received == read_alerts(out)

@@ -65,6 +65,18 @@ __all__ = [
 MAX_SIGNALS = 5
 
 
+def _has_raw_query(dns) -> bool:
+    """Whether ingestion supplied a real query name on this record.
+
+    A blank or whitespace-only string is not a query name, and neither is a
+    non-string. Deliberately the same test :class:`DGADetector` uses to
+    decide it has something to classify, so the two DNS detectors can never
+    disagree about whether a feed is emitting raw names.
+    """
+    query = dns.query
+    return isinstance(query, str) and bool(query.strip())
+
+
 @dataclass(frozen=True)
 class DnsTunnelKey:
     """One client/resolver pair.
@@ -104,6 +116,17 @@ class DnsObservation:
     is_txt: bool | None = None
     #: Context only - reported as evidence, gates nothing.
     orig_bytes: int = 0
+    #: The transport this query was seen on. Retained because the alert is
+    #: an aggregate over the whole window: it can only report a port or a
+    #: protocol honestly if it knows what every contributing observation
+    #: used. ``None`` stays "not supplied", never 0 or a placeholder string.
+    dst_port: int | None = None
+    proto: str | None = None
+    #: Whether this record carried a genuine ``dns.query``. The name itself
+    #: is deliberately NOT retained: the window may hold thousands of these,
+    #: nothing here classifies on the string, and holding payload-bearing
+    #: query names in memory would be a liability rather than an asset.
+    has_raw_query: bool = False
 
     @classmethod
     def from_flow(cls, flow: FlowEvent) -> DnsObservation:
@@ -125,6 +148,9 @@ class DnsObservation:
             label_count=dns.label_count,
             is_txt=dns.is_txt,
             orig_bytes=flow.orig_bytes,
+            dst_port=flow.dst_port,
+            proto=flow.proto,
+            has_raw_query=_has_raw_query(dns),
         )
 
 
@@ -155,6 +181,13 @@ class DnsAggregate:
     max_label_count: int | None
     total_orig_bytes: int
     time_span: tuple[float, float]
+    #: The one destination port every observation that carried one agreed
+    #: on, or ``None`` when the window is mixed or none reported a port.
+    dst_port: int | None = None
+    #: The same, for transport protocol.
+    protocol: str | None = None
+    #: Observations in this window that carried a real ``dns.query``.
+    raw_query_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -383,11 +416,15 @@ class DnsTunnellingDetector(Detector):
         if not self._should_emit(key, flow.timestamp, severity):
             return []
 
+        alert = self._build_alert(key, stats, score, severity)
+
+        # Only once the alert exists. If building or validating it raises,
+        # nothing was emitted, so nothing may enter the cooldown - otherwise
+        # the failure would also silence the next several real tunnels.
         state = self._state.setdefault(key, _PairState())
         state.last_alert_at = flow.timestamp
         state.last_severity = severity
-
-        return [self._build_alert(key, flow, stats, score, severity)]
+        return [alert]
 
     def flush(self) -> list[ThreatAlert]:
         """Nothing is ever held back - ``process()`` already alerted."""
@@ -526,7 +563,31 @@ class DnsTunnellingDetector(Detector):
             max_label_count=max(labels) if labels else None,
             total_orig_bytes=sum(o.orig_bytes for o in observations),
             time_span=(min(timestamps), max(timestamps)),
+            # Over this window only - an expired observation cannot make a
+            # port ambiguous or claim a raw query the alert no longer covers.
+            dst_port=self._unanimous([o.dst_port for o in observations]),
+            protocol=self._unanimous([o.proto for o in observations]),
+            raw_query_count=sum(1 for o in observations if o.has_raw_query),
         )
+
+    @staticmethod
+    def _unanimous(values: list):
+        """The single value every observation that knew it agreed on.
+
+        ``None`` when the window is split, and ``None`` when nothing in it
+        reported the field at all - an aggregate alert covering a whole
+        window must not publish one port because the flow that happened to
+        cross the threshold used it.
+
+        Observations that did not carry the field are skipped rather than
+        counted as disagreement: a missing port is not a port, which is
+        exactly how ``ActivityWindow.dst_ports`` treats it for the other
+        detectors. So twenty ``:53`` lookups plus one record whose port
+        ingestion omitted still report 53, while a window genuinely split
+        across ``:53`` and ``:5353`` reports ``None`` rather than picking one.
+        """
+        known = {value for value in values if value is not None}
+        return next(iter(known)) if len(known) == 1 else None
 
     @staticmethod
     def _mean(values: list) -> float | None:
@@ -634,7 +695,6 @@ class DnsTunnellingDetector(Detector):
     def _build_alert(
         self,
         key: DnsTunnelKey,
-        flow: FlowEvent,
         stats: DnsAggregate,
         score: float,
         severity: Severity,
@@ -650,11 +710,13 @@ class DnsTunnellingDetector(Detector):
             # whose DNS was measured.
             src_ip=key.src_ip,
             dst_ip=key.dst_ip,
-            # The triggering flow's port/proto, only when it is really there.
-            # Ingestion supplies no `service`, so nothing is assumed to be
-            # port 53 and no protocol is invented.
-            dst_port=flow.dst_port,
-            protocol=flow.proto,
+            # The window's port/proto, not the triggering flow's: this is a
+            # HOST_PAIR alert over every query in the window, so it may only
+            # name a port that all of them used. Mixed - or never supplied -
+            # reports None. Ingestion emits no `service`, so nothing is
+            # assumed to be port 53 and no protocol is invented.
+            dst_port=stats.dst_port,
+            protocol=stats.protocol,
             threat_class=ThreatClass.DNS_TUNNELLING,
             severity=severity,
             score=score,
@@ -688,9 +750,14 @@ class DnsTunnellingDetector(Detector):
                 "suspicious_subdomain_entropy": config.suspicious_subdomain_entropy,
                 "suspicious_label_count": config.suspicious_label_count,
                 "suspicious_txt_ratio": config.suspicious_txt_ratio,
-                # Raw query names are not available from current ingestion,
-                # so this verdict rests on derived features alone.
-                "raw_query_available": False,
+                # Whether any query in THIS window carried a raw name.
+                # Current ingestion emits none, so this is normally false and
+                # the verdict rests on derived features alone - but a feed
+                # that does emit dns.query is reported as it is rather than
+                # denied. Detection itself is unchanged either way: the raw
+                # name is evidence for the analyst, not an input to the rule.
+                "raw_query_available": stats.raw_query_count > 0,
+                "raw_query_observation_count": stats.raw_query_count,
             },
             detector=self.name,
             detector_version=self.version,
