@@ -41,16 +41,29 @@ from .model import (
     DGAModelMetadata,
     DGAPrediction,
 )
-from .training import TrainingResult, evaluate, train_dga
+from .training import (
+    DEFAULT_EVAL_THRESHOLD,
+    DEFAULT_SWEEP_THRESHOLDS,
+    EvaluationResult,
+    TrainingResult,
+    evaluate,
+    evaluate_baseline,
+    evaluate_scores,
+    sweep_thresholds,
+    train_dga,
+)
 
 __all__ = [
     "CLASS_MAPPING",
+    "DEFAULT_EVAL_THRESHOLD",
     "DEFAULT_MODEL_PARAMS",
+    "DEFAULT_SWEEP_THRESHOLDS",
     "DGAModel",
     "DGAModelMetadata",
     "DGAPrediction",
     "Dataset",
     "DatasetStats",
+    "EvaluationResult",
     "FEATURE_NAMES",
     "LABEL_BENIGN",
     "LABEL_DGA",
@@ -58,6 +71,8 @@ __all__ = [
     "SplitDataset",
     "TrainingResult",
     "evaluate",
+    "evaluate_baseline",
+    "evaluate_scores",
     "extract_feature_matrix",
     "extract_features",
     "extract_features_dict",
@@ -66,5 +81,6 @@ __all__ = [
     "parse_label",
     "shannon_entropy",
     "split_dataset",
+    "sweep_thresholds",
     "train_dga",
 ]
