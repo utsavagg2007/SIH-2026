@@ -24,7 +24,7 @@ import pytest
 from detection_core.ml.dga import features as features_module
 from detection_core.ml.dga.dataset import REQUIRED_COLUMNS, load_dataset, split_dataset
 from detection_core.ml.dga.features import FEATURE_NAMES
-from detection_core.ml.dga.model import DGAModel
+from detection_core.ml.dga.model import DGAModel, _load_bundle
 from detection_core.ml.dga.training import (
     DEFAULT_EVAL_THRESHOLD,
     DEFAULT_SWEEP_THRESHOLDS,
@@ -343,7 +343,9 @@ def test_the_bundle_gained_no_evaluation_fields(tmp_path):
     out = tmp_path / "model.joblib"
     train_dga(FIXTURE, out, n_estimators=50)
 
-    bundle = joblib.load(out)
+    # Read via the project's helper rather than joblib directly: a bare
+    # joblib.load re-emits NumPy 2.5's reshape deprecation once per array.
+    bundle = _load_bundle(out)
     assert set(bundle) == {"metadata", "estimator"}
     assert set(bundle["metadata"]) == {
         "format_version", "model_type", "feature_names",

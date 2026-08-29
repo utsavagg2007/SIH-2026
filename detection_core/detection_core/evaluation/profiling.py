@@ -4,12 +4,18 @@ Diagnosis only. Nothing here changes a detector, a window or a threshold -
 it builds the ordinary detectors through the ordinary factory and watches
 them work.
 
-The specific question this exists to answer: ``ActivityWindow`` derives its
-counts by scanning the deque on every call (``dst_ports()``, ``src_ips()``,
-``hosts_by_port()``, ``total_orig_packets()`` ...), so each flow costs O(N) in
-the window's current occupancy. That is a real complexity claim, and it is
-cheap to *assume* it matters. This module measures whether it does, before
-anyone rewrites a correct data structure on the strength of a hunch.
+This module exists because complexity claims are cheap to make and cheap to
+believe. It has already earned its keep three times: it showed that
+``ActivityWindow``'s per-call deque rescans really were the bottleneck at
+high occupancy, that C2's per-flow interval rebuild was what remained after
+that, and that materializing port/host/source collections during
+qualification was what made *attack-shaped* traffic quadratic. Each was
+measured first and rewritten second.
+
+All three are now incremental. What a profile shows today is per-observation
+bookkeeping and engine dispatch - so the next person to suspect a hot path
+should measure it here before changing anything, exactly as those three
+were.
 
 ``cProfile`` and ``pstats`` are standard library - no profiling dependency is
 added. Profiling inflates absolute times substantially, so the numbers here

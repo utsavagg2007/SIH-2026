@@ -15,6 +15,7 @@ whether calibration is required belongs to live integration.
 from __future__ import annotations
 
 import datetime as _datetime
+import warnings
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
@@ -45,6 +46,38 @@ DEFAULT_MODEL_PARAMS: dict[str, Any] = {
     "random_state": 42,
     "n_jobs": -1,
 }
+
+
+#: joblib's unpickler rebuilds each array with ``array.shape = ...``, which
+#: NumPy 2.5 deprecated in favour of ``np.reshape``. That is third-party code
+#: on both sides - we neither write the arrays nor reshape them - and it
+#: fires once per array in the bundle, so a 200-tree forest buries a terminal
+#: in several hundred identical notices.
+#:
+#: Silenced by exact message, only for the duration of the load call, and
+#: nowhere else: see :func:`_load_bundle`. Deliberately not fixed by pinning
+#: ``numpy<2.5``, because nothing is broken - a deprecation notice about a
+#: line we do not own is not a reason to hold back a working dependency.
+_JOBLIB_RESHAPE_DEPRECATION = "Setting the shape on a NumPy array has been deprecated"
+
+
+def _load_bundle(path: Path) -> object:
+    """``joblib.load`` with one known third-party deprecation muted.
+
+    The filter is scoped three ways: to this single call, to
+    ``DeprecationWarning``, and to that one message. Every other warning
+    raised while reading a bundle - including any other deprecation, any
+    ``UserWarning`` about a version mismatch, and every exception - passes
+    through untouched, because the point is to remove noise, not to stop
+    hearing about a corrupt or incompatible artifact.
+    """
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            message=_JOBLIB_RESHAPE_DEPRECATION,
+            category=DeprecationWarning,
+        )
+        return joblib.load(path)
 
 
 @dataclass(frozen=True)
@@ -212,7 +245,7 @@ class DGAModel:
     def load(cls, path: str | Path) -> DGAModel:
         """Load a bundle, refusing one whose feature schema no longer matches."""
         path = Path(path)
-        bundle = joblib.load(path)
+        bundle = _load_bundle(path)
         if not isinstance(bundle, dict) or "estimator" not in bundle:
             raise ValueError(f"{path}: not a DGA model bundle")
 

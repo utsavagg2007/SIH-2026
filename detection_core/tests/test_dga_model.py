@@ -16,6 +16,7 @@ import pytest
 from detection_core.ml.dga.dataset import LABEL_BENIGN, LABEL_DGA, load_dataset
 from detection_core.ml.dga.features import FEATURE_NAMES
 from detection_core.ml.dga.model import (
+    _load_bundle,
     MODEL_FORMAT_VERSION,
     DGAModel,
     DGAPrediction,
@@ -166,7 +167,9 @@ def test_unfitted_model_cannot_be_saved(tmp_path):
 def test_incompatible_feature_schema_is_rejected(fitted_model, tmp_path):
     """30. A stale bundle must fail loudly, not predict on the wrong vector."""
     path = fitted_model.save(tmp_path / "model.joblib")
-    bundle = joblib.load(path)
+    # Read via the project's helper rather than joblib directly: a bare
+    # joblib.load re-emits NumPy 2.5's reshape deprecation once per array.
+    bundle = _load_bundle(path)
     bundle["metadata"]["feature_names"] = ("length", "entropy")
     joblib.dump(bundle, path)
 
@@ -176,7 +179,9 @@ def test_incompatible_feature_schema_is_rejected(fitted_model, tmp_path):
 
 def test_incompatible_format_version_is_rejected(fitted_model, tmp_path):
     path = fitted_model.save(tmp_path / "model.joblib")
-    bundle = joblib.load(path)
+    # Read via the project's helper rather than joblib directly: a bare
+    # joblib.load re-emits NumPy 2.5's reshape deprecation once per array.
+    bundle = _load_bundle(path)
     bundle["metadata"]["format_version"] = "0.1"
     joblib.dump(bundle, path)
 

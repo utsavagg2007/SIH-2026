@@ -724,10 +724,39 @@ reads them.
 * ECH hides SNI entirely, and so does plain absence of the field.
 * Exact fingerprints are only as trustworthy as the feed they came from, and
   they change — JA3 in particular varies with TLS library versions.
-* **QUIC is not supported.** Nothing in the current feature set describes
-  QUIC, and this detector makes no claim about it.
 * Timing and periodicity belong to `C2BeaconingDetector`; none of it is
   computed here. A flow can legitimately raise both.
+
+### QUIC, and what "encrypted-traffic detection" means here
+
+Worth stating precisely, because the phrase invites assumptions:
+
+* Detection reads **observable TLS metadata** — SNI length and entropy,
+  negotiated version, and JA3/JA3S/JA4 when those fields are present. That is
+  handshake and header material a sensor can see without holding a key.
+* **No payload is decrypted, ever.** Not TLS, not QUIC. There is no key
+  material anywhere in this project and no code path that would use one.
+* **QUIC-specific fingerprint extraction is not implemented.** Ingestion emits
+  no QUIC metadata today, and nothing here derives a QUIC fingerprint. A
+  detector that claimed otherwise would be reporting on data it does not have.
+* **UDP/443 is not treated as malicious.** Neither the port nor the transport
+  is a signal in any detector; a QUIC flow simply carries no TLS block and so
+  contributes nothing to the encrypted-malware path.
+* The extension point is real but unbuilt: `TlsInfo` already carries optional
+  fingerprint and SNI fields, and the adapter preserves whatever ingestion
+  supplies, so **observable** QUIC metadata (a QUIC Initial fingerprint, an
+  SNI from an unencrypted ClientHello) could be populated and matched with no
+  schema change. That is an ingestion capability, not a detection gap we can
+  close on our own.
+
+**If a reviewer asks "your problem statement mentions QUIC — do you support
+it?"** — the accurate answer is: *we detect on encrypted traffic without
+decrypting it, using observable TLS metadata such as SNI characteristics and
+JA3/JA3S/JA4 fingerprints. QUIC-specific metadata extraction is an ingestion
+integration we have not built, and we deliberately do not label UDP/443 as
+malicious on its own. The schema already accepts observable QUIC metadata
+when ingestion can provide it, and no part of the design depends on payload
+decryption.*
 
 ## DGA ML baseline (offline — Part 1)
 
