@@ -279,7 +279,7 @@ def test_detector_defaults():
 
 
 def test_shipped_detectors():
-    """Six rule detectors ship so far; no trained ML model yet."""
+    """Every threat class now has a detector; DGA Phase 2 is live."""
     from detection_core import detectors, ml
 
     assert detectors.__all__ == [
@@ -295,11 +295,14 @@ def test_shipped_detectors():
         "DataExfiltrationDetector",
         "DDoSConfig",
         "DDoSDetector",
+        "DGAConfig",
+        "DGADetector",
         "DnsAggregate",
         "DnsObservation",
         "DnsTunnelKey",
         "DnsTunnellingConfig",
         "DnsTunnellingDetector",
+        "DomainClassifier",
         "EncryptedMalwareConfig",
         "EncryptedMalwareDetector",
         "ExfilKey",

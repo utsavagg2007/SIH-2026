@@ -23,9 +23,12 @@ Implemented:
                     destination (src, dst)-keyed
     encrypted_malware - malicious TLS fingerprints, and repeatedly
                     generated-looking SNI (src, dst)-keyed
+    dga_domain    - Phase-2 live wrapper around the ml/dga model
 
-Planned, one module per remaining threat class:
-    dga_domain
+All threat classes now have a detector.
+
+Note: ``dga`` imports ``detection_core.ml`` (scikit-learn) only when a
+DGADetector is CONSTRUCTED, so importing this package stays dependency-free.
 
 Note: several of those are blocked on raw fields current ingestion does not
 emit (see SCHEMA.md "Integration TODOs").
@@ -44,6 +47,7 @@ from .data_exfiltration import (
     ExfilStats,
 )
 from .ddos import DDoSConfig, DDoSDetector
+from .dga import DGAConfig, DGADetector, DomainClassifier
 from .encrypted_malware import (
     DETECTION_FINGERPRINT,
     DETECTION_METADATA,
@@ -76,11 +80,14 @@ __all__ = [
     "DataExfiltrationDetector",
     "DDoSConfig",
     "DDoSDetector",
+    "DGAConfig",
+    "DGADetector",
     "DnsAggregate",
     "DnsObservation",
     "DnsTunnelKey",
     "DnsTunnellingConfig",
     "DnsTunnellingDetector",
+    "DomainClassifier",
     "EncryptedMalwareConfig",
     "EncryptedMalwareDetector",
     "ExfilKey",

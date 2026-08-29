@@ -20,9 +20,10 @@ file format, and that knowledge is confined to `detection_core/adapters/`.
 
 Schemas, adapter, engine and tests are complete. Six rule detectors ship:
 **`PortScanDetector`**, **`DDoSDetector`**, **`C2BeaconingDetector`**,
-**`DnsTunnellingDetector`**, **`DataExfiltrationDetector`** and
-**`EncryptedMalwareDetector`**. No trained ML model yet — `ml/` holds the
-offline DGA baseline only.
+**`DnsTunnellingDetector`**, **`DataExfiltrationDetector`**,
+**`EncryptedMalwareDetector`** and **`DGADetector`**. Every threat class in
+the v1.1 enum now has a detector. No model binary ships — `DGADetector` is
+given one at construction.
 
 ## Layout
 
@@ -33,9 +34,9 @@ detection_core/
 ├── engine/           Detector interface + DetectionEngine
 ├── aggregators/      rolling sliding windows, keyed by whatever a detector needs
 ├── detectors/        port_scan, ddos, c2_beaconing, dns_tunnelling,
-│                      data_exfiltration, encrypted_malware
+│                      data_exfiltration, encrypted_malware, dga
 │                      + shared scoring helpers
-└── ml/               offline DGA baseline (Part 1)
+└── ml/               offline DGA baseline (Phase 1)
 ```
 
 `fixtures/` holds mock ingestion records; `tests/` is the pytest suite.
@@ -650,6 +651,77 @@ model.feature_importances()                        # for the demo/explanation
   suffixes. Adding a PSL dependency was judged not worth it here.
 * **Punycode is not decoded.** An `xn--` label is scored as the literal ASCII
   it already is.
+
+### Phase 2 — the live detector
+
+Phase 1 above is the *offline* half: features, dataset, model, training.
+**Phase 2 is `DGADetector`** — a thin wrapper that puts that model on the
+live path:
+
+```
+FlowEvent.dns.query → normalize_domain() → DGAModel.predict_domain() → ThreatAlert
+```
+
+No DGA feature logic lives in the detector. Normalization and feature
+extraction are *imported from Phase 1 and called*, never reimplemented — a
+second copy of that arithmetic would drift from whatever the model was
+trained on and quietly invalidate every score. A test asserts the detector
+source contains none of it.
+
+```python
+from detection_core import DGAConfig, DGADetector
+
+detector = DGADetector(model=fitted_model)              # or
+detector = DGADetector(model_path="artifacts/dga.joblib",
+                       config=DGAConfig(score_threshold=0.75))
+```
+
+One of `model=` / `model_path=` is required. There is deliberately **no
+fallback to an untrained or stub model**: a detector that silently scores
+everything 0.0 looks healthy in a dashboard while detecting nothing. A
+missing path, a non-bundle, a stale `format_version` and a feature-schema
+mismatch each raise a message naming the problem.
+
+**It needs a raw `dns.query`.** Current ingestion does not emit one, so
+against today's feed this detector is correctly silent — no query, nothing
+to classify. The adapter already preserves `query` / `qtype` / `rcode`
+whenever they appear and leaves them `None` when they do not, so **the only
+thing standing between this and live DGA detection is ingestion beginning to
+emit the query name.** Nothing further is needed on the detection side.
+
+The derived `dns.query_entropy` / `query_length` that *are* available today
+are deliberately not used as a stand-in: the model was trained on ~20 lexical
+features extracted from the full name, and feeding it two of them would not
+be the same model.
+
+### The score is not a probability
+
+`RandomForestClassifier.predict_proba` gives a class-1 vote fraction, and
+Phase 1 documents it as **not calibrated**. So it is not published as one:
+
+* `score_type` is **`rule_score`**, never `calibrated_model`.
+* The alert `score` is a deterministic function of how far the model score
+  exceeds `score_threshold` — at the threshold it is 0.5, at a model score of
+  1.0 it is 1.0, linear between.
+* The model's own number travels in the evidence as **`dga_model_score`**,
+  alongside `model_score_is_calibrated: false` and a note saying so plainly.
+
+> `score_threshold` defaults to **0.75** and is **untuned**. Re-derive it from
+> a precision/recall sweep over a real benign+DGA dataset; the Phase-1
+> training entry point already reports the numbers needed.
+
+Repeats are suppressed per `(src_ip, normalized_domain)` for
+`cooldown_seconds` — malware re-queries the same name constantly, and the
+finding is the domain, not each lookup. There is no severity-escalation
+escape hatch here, unlike the windowed detectors, because the model is
+deterministic: the same domain always scores the same, so a repeat lookup is
+the same finding rather than a worse one.
+
+**Importing is cheap; constructing is not.** `detection_core.ml` pulls in
+scikit-learn, joblib and numpy, which stay an optional extra so
+`import detection_core` works with pydantic alone. The Phase-1 import
+therefore happens inside `DGADetector.__init__`, not at module scope — a test
+asserts sklearn never leaks into a plain `import detection_core`.
 
 ## Writing a detector
 
