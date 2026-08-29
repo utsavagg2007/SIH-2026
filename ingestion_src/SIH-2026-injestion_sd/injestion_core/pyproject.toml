@@ -1,0 +1,15 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "ingestion_core"
+version = "0.1.0"
+description = "Zeek log parser and feature extractor for passive network threat detection"
+requires-python = ">=3.8"
+readme = "README.md"
+classifiers = ["Programming Language :: Rust"]
+
+[tool.maturin]
+bindings = "pyo3"
+features = ["extension-module"]

@@ -1,0 +1,10 @@
+{
+  "capture": "flood.jsonl",
+  "description": "2000 alerts across many sources and targets. Replay with max_rate=500 to confirm the dashboard holds 60fps under flood (frontend spec 8.2).",
+  "generated_by": "tools/make_fixtures.py",
+  "duration_s": 100.0,
+  "suggested_replay": {
+    "speed": 1.0,
+    "max_rate": 500
+  }
+}

@@ -1,0 +1,18 @@
+[package]
+name = "ingestion_core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "ingestion_core"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pyo3 = "0.25"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+# Enabled by maturin when building the importable module so it does NOT link
+# against libpython. Left off for `cargo test` so the test binary links normally.
+extension-module = ["pyo3/extension-module"]

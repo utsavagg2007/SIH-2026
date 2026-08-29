@@ -1,0 +1,72 @@
+{
+  "capture": "demo_scenario.jsonl",
+  "description": "Ten-minute narrative. 10.4.2.19 is scanned, beacons to 185.62.11.4 over TLS, then exfiltrates to 198.51.100.14 - one host, three kill-chain stages, one incident.",
+  "generated_by": "tools/make_fixtures.py",
+  "seed": 20260829,
+  "duration_s": 700,
+  "ground_truth": [
+    {
+      "at_s": 30,
+      "threat_class": "port_scan",
+      "src": "10.4.2.77"
+    },
+    {
+      "at_s": 44,
+      "threat_class": "port_scan",
+      "src": "10.4.2.19"
+    },
+    {
+      "at_s": 120,
+      "threat_class": "dga_domain",
+      "src": "10.4.2.31"
+    },
+    {
+      "at_s": 150,
+      "threat_class": "c2_beaconing",
+      "src": "10.4.2.19",
+      "dst": "185.62.11.4"
+    },
+    {
+      "at_s": 200,
+      "threat_class": "encrypted_malware",
+      "src": "10.4.2.19"
+    },
+    {
+      "at_s": 270,
+      "threat_class": "dns_tunnelling",
+      "src": "10.4.2.31"
+    },
+    {
+      "at_s": 400,
+      "threat_class": "ddos",
+      "dst": "10.4.0.80"
+    },
+    {
+      "at_s": 450,
+      "threat_class": "ddos",
+      "dst": "10.4.0.80",
+      "note": "amplification"
+    },
+    {
+      "at_s": 510,
+      "threat_class": "data_exfiltration",
+      "src": "10.4.2.19"
+    },
+    {
+      "at_s": 540,
+      "threat_class": "data_exfiltration",
+      "src": "10.4.2.22"
+    }
+  ],
+  "expected_incidents": [
+    {
+      "pivot_host": "10.4.2.19",
+      "stages": [
+        "recon",
+        "c2",
+        "exfil"
+      ],
+      "note": "should escalate on stage count"
+    }
+  ]
+}
