@@ -66,10 +66,15 @@ def _load_bundle(path: Path) -> object:
 
     The filter is scoped three ways: to this single call, to
     ``DeprecationWarning``, and to that one message. Every other warning
-    raised while reading a bundle - including any other deprecation, any
-    ``UserWarning`` about a version mismatch, and every exception - passes
-    through untouched, because the point is to remove noise, not to stop
-    hearing about a corrupt or incompatible artifact.
+    raised while reading a bundle - including any other deprecation and any
+    ``UserWarning`` about a version mismatch - passes through untouched,
+    because the point is to remove noise, not to stop hearing about a
+    corrupt or incompatible artifact.
+
+    A failure to deserialize at all is turned into a ``ValueError`` naming
+    the file and the underlying error. It is still a hard failure - nothing
+    falls back to running without DGA - but it reads as a configuration
+    problem rather than a pickle traceback.
     """
     with warnings.catch_warnings():
         warnings.filterwarnings(
@@ -77,7 +82,26 @@ def _load_bundle(path: Path) -> object:
             message=_JOBLIB_RESHAPE_DEPRECATION,
             category=DeprecationWarning,
         )
-        return joblib.load(path)
+        try:
+            return joblib.load(path)
+        except Exception as exc:
+            # Deserializing an unreadable file fails from deep inside pickle,
+            # with whatever the truncated byte stream happens to hit first -
+            # ``IndexError: pop from empty list`` is a real example. That
+            # traceback tells an operator nothing they can act on, so it
+            # becomes the same clear ValueError every other bad bundle
+            # raises, and which the runner already reports cleanly.
+            #
+            # The ``try`` wraps exactly one third-party call and no logic of
+            # ours, so there is no code in here whose bug could be hidden;
+            # the original exception is chained as the cause, and its type
+            # is named in the message. ``KeyboardInterrupt`` and
+            # ``SystemExit`` are BaseExceptions and pass straight through.
+            raise ValueError(
+                f"{path}: could not be read as a joblib model bundle "
+                f"({type(exc).__name__}: {exc}). The file may be truncated, "
+                "corrupt, or not a model at all - retrain or restore it"
+            ) from exc
 
 
 @dataclass(frozen=True)

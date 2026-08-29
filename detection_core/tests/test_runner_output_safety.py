@@ -461,3 +461,147 @@ def test_no_new_flags_behaves_exactly_as_before(tmp_path):
 
     classes = [a["threat_class"] for a in read_alerts(out)]
     assert "port_scan" in classes
+
+
+# --------------------------------------------------------------------------
+# DGA artifact failures are configuration errors, not tracebacks
+# --------------------------------------------------------------------------
+
+
+def build_model(tmp_path):
+    """A small real bundle, so the valid path is exercised too."""
+    from detection_core.ml.dga import LABEL_BENIGN, LABEL_DGA, DGAModel
+
+    model = DGAModel.new(n_estimators=20, random_state=42, n_jobs=1)
+    model.fit(
+        ["google.com", "wikipedia.org", "github.com",
+         "kq3v9x2mzt7wp1.com", "xjfkdlspqoweirut.net", "zzqxwvbnmlkjhg.org"],
+        [LABEL_BENIGN] * 3 + [LABEL_DGA] * 3,
+    )
+    return model.save(tmp_path / "model.joblib")
+
+
+def test_a_valid_model_still_registers_the_seventh_detector(tmp_path, capsys):
+    path = write(tmp_path, "input.jsonl", scan_records())
+    model = build_model(tmp_path)
+    out = tmp_path / "alerts.jsonl"
+
+    code = runner.main([str(path), "--output", str(out), "--dga-model", str(model)])
+
+    assert code == 0
+    assert "dga_domain" in capsys.readouterr().err
+    assert read_alerts(out)
+
+
+def test_a_corrupt_model_fails_cleanly_without_a_traceback(tmp_path, capsys):
+    """A truncated or garbage artifact used to surface a raw pickle error.
+
+    ``IndexError: pop from empty list`` from inside ``pickle.load`` tells an
+    operator nothing they can act on. It is a configuration problem and now
+    reads as one.
+    """
+    path = write(tmp_path, "input.jsonl", scan_records())
+    corrupt = tmp_path / "corrupt.joblib"
+    corrupt.write_bytes(b"this is definitely not a joblib bundle")
+    out = tmp_path / "alerts.jsonl"
+
+    code = runner.main([str(path), "--output", str(out), "--dga-model", str(corrupt)])
+
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "could not be read as a joblib model bundle" in err
+    assert "Traceback" not in err
+    assert "pop from empty list" in err, "the underlying cause should still be named"
+    assert err.count("\n") <= 2, f"expected a concise message, got:\n{err}"
+    assert not out.exists(), "output was opened before the model was validated"
+
+
+def test_a_truncated_model_fails_cleanly(tmp_path, capsys):
+    path = write(tmp_path, "input.jsonl", scan_records())
+    model = build_model(tmp_path)
+    truncated = tmp_path / "truncated.joblib"
+    truncated.write_bytes(model.read_bytes()[: len(model.read_bytes()) // 3])
+
+    code = runner.main([str(path), "--dga-model", str(truncated)])
+
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "Traceback" not in err
+    assert "could not be read as a joblib model bundle" in err
+
+
+def test_a_missing_model_still_fails_cleanly(tmp_path, capsys):
+    path = write(tmp_path, "input.jsonl", scan_records())
+
+    code = runner.main([str(path), "--dga-model", str(tmp_path / "absent.joblib")])
+
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "DGA model not found" in err
+    assert "Traceback" not in err
+
+
+def test_a_non_bundle_artifact_still_fails_cleanly(tmp_path, capsys):
+    import joblib
+
+    path = write(tmp_path, "input.jsonl", scan_records())
+    wrong = tmp_path / "wrong.joblib"
+    joblib.dump({"something": "else"}, wrong)
+
+    code = runner.main([str(path), "--dga-model", str(wrong)])
+
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "not a DGA model bundle" in err
+    assert "Traceback" not in err
+
+
+def test_an_unsupported_format_version_still_fails_cleanly(tmp_path, capsys):
+    import joblib
+
+    from detection_core.ml.dga.model import _load_bundle
+
+    path = write(tmp_path, "input.jsonl", scan_records())
+    bundle = _load_bundle(build_model(tmp_path))
+    bundle["metadata"]["format_version"] = "0.0"
+    stale = tmp_path / "stale.joblib"
+    joblib.dump(bundle, stale)
+
+    code = runner.main([str(path), "--dga-model", str(stale)])
+
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "does not match this build" in err
+    assert "Traceback" not in err
+
+
+def test_a_failed_model_load_never_silently_runs_without_dga(tmp_path, capsys):
+    """The dangerous failure mode: a scan that looks fine but has no DGA."""
+    path = write(tmp_path, "input.jsonl", scan_records())
+    corrupt = tmp_path / "corrupt.joblib"
+    corrupt.write_bytes(b"garbage")
+    out = tmp_path / "alerts.jsonl"
+
+    code = runner.main([str(path), "--output", str(out), "--dga-model", str(corrupt)])
+
+    err = capsys.readouterr().err
+    assert code != 0, "a broken model must never degrade into a six-detector run"
+    assert not out.exists()
+    assert "could not build detectors" in err
+    # The run never started: no detector line-up was announced and no
+    # records were read.
+    assert "detectors: port_scan" not in err
+    assert "record(s)" not in err
+
+
+def test_an_unexpected_error_is_not_swallowed_by_the_model_handling(tmp_path, monkeypatch):
+    """The narrow handler must not become a catch-all for our own bugs."""
+    path = write(tmp_path, "input.jsonl", scan_records())
+
+    def explode(*args, **kwargs):
+        raise MemoryError("a genuinely unexpected failure")
+
+    monkeypatch.setattr(runner, "build_default_detectors", explode)
+
+    with pytest.raises(MemoryError, match="genuinely unexpected"):
+        runner.main([str(path), "--quiet"])
