@@ -31,6 +31,8 @@ import sys
 from pathlib import Path
 
 from .adapters import IngestionJsonlAdapter
+from .config import ConfigError, DetectorSettings, load_detector_settings
+from .fingerprints import FingerprintError, load_fingerprint_feed
 from .pipeline import (
     DEFAULT_API_TIMEOUT,
     AlertSink,
@@ -100,6 +102,31 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=(
+            "TOML file of detector settings (thresholds, windows, cooldowns, "
+            "fingerprint lists). Only the values it names are overridden; "
+            "everything else keeps its shipped default. Unknown sections, "
+            "unknown settings and wrong types are rejected at startup"
+        ),
+    )
+    parser.add_argument(
+        "--ja3-feed",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help=(
+            "local file of trusted JA3/JA3S/JA4 fingerprints for the "
+            "encrypted_malware signature path, one per line as "
+            "'ja3:<hash>' (a bare MD5 is read as ja3). Read from disk only - "
+            "nothing is ever downloaded - and unioned with any fingerprints "
+            "given in --config"
+        ),
+    )
+    parser.add_argument(
         "--api-url",
         default=None,
         metavar="URL",
@@ -127,11 +154,11 @@ def main(argv: list[str] | None = None) -> int:
     """Entry point. Returns a process exit code rather than calling exit()."""
     args = build_parser().parse_args(argv)
 
-    handler = _attach_stderr_logging(quiet=args.quiet)
+    handler, previous_level = _attach_stderr_logging(quiet=args.quiet)
     try:
         return _run(args)
     finally:
-        _detach_logging(handler)
+        _detach_logging(handler, previous_level)
 
 
 def _run(args: argparse.Namespace) -> int:
@@ -147,6 +174,12 @@ def _run(args: argparse.Namespace) -> int:
         logger.error("%s", collision)
         return EXIT_ERROR
 
+    try:
+        settings = _detector_settings(args)
+    except (ConfigError, FingerprintError) as exc:
+        logger.error("%s", exc)
+        return EXIT_ERROR
+
     missing = _missing_ml_dependencies() if args.dga_model is not None else []
     if missing:
         logger.error(
@@ -157,7 +190,9 @@ def _run(args: argparse.Namespace) -> int:
         return EXIT_ERROR
 
     try:
-        detectors = build_default_detectors(dga_model_path=args.dga_model)
+        detectors = build_default_detectors(
+            dga_model_path=args.dga_model, settings=settings
+        )
     except ImportError as exc:
         # find_spec found the modules but importing one failed - a broken or
         # half-installed extra. Still the user's dependency problem, so it
@@ -227,6 +262,52 @@ def _run(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------
 # Startup validation
 # --------------------------------------------------------------------------
+
+
+def _detector_settings(args: argparse.Namespace) -> DetectorSettings:
+    """Detector configuration for this run: defaults, file, and feed.
+
+    Read once, here, before a single flow is parsed - a settings file that is
+    wrong should cost nothing but a clear message, and a detector must never
+    touch the filesystem while processing.
+
+    With neither flag this returns ``DetectorSettings()``, which is the
+    shipped defaults and therefore identical to the behaviour before either
+    flag existed.
+    """
+    settings = (
+        load_detector_settings(args.config)
+        if args.config is not None
+        else DetectorSettings()
+    )
+
+    if args.ja3_feed is not None:
+        feed = load_fingerprint_feed(args.ja3_feed)
+        loaded = sum(len(values) for values in feed.values())
+        if loaded:
+            logger.info(
+                "loaded %d fingerprint(s) from %s (%s)",
+                loaded,
+                args.ja3_feed,
+                ", ".join(
+                    f"{kind}={len(values)}" for kind, values in feed.items() if values
+                ),
+            )
+        else:
+            logger.warning(
+                "%s contained no fingerprints; the signature path stays inert",
+                args.ja3_feed,
+            )
+        settings = settings.with_fingerprints(feed)
+
+    if "dga_domain" in settings.configured_sections and args.dga_model is None:
+        # Configured, validated, and inert - DGA needs an artifact, and this
+        # says so rather than letting the section look effective.
+        logger.info(
+            "[dga_domain] settings were read but the detector stays disabled: "
+            "no --dga-model was supplied"
+        )
+    return settings
 
 
 def _output_collision(args: argparse.Namespace) -> str | None:
@@ -318,7 +399,7 @@ def _phrase(missing: list[str]) -> str:
     return f"{joined} {'is' if len(missing) == 1 else 'are'}"
 
 
-def _attach_stderr_logging(*, quiet: bool) -> logging.Handler:
+def _attach_stderr_logging(*, quiet: bool) -> tuple[logging.Handler, int]:
     """Send this package's logs to stderr, and nowhere else.
 
     Deliberately not ``logging.basicConfig``: that is a no-op the moment the
@@ -333,16 +414,24 @@ def _attach_stderr_logging(*, quiet: bool) -> logging.Handler:
     handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
 
     package_logger = logging.getLogger("detection_core")
+    previous_level = package_logger.level
     package_logger.addHandler(handler)
     package_logger.setLevel(logging.ERROR if quiet else logging.INFO)
     package_logger.propagate = False
-    return handler
+    return handler, previous_level
 
 
-def _detach_logging(handler: logging.Handler) -> None:
-    """Undo :func:`_attach_stderr_logging` so repeat calls do not stack up."""
+def _detach_logging(handler: logging.Handler, previous_level: int) -> None:
+    """Undo :func:`_attach_stderr_logging` so repeat calls do not stack up.
+
+    The level is restored along with the handler and the propagation flag.
+    Leaving it raised outlives the run: an embedder that calls ``main()``
+    with ``--quiet`` and then uses this package's logging would find its own
+    warnings silently filtered out, long after the run they belonged to.
+    """
     package_logger = logging.getLogger("detection_core")
     package_logger.removeHandler(handler)
+    package_logger.setLevel(previous_level)
     package_logger.propagate = True
     handler.close()
 

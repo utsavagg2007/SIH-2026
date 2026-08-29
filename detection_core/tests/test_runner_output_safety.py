@@ -13,6 +13,7 @@ covered by ``test_pipeline_runner.py`` and are not re-tested here.
 
 from __future__ import annotations
 
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -313,3 +314,150 @@ def test_core_import_and_the_six_detectors_need_no_ml_extra():
 
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip().endswith("ok")
+
+
+# --------------------------------------------------------------------------
+# --config / --ja3-feed: startup validation and functional effect
+# --------------------------------------------------------------------------
+
+
+def test_a_missing_config_fails_at_startup_without_touching_the_output(
+    tmp_path, capsys
+):
+    path = write(tmp_path, "input.jsonl", scan_records())
+    out = tmp_path / "alerts.jsonl"
+
+    code = runner.main(
+        [str(path), "--output", str(out), "--config", str(tmp_path / "absent.toml")]
+    )
+
+    assert code == 1
+    assert "config file not found" in capsys.readouterr().err
+    assert not out.exists(), "the output was opened before configuration was checked"
+
+
+def test_a_malformed_config_fails_cleanly(tmp_path, capsys):
+    path = write(tmp_path, "input.jsonl", scan_records())
+    config = tmp_path / "bad.toml"
+    config.write_text("[port_scan\nmin_unique_ports = 5\n", encoding="utf-8")
+
+    code = runner.main([str(path), "--config", str(config), "--quiet"])
+
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "not valid TOML" in err
+    assert "Traceback" not in err
+
+
+def test_an_unknown_config_setting_fails_cleanly(tmp_path, capsys):
+    path = write(tmp_path, "input.jsonl", scan_records())
+    config = tmp_path / "typo.toml"
+    config.write_text("[port_scan]\nmin_unique_prts = 5\n", encoding="utf-8")
+
+    code = runner.main([str(path), "--config", str(config), "--quiet"])
+
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "min_unique_prts" in err
+    assert "Traceback" not in err
+
+
+def test_a_missing_feed_fails_cleanly(tmp_path, capsys):
+    path = write(tmp_path, "input.jsonl", scan_records())
+
+    code = runner.main(
+        [str(path), "--ja3-feed", str(tmp_path / "absent.txt"), "--quiet"]
+    )
+
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "fingerprint feed not found" in err
+    assert "Traceback" not in err
+
+
+def test_a_malformed_feed_line_fails_cleanly(tmp_path, capsys):
+    path = write(tmp_path, "input.jsonl", scan_records())
+    feed = tmp_path / "feed.txt"
+    feed.write_text("ja3:not-a-digest\n", encoding="utf-8")
+
+    code = runner.main([str(path), "--ja3-feed", str(feed), "--quiet"])
+
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "line 1" in err and "MD5" in err
+    assert "Traceback" not in err
+
+
+def test_output_collision_is_still_checked_before_config_is_read(tmp_path, capsys):
+    """The Batch-1 safeguard must not be displaced by the new startup work."""
+    path = write(tmp_path, "input.jsonl", scan_records())
+    before = path.read_bytes()
+
+    code = runner.main(
+        [str(path), "--output", str(path), "--config", str(tmp_path / "absent.toml")]
+    )
+
+    assert code == 1
+    assert "same file as the input file" in capsys.readouterr().err
+    assert path.read_bytes() == before
+
+
+def test_a_config_override_actually_reaches_the_detectors(tmp_path):
+    """--config is not decorative: one threshold, one predictable difference.
+
+    Eight distinct ports is under the shipped ``min_unique_ports`` of 15, so
+    the default run is silent. Lowering only that one setting - for this test
+    only - must make the same input fire.
+    """
+    records = [
+        json.dumps({
+            "flow_id": f"10.0.0.5:10.0.0.9:{1000 + i}:tcp:{1000.0 + i * 0.1}",
+            "src_ip": "10.0.0.5", "dst_ip": "10.0.0.9", "dst_port": 1000 + i,
+            "proto": "tcp", "duration": 0.01, "orig_bytes": 60, "resp_bytes": 0,
+            "orig_pkts": 1, "resp_pkts": 0,
+        })
+        for i in range(8)
+    ]
+    path = write(tmp_path, "eight_ports.jsonl", records)
+
+    plain = tmp_path / "plain.jsonl"
+    assert runner.main([str(path), "--output", str(plain), "--quiet"]) == 0
+    assert read_alerts(plain) == [], "eight ports must not trip the shipped default"
+
+    config = tmp_path / "lower.toml"
+    config.write_text("[port_scan]\nmin_unique_ports = 5\n", encoding="utf-8")
+    tuned = tmp_path / "tuned.jsonl"
+    assert runner.main(
+        [str(path), "--output", str(tuned), "--config", str(config), "--quiet"]
+    ) == 0
+
+    alerts = read_alerts(tuned)
+    assert alerts, "the configured threshold did not reach the detector"
+    assert alerts[0]["threat_class"] == "port_scan"
+    assert alerts[0]["evidence"]["min_unique_ports"] == 5
+
+
+def test_a_dga_section_without_a_model_is_reported_not_silently_ignored(
+    tmp_path, capsys
+):
+    path = write(tmp_path, "input.jsonl", scan_records())
+    config = tmp_path / "dga.toml"
+    config.write_text("[dga_domain]\nscore_threshold = 0.9\n", encoding="utf-8")
+
+    code = runner.main([str(path), "--config", str(config)])
+
+    err = capsys.readouterr().err
+    assert code == 0
+    assert "dga_domain" in err and "no --dga-model" in err
+    assert "dga_domain not registered" in err
+
+
+def test_no_new_flags_behaves_exactly_as_before(tmp_path):
+    """The default path must be untouched by the configuration layer."""
+    path = write(tmp_path, "scan.jsonl", scan_records())
+    out = tmp_path / "alerts.jsonl"
+
+    assert runner.main([str(path), "--output", str(out), "--quiet"]) == 0
+
+    classes = [a["threat_class"] for a in read_alerts(out)]
+    assert "port_scan" in classes

@@ -136,6 +136,92 @@ being down must not turn into a detection outage. Nothing is queued or
 retried, and no alert is ever reported as delivered when it was not, so the
 local JSONL is the record of anything the backend missed.
 
+### Configuring detectors: `--config`
+
+Thresholds live in the detector config dataclasses and those remain the
+defaults. `--config` lets a run override them without editing source:
+
+```bash
+python -m detection_core.runner input.jsonl --config detectors.toml
+```
+
+```toml
+# detectors.toml - only what you want to change
+[port_scan]
+cooldown_seconds = 120.0        # every other port_scan setting stays default
+
+[c2_beaconing]
+max_interval_cv = 0.25
+
+[encrypted_malware]
+ja3_fingerprints = ["0123456789abcdef0123456789abcdef"]   # synthetic example
+```
+
+TOML, because Python ships `tomllib` — reading a settings file is not worth a
+new runtime dependency.
+
+* **Sections are detector names**, which are also the threat-class values:
+  `port_scan`, `ddos`, `c2_beaconing`, `dns_tunnelling`, `data_exfiltration`,
+  `encrypted_malware`, `dga_domain`. One vocabulary, no abbreviations.
+* **Partial.** Only the settings you name change; the rest keep the shipped
+  defaults, because the override is applied by constructing the real config
+  dataclass. There is no second copy of the defaults to drift.
+* **Strict.** An unknown section, an unknown setting, or a wrong type is a
+  startup error naming exactly where. `min_unique_prts = 15` fails rather
+  than silently doing nothing. A boolean is never accepted as a number, and
+  values the config dataclass already rejects still fail.
+* Omitting `--config` entirely is identical to the behaviour before the flag
+  existed — an empty file means the same thing.
+* Scope is detector behaviour only. `--output`, `--api-url` and `--api-timeout`
+  stay CLI options; this is not an application-config framework.
+
+`[dga_domain]` is parsed and validated like any other section, but DGA still
+needs `--dga-model`: configuration cannot conjure a model, and a run without
+one says so on stderr rather than letting the section look effective.
+
+### JA3/JA3S/JA4 fingerprints: `--ja3-feed`
+
+The encrypted-malware signature path matches TLS fingerprints against
+configured sets. **Those sets ship empty and no indicator list is bundled
+here**, so the path is inert until you supply one:
+
+```bash
+python -m detection_core.runner input.jsonl --ja3-feed fingerprints.txt
+```
+
+```
+# fingerprints.txt - all values below are synthetic examples, not real IOCs
+ja3:0123456789abcdef0123456789abcdef
+ja3s:fedcba9876543210fedcba9876543210
+ja4:t13d1516h2_8daaf6152771_02713d6af862
+
+# a bare MD5 is read as ja3 - the shape of most public JA3 lists
+00112233445566778899aabbccddeeff
+```
+
+* **Local file only.** The loader opens a path and nothing else: no
+  downloads, no URLs, no includes, no environment expansion, no evaluation.
+  Keeping the feed current is an operational task, deliberately outside this
+  code.
+* JA3/JA3S must be 32-character hex MD5 digests; JA4 is checked against a
+  deliberately conservative token shape rather than an invented spec. All are
+  trimmed and lowercased, matching how the detector normalizes what it reads
+  off a flow.
+* A bare digest is **only** ever read as `ja3` — never `ja3s`. They are
+  different measurements that happen to share a format.
+* Blank lines and `#` comments are fine; duplicates collapse. A malformed
+  line is an error naming the file, line number and reason — a silently
+  skipped indicator is a detection that quietly does not happen.
+* Fingerprints from `--ja3-feed` are **unioned** with any given in
+  `--config`, so a feed supplements your configured indicators instead of
+  silently replacing them.
+
+Two honest limitations. Ingestion does not emit `tls.ja3` / `ja3s` / `ja4`
+yet (see SCHEMA.md), so against today's feed the signature path has nothing to
+match on however good your list is — the adapter already preserves the fields
+for the day it does. And this is metadata matching: **nothing here decrypts
+anything**.
+
 ### Startup safety and exit codes
 
 * **`--output` cannot destroy an input.** A path that resolves to the same
@@ -151,7 +237,7 @@ local JSONL is the record of anything the backend missed.
 | exit | meaning |
 |---|---|
 | `0` | ran to completion, nothing failed |
-| `1` | startup or fatal error — missing input, unsafe `--output`, missing ML extra, invalid `--dga-model`, unopenable output, I/O failure mid-run |
+| `1` | startup or fatal error — missing input, unsafe `--output`, missing ML extra, invalid `--dga-model`, unreadable/invalid `--config` or `--ja3-feed`, unopenable output, I/O failure mid-run |
 | `2` | the whole capture was processed, but one or more alerts failed delivery to `--api-url`; the local output is complete |
 
 ### Which detectors run

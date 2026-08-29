@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Iterable, Iterator, Protocol, runtime_checkable
 
+from .config import DetectorSettings
 from .detectors import (
     C2BeaconingDetector,
     DataExfiltrationDetector,
@@ -61,6 +62,7 @@ def build_default_detectors(
     *,
     dga_model_path: str | Path | None = None,
     dga_model: object | None = None,
+    settings: "DetectorSettings | None" = None,
 ) -> list[Detector]:
     """Every detector that can run, with its own shipped defaults.
 
@@ -77,21 +79,33 @@ def build_default_detectors(
     An *invalid* path is a different matter and is not swallowed:
     :class:`~detection_core.detectors.DGADetector` raises, because the user
     asked for DGA explicitly and silently dropping it would be worse.
+
+    ``settings`` supplies per-detector configuration, normally read from a
+    TOML file by :func:`~detection_core.config.load_detector_settings`.
+    Omitting it - which every existing caller does - builds each detector
+    with its own shipped defaults, exactly as before: ``DetectorSettings()``
+    *is* those defaults, so the two paths cannot diverge.
     """
+    if settings is None:
+        settings = DetectorSettings()
+
     detectors: list[Detector] = [
-        PortScanDetector(),
-        DDoSDetector(),
-        C2BeaconingDetector(),
-        DnsTunnellingDetector(),
-        DataExfiltrationDetector(),
-        EncryptedMalwareDetector(),
+        PortScanDetector(settings.port_scan),
+        DDoSDetector(settings.ddos),
+        C2BeaconingDetector(settings.c2_beaconing),
+        DnsTunnellingDetector(settings.dns_tunnelling),
+        DataExfiltrationDetector(settings.data_exfiltration),
+        EncryptedMalwareDetector(settings.encrypted_malware),
     ]
 
+    # DGA still needs a model. Configuration can shape it but never conjure
+    # one: a [dga] section on a run with no artifact configures nothing,
+    # because there is nothing to configure.
     if dga_model is not None or dga_model_path is not None:
         detectors.append(
-            DGADetector(model=dga_model, model_path=dga_model_path)
+            DGADetector(model=dga_model, config=settings.dga_domain)
             if dga_model is not None
-            else DGADetector(model_path=dga_model_path)
+            else DGADetector(model_path=dga_model_path, config=settings.dga_domain)
         )
     return detectors
 
