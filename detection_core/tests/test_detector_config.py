@@ -392,3 +392,74 @@ def test_every_detector_has_a_section_named_after_it():
     from detection_core import ThreatClass
 
     assert set(DETECTOR_SECTIONS) == {threat.value for threat in ThreatClass}
+
+
+# --------------------------------------------------------------------------
+# Non-finite numbers are not settings
+# --------------------------------------------------------------------------
+
+
+def numeric_float_fields():
+    """Every float-valued setting across every detector section."""
+    for section, config_class in DETECTOR_SECTIONS.items():
+        for field in dc.fields(config_class):
+            if type(field.default) is float:
+                yield section, field.name
+
+
+@pytest.mark.parametrize("literal", ["nan", "inf", "-inf", "+inf"])
+def test_non_finite_values_are_rejected(tmp_path, literal):
+    """NaN loses every comparison and inf is a bound nothing crosses.
+
+    Either would leave a detector looking configured while never expiring a
+    window or never qualifying a ratio.
+    """
+    path = write(tmp_path, f"[port_scan]\nwindow_seconds = {literal}\n")
+
+    with pytest.raises(ConfigError) as caught:
+        load_detector_settings(path)
+
+    message = str(caught.value)
+    assert "must be a finite number" in message
+    assert "window_seconds" in message and "port_scan" in message
+
+
+@pytest.mark.parametrize(
+    "section,field", list(numeric_float_fields()),
+    ids=lambda v: v if isinstance(v, str) else str(v),
+)
+def test_every_float_setting_rejects_nan(tmp_path, section, field):
+    """Parameterized over all of them, so a new float field is covered too."""
+    path = write(tmp_path, f"[{section}]\n{field} = nan\n")
+
+    with pytest.raises(ConfigError, match="must be a finite number"):
+        load_detector_settings(path)
+
+
+def test_a_finite_value_is_still_accepted(tmp_path):
+    path = write(tmp_path, "[port_scan]\nwindow_seconds = 45.5\n")
+
+    assert load_detector_settings(path).port_scan.window_seconds == 45.5
+
+
+def test_an_integer_is_still_accepted_for_a_float_setting(tmp_path):
+    path = write(tmp_path, "[port_scan]\nwindow_seconds = 45\n")
+
+    assert load_detector_settings(path).port_scan.window_seconds == 45.0
+
+
+def test_a_boolean_is_still_rejected_before_the_finite_check(tmp_path):
+    path = write(tmp_path, "[port_scan]\nwindow_seconds = true\n")
+
+    with pytest.raises(ConfigError, match="got a boolean"):
+        load_detector_settings(path)
+
+
+def test_partial_override_behaviour_is_unchanged_by_the_finite_check(tmp_path):
+    path = write(tmp_path, "[port_scan]\nwindow_seconds = 45.0\n")
+
+    settings = load_detector_settings(path)
+
+    assert settings.port_scan.window_seconds == 45.0
+    assert settings.port_scan.min_unique_ports == PortScanConfig().min_unique_ports
+    assert settings.ddos == DDoSConfig()

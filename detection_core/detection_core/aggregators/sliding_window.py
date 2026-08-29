@@ -25,6 +25,7 @@ from collections.abc import Hashable
 from dataclasses import dataclass
 
 from ..schemas import FlowEvent
+from .extremes import WindowExtreme
 
 __all__ = ["FlowObservation", "ActivityWindow", "WindowIndex"]
 
@@ -128,13 +129,17 @@ class ActivityWindow:
         # emptied bucket is deleted, so the keys are exactly the live fanouts.
         self._fanout_buckets: dict[int, int] = {}
         self._max_fanout: int | None = 0
-        # Extremes cannot be undone by subtraction, so they are cached with
-        # lazy invalidation: recomputed only when the extreme itself leaves.
-        self._orig_bytes_counts: dict[int, int] = {}
-        self._max_orig_bytes: int | None = 0
-        self._timestamp_counts: dict[float, int] = {}
-        self._min_timestamp: float | None = None
-        self._max_timestamp: float | None = None
+        # Extremes cannot be undone by subtraction. A cache invalidated
+        # when the extreme leaves is O(1) only until the window fills -
+        # after that the oldest observation departs on every flow and the
+        # rescan runs on every flow. WindowExtreme has no such cliff.
+        self._max_orig_bytes = WindowExtreme(largest=True)
+        self._min_timestamp = WindowExtreme(largest=False)
+        self._max_timestamp = WindowExtreme(largest=True)
+        # Observations leave in arrival order, so a counter on each side is
+        # all the identity WindowExtreme needs.
+        self._added = 0
+        self._removed = 0
 
     # --- incremental bookkeeping ----------------------------------------
 
@@ -195,15 +200,11 @@ class ActivityWindow:
         if observation.proto is not None:
             self._increment(self._proto_counts, observation.proto)
 
-        self._increment(self._orig_bytes_counts, observation.orig_bytes)
-        if self._max_orig_bytes is not None and observation.orig_bytes > self._max_orig_bytes:
-            self._max_orig_bytes = observation.orig_bytes
-
-        self._increment(self._timestamp_counts, observation.timestamp)
-        if self._min_timestamp is None or observation.timestamp < self._min_timestamp:
-            self._min_timestamp = observation.timestamp
-        if self._max_timestamp is None or observation.timestamp > self._max_timestamp:
-            self._max_timestamp = observation.timestamp
+        sequence = self._added
+        self._added += 1
+        self._max_orig_bytes.push(sequence, observation.orig_bytes)
+        self._min_timestamp.push(sequence, observation.timestamp)
+        self._max_timestamp.push(sequence, observation.timestamp)
 
     def _remove(self, observation: FlowObservation) -> None:
         """Exactly reverse :meth:`_add` for an observation that has expired."""
@@ -227,18 +228,13 @@ class ActivityWindow:
         if observation.proto is not None:
             self._decrement(self._proto_counts, observation.proto)
 
-        self._decrement(self._orig_bytes_counts, observation.orig_bytes)
-        if observation.orig_bytes not in self._orig_bytes_counts:
-            # The largest value may have just left; recompute on next read.
-            if self._max_orig_bytes == observation.orig_bytes:
-                self._max_orig_bytes = None
-
-        self._decrement(self._timestamp_counts, observation.timestamp)
-        if observation.timestamp not in self._timestamp_counts:
-            if self._min_timestamp == observation.timestamp:
-                self._min_timestamp = None
-            if self._max_timestamp == observation.timestamp:
-                self._max_timestamp = None
+        # Departures are FIFO, so this counter names the observation that
+        # is leaving without the caller having to carry an id around.
+        sequence = self._removed
+        self._removed += 1
+        self._max_orig_bytes.pop(sequence)
+        self._min_timestamp.pop(sequence)
+        self._max_timestamp.pop(sequence)
 
     def observe(self, observation: FlowObservation) -> None:
         """Record an observation and drop anything it pushed out of the window."""
@@ -340,13 +336,12 @@ class ActivityWindow:
         flows are different behaviours; a total alone cannot tell them
         apart, so exfiltration-style detection needs the peak as well.
 
-        A maximum cannot be maintained by subtraction, so it is cached and
-        recomputed only when the largest value itself expires - over the
-        distinct byte counts held, not over every observation.
+        A maximum cannot be maintained by subtraction, so it is tracked by
+        a :class:`WindowExtreme` - amortized O(1), with no rescan when the
+        largest value expires.
         """
-        if self._max_orig_bytes is None:
-            self._max_orig_bytes = max(self._orig_bytes_counts, default=0)
-        return self._max_orig_bytes
+        largest = self._max_orig_bytes.value
+        return 0 if largest is None else int(largest)
 
     def total_resp_bytes(self) -> int:
         """Responder-side bytes across the window - **context only**.
@@ -376,16 +371,14 @@ class ActivityWindow:
         Deliberately still min/max rather than the deque's two ends: the
         project only assumes event time is *approximately* ordered, and a
         record arriving slightly out of order must not silently widen or
-        narrow the span. Both extremes are cached, and recomputed over the
-        distinct timestamps only when one of them expires.
+        narrow the span. :class:`WindowExtreme` gives both ends exactly,
+        for values in any order, without a scan.
         """
-        if not self._events:
+        earliest = self._min_timestamp.value
+        latest = self._max_timestamp.value
+        if earliest is None or latest is None:
             return None
-        if self._min_timestamp is None:
-            self._min_timestamp = min(self._timestamp_counts)
-        if self._max_timestamp is None:
-            self._max_timestamp = max(self._timestamp_counts)
-        return self._min_timestamp, self._max_timestamp
+        return earliest, latest
 
     def duration(self) -> float:
         """Event-time seconds spanned by the window's contents.

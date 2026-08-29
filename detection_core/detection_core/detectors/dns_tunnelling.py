@@ -35,8 +35,9 @@ names this layer does not have.
 from __future__ import annotations
 
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
+from ..aggregators.extremes import WindowExtreme
 from ..engine import Detector
 from ..schemas import (
     MITRE_BY_CLASS,
@@ -332,32 +333,274 @@ class _DnsWindow:
     observation to carry five DNS features would put unused state in every
     other detector's window. The expiry contract is deliberately identical:
     half-open, so an observation exactly ``window_seconds`` old has expired.
+
+    Every statistic the ratio test reads is maintained **incrementally** -
+    folded in on arrival, reversed on expiry - so judging a pair costs the
+    same whether it holds twenty lookups or four thousand. Rebuilding them
+    per flow made a busy resolver pair quadratic, the same defect
+    ``ActivityWindow`` was fixed for.
+
+    How many signals an observation fires depends only on that observation
+    and the config, both immutable, so it is counted once on arrival and
+    carried alongside. Nothing is approximated, capped for speed, or
+    dropped: the deque still holds every observation until it expires.
     """
 
     def __init__(self, window_seconds: float, max_observations: int) -> None:
         self.window_seconds = window_seconds
-        self._events: deque[DnsObservation] = deque(maxlen=max_observations)
+        self.max_observations = max_observations
+        # (observation, signal count) pairs, so the count can never drift
+        # out of step with the observation it describes.
+        self._events: deque[tuple[DnsObservation, int]] = deque()
+        # The suspicious-signal bar, fixed by config for this window's life.
+        self._threshold = 0
+        self._reset_aggregates()
 
-    def observe(self, observation: DnsObservation) -> None:
-        self._events.append(observation)
+    def _reset_aggregates(self) -> None:
+        self._suspicious_count = 0
+        self._suspicious_signal_sum = 0
+        self._txt_true = 0
+        self._txt_known = 0
+        self._length_sum = 0
+        self._length_count = 0
+        self._entropy_sum = 0.0
+        self._entropy_count = 0
+        self._sub_entropy_sum = 0.0
+        self._sub_entropy_count = 0
+        self._label_sum = 0
+        self._label_count = 0
+        self._orig_bytes_total = 0
+        self._raw_query_count = 0
+        # Reference counts: the live values, for unanimity and for extremes
+        # that subtraction cannot undo.
+        self._dst_port_counts: dict[int, int] = {}
+        self._proto_counts: dict[str, int] = {}
+        # Extremes go through WindowExtreme rather than a cache that is
+        # rebuilt when the extreme leaves: at the occupancy cap the oldest
+        # observation leaves on every flow, which turns "rebuild rarely"
+        # into a full rescan per flow.
+        self._max_length = WindowExtreme(largest=True)
+        self._max_entropy = WindowExtreme(largest=True)
+        self._max_label = WindowExtreme(largest=True)
+        self._min_timestamp = WindowExtreme(largest=False)
+        self._max_timestamp = WindowExtreme(largest=True)
+        # Observations leave in arrival order, so a counter per side names
+        # them without the caller carrying an id around.
+        self._added = 0
+        self._removed = 0
+
+    @staticmethod
+    def _increment(counts: dict, key) -> None:
+        counts[key] = counts.get(key, 0) + 1
+
+    @staticmethod
+    def _decrement(counts: dict, key) -> None:
+        remaining = counts[key] - 1
+        if remaining:
+            counts[key] = remaining
+        else:
+            del counts[key]
+
+    def _add(self, observation: DnsObservation, signals: int, threshold: int) -> None:
+        sequence = self._added
+        self._added += 1
+        if signals >= threshold:
+            self._suspicious_count += 1
+            self._suspicious_signal_sum += signals
+        if observation.is_txt is not None:
+            self._txt_known += 1
+            if observation.is_txt:
+                self._txt_true += 1
+        if observation.query_length is not None:
+            self._length_sum += observation.query_length
+            self._length_count += 1
+            self._max_length.push(sequence, observation.query_length)
+        if observation.query_entropy is not None:
+            self._entropy_sum += observation.query_entropy
+            self._entropy_count += 1
+            self._max_entropy.push(sequence, observation.query_entropy)
+        if observation.subdomain_entropy is not None:
+            self._sub_entropy_sum += observation.subdomain_entropy
+            self._sub_entropy_count += 1
+        if observation.label_count is not None:
+            self._label_sum += observation.label_count
+            self._label_count += 1
+            self._max_label.push(sequence, observation.label_count)
+        self._orig_bytes_total += observation.orig_bytes
+        if observation.has_raw_query:
+            self._raw_query_count += 1
+        if observation.dst_port is not None:
+            self._increment(self._dst_port_counts, observation.dst_port)
+        if observation.proto is not None:
+            self._increment(self._proto_counts, observation.proto)
+
+        # ``None`` here means "cache invalid, recompute on read" - it does
+        self._min_timestamp.push(sequence, observation.timestamp)
+        self._max_timestamp.push(sequence, observation.timestamp)
+
+    def _remove(self, observation: DnsObservation, signals: int, threshold: int) -> None:
+        if signals >= threshold:
+            self._suspicious_count -= 1
+            self._suspicious_signal_sum -= signals
+        if observation.is_txt is not None:
+            self._txt_known -= 1
+            if observation.is_txt:
+                self._txt_true -= 1
+        if observation.query_length is not None:
+            self._length_sum -= observation.query_length
+            self._length_count -= 1
+        if observation.query_entropy is not None:
+            self._entropy_sum -= observation.query_entropy
+            self._entropy_count -= 1
+        if observation.subdomain_entropy is not None:
+            self._sub_entropy_sum -= observation.subdomain_entropy
+            self._sub_entropy_count -= 1
+        if observation.label_count is not None:
+            self._label_sum -= observation.label_count
+            self._label_count -= 1
+        self._orig_bytes_total -= observation.orig_bytes
+        if observation.has_raw_query:
+            self._raw_query_count -= 1
+        if observation.dst_port is not None:
+            self._decrement(self._dst_port_counts, observation.dst_port)
+        if observation.proto is not None:
+            self._decrement(self._proto_counts, observation.proto)
+
+        # Departures are FIFO, so this counter names the one leaving.
+        sequence = self._removed
+        self._removed += 1
+        self._max_length.pop(sequence)
+        self._max_entropy.pop(sequence)
+        self._max_label.pop(sequence)
+        self._min_timestamp.pop(sequence)
+        self._max_timestamp.pop(sequence)
+
+    def observe(self, observation: DnsObservation, signals: int, threshold: int) -> None:
+        # The cap is enforced here rather than by ``deque(maxlen=...)``: a
+        # maxlen deque evicts silently, which would leave the aggregates
+        # describing an observation the window no longer holds.
+        self._threshold = threshold
+        if len(self._events) >= self.max_observations:
+            self._drop_oldest()
+        self._events.append((observation, signals))
+        self._add(observation, signals, threshold)
         self.expire(observation.timestamp)
+
+    def _drop_oldest(self) -> None:
+        observation, signals = self._events.popleft()
+        self._remove(observation, signals, self._threshold)
 
     def expire(self, now: float) -> None:
         cutoff = now - self.window_seconds
-        while self._events and self._events[0].timestamp <= cutoff:
-            self._events.popleft()
+        while self._events and self._events[0][0].timestamp <= cutoff:
+            self._drop_oldest()
+
+    # --- derived views, all O(1) ------------------------------------------
+
+    @property
+    def suspicious_count(self) -> int:
+        return self._suspicious_count
+
+    def mean_signals(self) -> float | None:
+        if not self._suspicious_count:
+            return None
+        return self._suspicious_signal_sum / self._suspicious_count
+
+    @property
+    def txt_count(self) -> int:
+        return self._txt_true
+
+    def txt_ratio(self) -> float | None:
+        return (self._txt_true / self._txt_known) if self._txt_known else None
+
+    def mean_query_length(self) -> float | None:
+        return (self._length_sum / self._length_count) if self._length_count else None
+
+    def max_query_length(self) -> int | None:
+        longest = self._max_length.value
+        return None if longest is None else int(longest)
+
+    def mean_query_entropy(self) -> float | None:
+        return (self._entropy_sum / self._entropy_count) if self._entropy_count else None
+
+    def max_query_entropy(self) -> float | None:
+        return self._max_entropy.value
+
+    def mean_subdomain_entropy(self) -> float | None:
+        if not self._sub_entropy_count:
+            return None
+        return self._sub_entropy_sum / self._sub_entropy_count
+
+    # --- exact float means, for evidence --------------------------------
+    #
+    # A running float sum and a fresh sum of the same values disagree in the
+    # last bit: adding then subtracting a float does not restore the total
+    # exactly. That is harmless for the running counts - every value the
+    # ratio test and the score read is integer arithmetic, so those are bit
+    # exact - but these two means are *published as evidence*, and evidence
+    # that shifts in its sixteenth digit depending on what expired an hour
+    # ago is evidence nobody can reproduce.
+    #
+    # So they are summed from the resident observations, in order, exactly
+    # as the pre-incremental code did. That is O(n), which is why the
+    # detector only calls them when it is actually building an alert.
+
+    def exact_mean_query_entropy(self) -> float | None:
+        values = [
+            observation.query_entropy
+            for observation, _signals in self._events
+            if observation.query_entropy is not None
+        ]
+        return (sum(values) / len(values)) if values else None
+
+    def exact_mean_subdomain_entropy(self) -> float | None:
+        values = [
+            observation.subdomain_entropy
+            for observation, _signals in self._events
+            if observation.subdomain_entropy is not None
+        ]
+        return (sum(values) / len(values)) if values else None
+
+    def mean_label_count(self) -> float | None:
+        return (self._label_sum / self._label_count) if self._label_count else None
+
+    def max_label_count(self) -> int | None:
+        most = self._max_label.value
+        return None if most is None else int(most)
+
+    @property
+    def total_orig_bytes(self) -> int:
+        return self._orig_bytes_total
+
+    @property
+    def raw_query_count(self) -> int:
+        return self._raw_query_count
+
+    def unanimous_dst_port(self) -> int | None:
+        return next(iter(self._dst_port_counts)) if len(self._dst_port_counts) == 1 else None
+
+    def unanimous_proto(self) -> str | None:
+        return next(iter(self._proto_counts)) if len(self._proto_counts) == 1 else None
+
+    def time_span(self) -> tuple[float, float] | None:
+        earliest = self._min_timestamp.value
+        latest = self._max_timestamp.value
+        if earliest is None or latest is None:
+            return None
+        return earliest, latest
 
     def is_empty(self) -> bool:
         return not self._events
 
     def clear(self) -> None:
         self._events.clear()
+        self._reset_aggregates()
 
     def __len__(self) -> int:
         return len(self._events)
 
     def __iter__(self):
-        return iter(self._events)
+        return (observation for observation, _signals in self._events)
 
 
 class DnsTunnellingDetector(Detector):
@@ -404,7 +647,12 @@ class DnsTunnellingDetector(Detector):
 
         key = DnsTunnelKey.from_flow(flow)
         window = self._window_for(key)
-        window.observe(DnsObservation.from_flow(flow))
+        observation = DnsObservation.from_flow(flow)
+        window.observe(
+            observation,
+            self._signal_count(observation),
+            self.config.min_signals_per_observation,
+        )
         self._maybe_sweep(flow.timestamp)
 
         stats = self._aggregate(window)
@@ -416,6 +664,12 @@ class DnsTunnellingDetector(Detector):
         if not self._should_emit(key, flow.timestamp, severity):
             return []
 
+        # Evidence-only float means, recomputed exactly for the alert.
+        stats = replace(
+            stats,
+            mean_query_entropy=window.exact_mean_query_entropy(),
+            mean_subdomain_entropy=window.exact_mean_subdomain_entropy(),
+        )
         alert = self._build_alert(key, stats, score, severity)
 
         # Only once the alert exists. If building or validating it raises,
@@ -518,56 +772,42 @@ class DnsTunnellingDetector(Detector):
     def _aggregate(self, window: _DnsWindow) -> DnsAggregate | None:
         """Summarize a pair's window. ``None`` when it holds nothing.
 
-        Means are taken only over the observations that actually carried the
-        field, so a partially-populated window reports a real mean of what
-        was measured rather than one diluted by absent values.
+        Every value is read from the window's incremental state rather
+        than recomputed over its contents, so this is O(1) - extremes
+        included, see :class:`WindowExtreme`. Means are still taken only
+        over the observations
+        that actually carried the field, so a partially-populated window
+        reports a real mean of what was measured rather than one diluted by
+        absent values.
         """
-        observations = list(window)
-        if not observations:
+        total = len(window)
+        if not total:
             return None
-
-        total = len(observations)
-        suspicious_signals: list[int] = []
-        txt_flags = [o.is_txt for o in observations if o.is_txt is not None]
-        lengths = [o.query_length for o in observations if o.query_length is not None]
-        entropies = [o.query_entropy for o in observations if o.query_entropy is not None]
-        sub_entropies = [
-            o.subdomain_entropy for o in observations if o.subdomain_entropy is not None
-        ]
-        labels = [o.label_count for o in observations if o.label_count is not None]
-
-        for observation in observations:
-            signals = self._signal_count(observation)
-            if signals >= self.config.min_signals_per_observation:
-                suspicious_signals.append(signals)
-
-        timestamps = [o.timestamp for o in observations]
-        txt_count = sum(1 for flag in txt_flags if flag)
 
         return DnsAggregate(
             observation_count=total,
-            suspicious_count=len(suspicious_signals),
+            suspicious_count=window.suspicious_count,
             # `total` is >= 1 here, so this division is always safe.
-            suspicious_ratio=len(suspicious_signals) / total,
-            mean_signals=self._mean(suspicious_signals),
-            txt_count=txt_count,
+            suspicious_ratio=window.suspicious_count / total,
+            mean_signals=window.mean_signals(),
+            txt_count=window.txt_count,
             # Over the observations that reported is_txt at all, not the
             # whole window - otherwise absent flags would read as "not TXT".
-            txt_ratio=(txt_count / len(txt_flags)) if txt_flags else None,
-            mean_query_length=self._mean(lengths),
-            max_query_length=max(lengths) if lengths else None,
-            mean_query_entropy=self._mean(entropies),
-            max_query_entropy=max(entropies) if entropies else None,
-            mean_subdomain_entropy=self._mean(sub_entropies),
-            mean_label_count=self._mean(labels),
-            max_label_count=max(labels) if labels else None,
-            total_orig_bytes=sum(o.orig_bytes for o in observations),
-            time_span=(min(timestamps), max(timestamps)),
+            txt_ratio=window.txt_ratio(),
+            mean_query_length=window.mean_query_length(),
+            max_query_length=window.max_query_length(),
+            mean_query_entropy=window.mean_query_entropy(),
+            max_query_entropy=window.max_query_entropy(),
+            mean_subdomain_entropy=window.mean_subdomain_entropy(),
+            mean_label_count=window.mean_label_count(),
+            max_label_count=window.max_label_count(),
+            total_orig_bytes=window.total_orig_bytes,
+            time_span=window.time_span(),
             # Over this window only - an expired observation cannot make a
             # port ambiguous or claim a raw query the alert no longer covers.
-            dst_port=self._unanimous([o.dst_port for o in observations]),
-            protocol=self._unanimous([o.proto for o in observations]),
-            raw_query_count=sum(1 for o in observations if o.has_raw_query),
+            dst_port=window.unanimous_dst_port(),
+            protocol=window.unanimous_proto(),
+            raw_query_count=window.raw_query_count,
         )
 
     @staticmethod

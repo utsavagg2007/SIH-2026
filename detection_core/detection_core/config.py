@@ -30,6 +30,7 @@ configuration that lies about what it is doing.
 
 from __future__ import annotations
 
+import math
 import tomllib
 from dataclasses import dataclass, field, fields
 from pathlib import Path
@@ -228,7 +229,18 @@ def _coerce_scalar(path: Path, section: str, key: str, spec, value: Any) -> Any:
 
     if expected is float:
         if isinstance(value, (int, float)):
-            return float(value)
+            number = float(value)
+            if not math.isfinite(number):
+                # TOML spells these `nan` and `inf`, and every setting here is
+                # a threshold, a weight or a duration. NaN loses every
+                # comparison, so a window would never expire and a ratio
+                # would never qualify; inf is a bound nothing can cross.
+                # Both would disable a detector while looking configured.
+                raise ConfigError(
+                    f"{path}: [{section}] {key} must be a finite number, got "
+                    f"{value!r}"
+                )
+            return number
         raise ConfigError(
             f"{path}: [{section}] {key} must be a number, got "
             f"{type(value).__name__} ({value!r})"

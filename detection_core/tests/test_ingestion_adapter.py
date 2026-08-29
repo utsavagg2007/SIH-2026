@@ -425,3 +425,125 @@ def test_stats_reset_between_runs(sample_path):
     list(adapter.from_path(sample_path))
     list(adapter.from_path(sample_path))
     assert adapter.stats.parsed == 2
+
+
+# --------------------------------------------------------------------------
+# A malformed explicit timestamp is an error, not an excuse to guess
+# --------------------------------------------------------------------------
+
+
+def timestamp_record(**over):
+    """A valid record whose flow_id carries a *different* fallback time."""
+    payload = {
+        "flow_id": "10.0.0.1:10.0.0.2:443:tcp:1000.0",
+        "src_ip": "10.0.0.1", "dst_ip": "10.0.0.2", "dst_port": 443,
+        "proto": "tcp", "duration": 0.1, "orig_bytes": 1, "resp_bytes": 1,
+        "orig_pkts": 1, "resp_pkts": 1,
+    }
+    payload.update(over)
+    return payload
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [(2000, 2000.0), (2000.5, 2000.5), (0, 0.0)],
+)
+def test_a_numeric_explicit_timestamp_wins_over_flow_id(value, expected):
+    from detection_core.adapters import record_to_flow_event
+
+    flow = record_to_flow_event(timestamp_record(timestamp=value))
+
+    assert flow.timestamp == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["2000.5", "", True, False, [2000.5], {"t": 1}, object()],
+    ids=["numeric-string", "empty-string", "true", "false", "list", "dict", "object"],
+)
+def test_a_malformed_explicit_timestamp_is_rejected_not_replaced(value):
+    """The defect: a bad value silently became the flow_id's time instead.
+
+    Substituting a different number would place the flow somewhere on the
+    timeline the producer never claimed, and every window, interval and
+    cooldown downstream would believe it.
+    """
+    from detection_core.adapters import record_to_flow_event
+
+    with pytest.raises(ValueError, match="is not a number"):
+        record_to_flow_event(timestamp_record(timestamp=value))
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_a_non_finite_explicit_timestamp_is_rejected(value):
+    from pydantic import ValidationError
+
+    from detection_core.adapters import record_to_flow_event
+
+    with pytest.raises((ValueError, ValidationError)):
+        record_to_flow_event(timestamp_record(timestamp=value))
+
+
+def test_an_absent_timestamp_still_falls_back_to_flow_id():
+    from detection_core.adapters import record_to_flow_event
+
+    assert record_to_flow_event(timestamp_record()).timestamp == 1000.0
+
+
+def test_an_explicit_null_timestamp_counts_as_absent():
+    """A producer saying "I have none" is not a producer sending a bad one."""
+    from detection_core.adapters import record_to_flow_event
+
+    assert record_to_flow_event(timestamp_record(timestamp=None)).timestamp == 1000.0
+
+
+def test_the_ts_alias_keeps_its_precedence_and_its_strictness():
+    from detection_core.adapters import record_to_flow_event
+
+    # `timestamp` still wins when both are present and valid.
+    both = record_to_flow_event(timestamp_record(timestamp=2000.0, ts=3000.0))
+    assert both.timestamp == 2000.0
+
+    # `ts` is used when `timestamp` is absent...
+    assert record_to_flow_event(timestamp_record(ts=3000.0)).timestamp == 3000.0
+
+    # ...and is held to the same standard.
+    with pytest.raises(ValueError, match="is not a number"):
+        record_to_flow_event(timestamp_record(ts="3000.0"))
+
+    # A null `timestamp` defers to a valid `ts`.
+    assert record_to_flow_event(
+        timestamp_record(timestamp=None, ts=3000.0)
+    ).timestamp == 3000.0
+
+
+def test_no_explicit_and_an_unparseable_flow_id_still_fails_as_before():
+    from detection_core.adapters import record_to_flow_event
+
+    with pytest.raises(ValueError, match="cannot determine timestamp"):
+        record_to_flow_event(timestamp_record(flow_id="no-epoch-here"))
+
+
+def test_a_malformed_timestamp_is_skipped_and_counted_by_the_adapter(tmp_path, caplog):
+    """End to end: the record is skipped, the next one still parses."""
+    import json
+    import logging
+
+    from detection_core.adapters import IngestionJsonlAdapter
+
+    path = tmp_path / "features.jsonl"
+    path.write_text(
+        json.dumps(timestamp_record(timestamp="2000.5")) + "\n"
+        + json.dumps(timestamp_record(timestamp=2000.5)) + "\n",
+        encoding="utf-8",
+    )
+    adapter = IngestionJsonlAdapter(path=path)
+
+    with caplog.at_level(logging.WARNING):
+        events = list(adapter)
+
+    assert len(events) == 1
+    assert events[0].timestamp == 2000.5
+    assert adapter.stats.validation_errors == 1
+    assert adapter.stats.skipped == 1
+    assert any("is not a number" in r.getMessage() for r in caplog.records)

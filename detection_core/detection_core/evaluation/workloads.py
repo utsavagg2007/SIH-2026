@@ -247,14 +247,17 @@ def stress_flows(
 ) -> list[FlowEvent]:
     """Workloads that isolate rolling-window cost, for diagnosis only.
 
-    ``ActivityWindow`` derives every count by scanning its deque, so the
-    per-flow cost should grow with how many observations are *resident* in
-    the window. These two shapes pull those variables apart:
+    Two variables drive rolling-window cost: how many observations are
+    *resident* in one window, and how many windows the index holds. These
+    shapes pull them apart, so a per-flow cost that grows with either one
+    shows up here as a rising curve rather than a flat line.
 
     * ``hot_key`` - one ``(src, dst, port, proto)`` relationship, timestamps
       1ms apart. Nothing expires inside a 300s window, so occupancy climbs
       to ``count`` and one key carries all of it. This is the shape that
-      would expose an O(N) rescan as O(N^2) overall.
+      would expose a per-call rescan of a window's contents as O(N^2)
+      overall - the defect ``ActivityWindow`` was rewritten to remove, and
+      the reason this shape is still measured after every change to it.
     * ``many_keys`` - a distinct source *and* destination per flow, so every
       window index grows to ``count`` entries while every individual window
       holds one observation. This isolates index growth from scan length.

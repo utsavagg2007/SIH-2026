@@ -317,7 +317,13 @@ def _output_collision(args: argparse.Namespace) -> str | None:
     ``--output`` aimed at the input JSONL has already emptied it - the run
     then reads zero flows from a file the user still had. Same for the
     ``--dga-model`` bundle, which is loaded once and cannot be rebuilt from
-    the alerts written over it.
+    the alerts written over it, and same for the settings and fingerprint
+    files: both are read at startup and both are hand-maintained, so an
+    ``--output`` aimed at one destroys work that no rerun brings back.
+
+    The rule is simply "every file this run reads": any new read-only input
+    belongs in the tuple below, and forgetting one is how ``--config`` and
+    ``--ja3-feed`` were briefly able to truncate themselves.
 
     Returns the message to log, or ``None`` when the destinations are
     genuinely distinct. Nothing here opens, creates or modifies a file.
@@ -328,6 +334,8 @@ def _output_collision(args: argparse.Namespace) -> str | None:
     for label, source in (
         ("input file", args.input),
         ("--dga-model file", args.dga_model),
+        ("--config file", args.config),
+        ("--ja3-feed file", args.ja3_feed),
     ):
         if source is None:
             continue

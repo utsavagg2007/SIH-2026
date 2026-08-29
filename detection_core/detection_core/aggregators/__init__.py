@@ -14,6 +14,7 @@ Still reserved: grouping related ThreatAlerts into incidents by populating
 
 from __future__ import annotations
 
+from .extremes import WindowExtreme
 from .sliding_window import ActivityWindow, FlowObservation, WindowIndex
 
-__all__ = ["ActivityWindow", "FlowObservation", "WindowIndex"]
+__all__ = ["ActivityWindow", "FlowObservation", "WindowExtreme", "WindowIndex"]

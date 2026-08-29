@@ -88,11 +88,35 @@ def _timestamp_from_flow_id(flow_id: Any) -> float | None:
 
 
 def _resolve_timestamp(record: Mapping[str, Any]) -> float:
-    """Prefer an explicit top-level timestamp, else derive from flow_id."""
+    """Prefer an explicit top-level timestamp, else derive from flow_id.
+
+    The ``flow_id`` fallback exists for records that carry **no** event time
+    of their own. It is not a repair for one that is present and wrong: a
+    record saying ``"timestamp": "2000.5"`` has an event time, and quietly
+    substituting a different number recovered from the id would place the
+    flow somewhere on the timeline the producer never claimed - and every
+    window, interval and cooldown downstream would believe it.
+
+    So a present-but-unusable value is an error, and only an absent one
+    falls back. An explicit ``null`` counts as absent: that is a producer
+    saying it has no timestamp, not one supplying a bad one.
+
+    Non-finite floats are left to ``FlowEvent``'s own finite validator,
+    which already rejects them.
+    """
     for key in ("timestamp", "ts"):
-        value = record.get(key)
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            return float(value)
+        if key not in record:
+            continue
+        value = record[key]
+        if value is None:  # explicitly "not supplied"
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(
+                f"{key}={value!r} is not a number; a malformed event time is "
+                "not repaired from flow_id, because that would silently move "
+                "the flow to a different point in time"
+            )
+        return float(value)
     derived = _timestamp_from_flow_id(record.get("flow_id"))
     if derived is None:
         raise ValueError(

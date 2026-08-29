@@ -50,6 +50,7 @@ detector stays dependency-free; building *this* one needs the extra.
 
 from __future__ import annotations
 
+import heapq
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
@@ -153,14 +154,33 @@ class _SourceCorrelation:
 
     findings: dict[str, _DomainFinding] = field(default_factory=dict)
     last_emitted_at: float | None = None
+    #: ``(timestamp, normalized)`` ordered by event time, so expiry touches
+    #: only what has actually expired instead of walking every live domain.
+    _expiry: list[tuple[float, str]] = field(default_factory=list)
 
     def record(self, finding: _DomainFinding) -> None:
         self.findings[finding.normalized] = finding
+        heapq.heappush(self._expiry, (finding.timestamp, finding.normalized))
 
     def expire(self, cutoff: float) -> None:
-        """Drop findings at or before ``cutoff`` - the window's own rule."""
-        for normalized, finding in list(self.findings.items()):
-            if finding.timestamp <= cutoff:
+        """Drop findings at or before ``cutoff`` - the window's own rule.
+
+        A heap rather than a deque, so this stays exact when event time
+        arrives slightly out of order: the oldest timestamp is always on
+        top, wherever it was appended. A deque would stop at the first
+        unexpired arrival and leave an older one behind it resident, which
+        would quietly inflate the distinct-domain count.
+
+        Re-recording a domain supersedes its earlier entry rather than
+        removing it, so the heap can hold an entry for a domain that has
+        since been seen again. Such an entry is recognised by its timestamp
+        no longer matching the stored finding, and is simply discarded -
+        the domain itself stays until its *current* timestamp expires.
+        """
+        while self._expiry and self._expiry[0][0] <= cutoff:
+            timestamp, normalized = heapq.heappop(self._expiry)
+            current = self.findings.get(normalized)
+            if current is not None and current.timestamp == timestamp:
                 del self.findings[normalized]
 
     def is_idle(self, cutoff: float) -> bool:

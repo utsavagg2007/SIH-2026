@@ -224,3 +224,50 @@ def test_feature_importances_are_finite_and_sorted(fitted_model):
 
 def test_feature_importances_are_deterministic(fitted_model):
     assert fitted_model.feature_importances() == fitted_model.feature_importances()
+
+
+# --------------------------------------------------------------------------
+# One forest traversal per verdict, and it must be the same verdict
+# --------------------------------------------------------------------------
+
+
+def test_predict_domains_matches_the_two_call_path_exactly(fitted_model):
+    """``predict_domains`` derives the label from the probabilities.
+
+    For a RandomForestClassifier that is what ``predict`` does - sklearn
+    defines it as ``classes_.take(argmax(predict_proba))`` - so the derived
+    label must equal the one the separate call returns, for every domain.
+    If a future estimator breaks that identity, this fails.
+    """
+    domains = load_dataset(FIXTURE).domains
+
+    predictions = fitted_model.predict_domains(domains)
+
+    assert [p.label for p in predictions] == fitted_model.predict(domains)
+    assert [p.dga_score for p in predictions] == fitted_model.predict_scores(domains)
+
+
+def test_a_single_verdict_matches_the_batch(fitted_model):
+    domain = "kq3v9x2mzt7wp1.com"
+
+    single = fitted_model.predict_domain(domain)
+    batch = fitted_model.predict_domains([domain])[0]
+
+    assert single == batch
+
+
+def test_an_empty_batch_returns_nothing(fitted_model):
+    assert fitted_model.predict_domains([]) == []
+
+
+def test_a_benign_only_fit_still_scores_zero():
+    """The single-class guard must survive the single-traversal path."""
+    model = DGAModel.new(n_estimators=10, random_state=42, n_jobs=1)
+    model.fit(["google.com", "wikipedia.org", "github.com"], [0, 0, 0])
+
+    predictions = model.predict_domains(["kq3v9x2mzt7wp1.com", "google.com"])
+
+    assert [p.dga_score for p in predictions] == [0.0, 0.0]
+    assert [p.label for p in predictions] == model.predict(
+        ["kq3v9x2mzt7wp1.com", "google.com"]
+    )

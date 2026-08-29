@@ -605,3 +605,139 @@ def test_an_unexpected_error_is_not_swallowed_by_the_model_handling(tmp_path, mo
 
     with pytest.raises(MemoryError, match="genuinely unexpected"):
         runner.main([str(path), "--quiet"])
+
+
+# --------------------------------------------------------------------------
+# --output must not destroy the config or the fingerprint feed either
+# --------------------------------------------------------------------------
+
+
+def config_file(tmp_path, name="detectors.toml"):
+    path = tmp_path / name
+    path.write_text("[port_scan]\nmin_unique_ports = 5\n", encoding="utf-8")
+    return path
+
+
+def feed_file(tmp_path, name="feed.txt"):
+    path = tmp_path / name
+    path.write_text(
+        "# synthetic\nja3:0123456789abcdef0123456789abcdef\n", encoding="utf-8"
+    )
+    return path
+
+
+def test_output_equal_to_the_config_is_rejected(tmp_path, capsys):
+    """Both are read at startup; opening the output truncates on open."""
+    path = write(tmp_path, "input.jsonl", scan_records())
+    config = config_file(tmp_path)
+    before = digest(config)
+
+    code = runner.main(
+        [str(path), "--config", str(config), "--output", str(config)]
+    )
+
+    assert code == 1
+    assert "same file as the --config file" in capsys.readouterr().err
+    assert digest(config) == before, "the settings file was truncated"
+
+
+def test_output_alias_of_the_config_is_rejected(tmp_path, monkeypatch, capsys):
+    data = tmp_path / "conf"
+    data.mkdir()
+    path = write(tmp_path, "input.jsonl", scan_records())
+    config = config_file(data)
+    before = digest(config)
+
+    monkeypatch.chdir(tmp_path)
+    code = runner.main(
+        [str(path), "--config", "./conf/detectors.toml",
+         "--output", "conf/../conf/detectors.toml"]
+    )
+
+    assert code == 1
+    assert "same file as the --config file" in capsys.readouterr().err
+    assert digest(config) == before
+
+
+def test_output_equal_to_the_feed_is_rejected(tmp_path, capsys):
+    path = write(tmp_path, "input.jsonl", scan_records())
+    feed = feed_file(tmp_path)
+    before = digest(feed)
+
+    code = runner.main([str(path), "--ja3-feed", str(feed), "--output", str(feed)])
+
+    assert code == 1
+    assert "same file as the --ja3-feed file" in capsys.readouterr().err
+    assert digest(feed) == before, "the fingerprint feed was truncated"
+
+
+def test_output_alias_of_the_feed_is_rejected(tmp_path, monkeypatch, capsys):
+    data = tmp_path / "ioc"
+    data.mkdir()
+    path = write(tmp_path, "input.jsonl", scan_records())
+    feed = feed_file(data)
+    before = digest(feed)
+
+    monkeypatch.chdir(tmp_path)
+    code = runner.main(
+        [str(path), "--ja3-feed", "./ioc/feed.txt", "--output", "ioc/../ioc/feed.txt"]
+    )
+
+    assert code == 1
+    assert digest(feed) == before
+
+
+def test_every_startup_input_is_protected(tmp_path, dga_model_path, capsys):
+    """The whole matrix at once: each read-only input, in turn, as --output."""
+    path = write(tmp_path, "input.jsonl", scan_records())
+    config = config_file(tmp_path)
+    feed = feed_file(tmp_path)
+    common = [
+        "--config", str(config), "--ja3-feed", str(feed),
+        "--dga-model", str(dga_model_path),
+    ]
+    targets = {
+        "input file": path,
+        "--config file": config,
+        "--ja3-feed file": feed,
+        "--dga-model file": dga_model_path,
+    }
+
+    for label, target in targets.items():
+        before = digest(target)
+        code = runner.main([str(path), *common, "--output", str(target)])
+        err = capsys.readouterr().err
+
+        assert code == 1, f"{label} was not protected"
+        assert f"same file as the {label}" in err, err
+        assert "Traceback" not in err
+        assert digest(target) == before, f"{label} was modified"
+
+
+def test_distinct_paths_still_run_with_every_option(tmp_path, dga_model_path):
+    """The guard must not reject an ordinary run."""
+    path = write(tmp_path, "input.jsonl", scan_records())
+    out = tmp_path / "alerts.jsonl"
+
+    code = runner.main([
+        str(path), "--output", str(out),
+        "--config", str(config_file(tmp_path)),
+        "--ja3-feed", str(feed_file(tmp_path)),
+        "--dga-model", str(dga_model_path), "--quiet",
+    ])
+
+    assert code == 0
+    assert read_alerts(out)
+
+
+def test_a_collision_never_creates_the_output(tmp_path):
+    """Rejected before anything is opened."""
+    path = write(tmp_path, "input.jsonl", scan_records())
+    config = config_file(tmp_path)
+    sibling = tmp_path / "would_be_created.jsonl"
+
+    assert runner.main(
+        [str(path), "--config", str(config), "--output", str(config), "--quiet"]
+    ) == 1
+    assert not sibling.exists()
+    assert config.read_text(encoding="utf-8").startswith("[port_scan]")

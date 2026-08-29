@@ -416,8 +416,9 @@ def assert_no_residue(window: ActivityWindow) -> None:
     assert window._src_ip_counts == {}
     assert window._proto_counts == {}
     assert window._hosts_by_port == {}
-    assert window._orig_bytes_counts == {}
-    assert window._timestamp_counts == {}
+    assert len(window._max_orig_bytes) == 0
+    assert len(window._min_timestamp) == 0
+    assert len(window._max_timestamp) == 0
     assert window._orig_bytes_total == 0
     assert window._resp_bytes_total == 0
     assert window._orig_packets_total == 0
@@ -443,9 +444,12 @@ def test_high_cardinality_history_leaves_nothing_behind():
     assert len(window._dst_ip_counts) == 1
     assert len(window._dst_port_counts) == 1
     assert len(window._src_ip_counts) == 1
-    assert len(window._orig_bytes_counts) == 1
-    assert len(window._timestamp_counts) == 1
     assert len(window._hosts_by_port) == 1
+    # The extreme trackers keep candidates, not history: an observation is
+    # dropped as soon as a later one dominates it or it leaves the window.
+    assert len(window._max_orig_bytes) == 1
+    assert len(window._min_timestamp) == 1
+    assert len(window._max_timestamp) == 1
 
     window.expire(1_000_000.0)
     assert window.is_empty()
@@ -494,4 +498,4 @@ def test_counters_shrink_as_observations_expire():
     window.expire(1015.0)  # cutoff 1005.0 - drops offsets 0..5
     assert window.attempts == 4
     assert len(window._dst_ip_counts) == 4
-    assert len(window._timestamp_counts) == 4
+    assert window.time_span() == (1006.0, 1009.0)
