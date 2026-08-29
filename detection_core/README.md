@@ -18,10 +18,11 @@ file format, and that knowledge is confined to `detection_core/adapters/`.
 
 ## Status
 
-Schemas, adapter, engine and tests are complete. Five rule detectors ship:
+Schemas, adapter, engine and tests are complete. Six rule detectors ship:
 **`PortScanDetector`**, **`DDoSDetector`**, **`C2BeaconingDetector`**,
-**`DnsTunnellingDetector`** and **`DataExfiltrationDetector`**. No trained ML
-model yet — `ml/` holds the offline DGA baseline only.
+**`DnsTunnellingDetector`**, **`DataExfiltrationDetector`** and
+**`EncryptedMalwareDetector`**. No trained ML model yet — `ml/` holds the
+offline DGA baseline only.
 
 ## Layout
 
@@ -32,7 +33,8 @@ detection_core/
 ├── engine/           Detector interface + DetectionEngine
 ├── aggregators/      rolling sliding windows, keyed by whatever a detector needs
 ├── detectors/        port_scan, ddos, c2_beaconing, dns_tunnelling,
-│                      data_exfiltration + shared scoring helpers
+│                      data_exfiltration, encrypted_malware
+│                      + shared scoring helpers
 └── ml/               offline DGA baseline (Part 1)
 ```
 
@@ -382,6 +384,161 @@ thresholds, plus `total_resp_bytes`, `observed_span_seconds` and
 `total_orig_bytes` is originator-side: what the host **sent**.
 `total_resp_bytes` is what came back — reported, never scored.
 `orig_bytes_per_second` is `None` when the window spans no event time.
+
+## DNS tunnelling detector
+
+**What it means.** Tunnelling encodes payload into the DNS query name itself,
+so the queries come out long, high-entropy, deeply labelled and often TXT. No
+single query proves anything — a long random-looking name is also what a CDN,
+a cloud bucket or a reputation lookup emits all day. What is unusual is a host
+doing it *over and over* to *one resolver*, so state is keyed by
+`(src_ip, dst_ip)` and the detector is aggregate-first.
+
+Two levels, both required:
+
+* **per query** — at least `min_signals_per_observation` (2) of five
+  indicators fire: long query, high query entropy, high subdomain entropy,
+  deep label stack, TXT. A single metric is never sufficient; the config
+  rejects `min_signals_per_observation=1` outright.
+* **per pair** — `observation_count >= min_dns_observations` **and**
+  `suspicious_ratio >= min_suspicious_ratio`.
+
+```python
+from detection_core import DnsTunnellingConfig, DnsTunnellingDetector
+
+detector = DnsTunnellingDetector(DnsTunnellingConfig(
+    window_seconds=300.0,
+    min_dns_observations=20,
+    suspicious_query_length=50,
+    suspicious_entropy=4.0,          # bits/char, base-2 Shannon
+    suspicious_subdomain_entropy=3.5,
+    suspicious_label_count=5,
+    min_suspicious_ratio=0.5,
+))
+```
+
+> **Untuned demo heuristics.** Re-derive them against this network's normal
+> DNS *and* real tunnelling traffic (iodine, dnscat2, dns2tcp) before trusting
+> them.
+
+**Working from derived features only.** Ingestion does not emit `dns.query`,
+`dns.qtype` or `dns.rcode`, so this detector reads exactly the five features
+that *are* normalized — `query_length`, `query_entropy`, `subdomain_entropy`,
+`label_count`, `is_txt`. Nothing reconstructs a query string, and every alert
+carries `raw_query_available: false` to make that explicit. It follows that
+this cannot confirm data actually left, identify the tunnel domain or tool, or
+tell one repeated name from fifty distinct ones.
+
+## Encrypted malware detector
+
+**Nothing here decrypts anything.** TLS payload is opaque to this project and
+stays that way. All this detector reads is handshake *metadata*: which
+fingerprint the client presented, what hostname it asked for, which version
+was negotiated.
+
+Two independent paths, answering different questions.
+
+### Path A — known fingerprint (`signature_match`)
+
+Does this flow's JA3/JA3S/JA4 appear in a configured list of known-malicious
+fingerprints? That is a signature decision about one flow, so it alerts on
+that flow (`event_scope=flow`, the flow's own `flow_id`), at score 1.0,
+immediately — no repetition required.
+
+> **The three fingerprint sets ship EMPTY and must stay that way.** They are
+> only meaningful once loaded from a threat-intelligence source the operator
+> trusts. This project does not invent fingerprints, and a test asserts the
+> defaults stay empty.
+
+```python
+from detection_core import EncryptedMalwareConfig, EncryptedMalwareDetector
+
+detector = EncryptedMalwareDetector(EncryptedMalwareConfig(
+    malicious_ja3=load_from_your_feed(),   # empty by default
+    malicious_ja3s=(),
+    malicious_ja4=(),
+))
+```
+
+Fingerprints are trimmed and lowercased on both sides — JA3/JA3S are hex
+digests and JA4 is a lowercase token grammar, so case folding cannot merge two
+distinct values. Nothing else is normalized: separator stripping or
+reformatting could collapse two different fingerprints onto one string, and a
+signature match must mean exactly what it says. Cooldown is keyed by
+`(src_ip, dst_ip, fingerprint_type, fingerprint)`, so two different
+fingerprints are two findings and neither silences the other.
+
+### Path B — metadata heuristic (`rule_score`)
+
+With no feed configured there is still something to say: a host whose TLS
+*repeatedly* asks for long, high-entropy hostnames is worth a look. Keyed by
+`(src_ip, dst_ip)`, `event_scope=host_pair`, `flow_id=None`.
+
+An observation is suspicious only when **long SNI AND high-entropy SNI** —
+both, never either:
+
+* Length alone is ordinary. `telemetry-prod-eu-west-1.example-cdn.net` is 40
+  characters of entirely normal infrastructure.
+* Entropy alone is ordinary. Short hashed CDN names look exactly like this.
+* **A missing SNI contributes nothing at all.** Encrypted Client Hello hides
+  it legitimately, and treating absence as evidence would flag the most
+  privacy-preserving traffic on the network.
+
+A pair qualifies on `observation_count >= min_tls_observations` **and**
+`suspicious_ratio >= min_suspicious_ratio`, so one strange handshake can never
+raise a malware alert.
+
+```python
+EncryptedMalwareConfig(
+    window_seconds=300.0,
+    min_tls_observations=6,
+    suspicious_sni_length=38,
+    suspicious_sni_entropy=4.2,   # bits/char
+    min_suspicious_ratio=0.60,
+    cooldown_seconds=300.0,
+)
+```
+
+`suspicious_sni_entropy` sits above the 3.5–4.0 band this was first drafted
+with, and the reason is measured rather than guessed:
+`telemetry-prod-eu-west-1.example-cdn.net` scores **3.88 bits/char**, so a 3.8
+threshold would call ordinary infrastructure generated. Random-looking labels
+sit near 4.7–5.1.
+
+> **Untuned demo heuristics.** "Long, random-looking hostname" describes a
+> great deal of entirely legitimate CDN and cloud traffic. Real values need a
+> capture of this network's normal TLS *and* malware samples.
+
+### Which TLS fields actually exist
+
+Ingestion emits five today: `uid`, `has_ja3`, `has_ja3s`,
+`ssl_version_encoded`, `cipher_encoded`. So:
+
+| field | status | used? |
+|---|---|---|
+| `tls.version` | available (decoded from `ssl_version_encoded`) | yes — an obsolete version *strengthens* a finding that already stands on SNI evidence, and can never create one |
+| `ja3` / `ja3s` / `ja4` | **not populated yet** | Path A is ready and matches the moment they arrive |
+| `server_name` | **not populated yet** | when present, SNI length and entropy are computed from it here |
+| `sni_length` / `sni_entropy` | **not populated yet** | optional slots the adapter already carries, for a future release |
+| `has_ja3` / `has_ja3s` | available | no — presence of *a* fingerprint says nothing about which |
+| `cipher_encoded` | available | **no, deliberately.** Upstream computes it as `(cipher_name_length % 16) + 1` — a function of how long the cipher's *name* is, not of which cipher was negotiated. Their own README marks it a placeholder. It is not mapped onto `TlsInfo` at all |
+
+**Consequence:** against today's real feed this detector correctly produces
+nothing — there are no fingerprints to match and no SNI to measure. It is
+built and tested to work the day those fields arrive, and the adapter already
+reads them.
+
+### This does not prove malware
+
+* Encrypted traffic is **not decrypted**, and metadata is not proof.
+* A high-entropy hostname is routine for CDNs, cloud buckets and ad exchanges.
+* ECH hides SNI entirely, and so does plain absence of the field.
+* Exact fingerprints are only as trustworthy as the feed they came from, and
+  they change — JA3 in particular varies with TLS library versions.
+* **QUIC is not supported.** Nothing in the current feature set describes
+  QUIC, and this detector makes no claim about it.
+* Timing and periodicity belong to `C2BeaconingDetector`; none of it is
+  computed here. A flow can legitimately raise both.
 
 ## DGA ML baseline (offline — Part 1)
 

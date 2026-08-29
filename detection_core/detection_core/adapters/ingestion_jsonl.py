@@ -144,7 +144,17 @@ def _build_tls(record: Mapping[str, Any]) -> TlsInfo | None:
         version=raw.get("version") or decode_ssl_version(raw.get("ssl_version_encoded")),
         has_ja3=raw.get("has_ja3"),
         has_ja3s=raw.get("has_ja3s"),
+        # sni_length / sni_entropy: integration TODO, absent upstream today.
+        # Read the same way as every other optional field, so a future
+        # ingestion release that emits them needs no adapter change.
+        sni_length=raw.get("sni_length"),
+        sni_entropy=raw.get("sni_entropy"),
     )
+    # NOTE: ingestion's `cipher_encoded` is deliberately NOT mapped. It is
+    # computed upstream as (cipher_name_length % 16) + 1 - a function of how
+    # long the cipher's *name* happens to be, not of which cipher was
+    # negotiated. Their own README marks it a placeholder. Carrying it would
+    # invite a detector to treat a meaningless number as a security signal.
 
 
 def _build_http(record: Mapping[str, Any]) -> HttpInfo | None:

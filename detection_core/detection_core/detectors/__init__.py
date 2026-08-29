@@ -21,9 +21,11 @@ Implemented:
                     (src, dst)-keyed
     data_exfiltration - bulk outbound bytes concentrated on one
                     destination (src, dst)-keyed
+    encrypted_malware - malicious TLS fingerprints, and repeatedly
+                    generated-looking SNI (src, dst)-keyed
 
 Planned, one module per remaining threat class:
-    dga_domain, encrypted_malware
+    dga_domain
 
 Note: several of those are blocked on raw fields current ingestion does not
 emit (see SCHEMA.md "Integration TODOs").
@@ -42,6 +44,16 @@ from .data_exfiltration import (
     ExfilStats,
 )
 from .ddos import DDoSConfig, DDoSDetector
+from .encrypted_malware import (
+    DETECTION_FINGERPRINT,
+    DETECTION_METADATA,
+    EncryptedMalwareConfig,
+    EncryptedMalwareDetector,
+    FingerprintKey,
+    TlsAggregate,
+    TlsObservation,
+    TlsPairKey,
+)
 from .dns_tunnelling import (
     DnsAggregate,
     DnsObservation,
@@ -52,6 +64,8 @@ from .dns_tunnelling import (
 from .port_scan import PortScanConfig, PortScanDetector
 
 __all__ = [
+    "DETECTION_FINGERPRINT",
+    "DETECTION_METADATA",
     "QUALIFICATION_BOTH",
     "QUALIFICATION_SINGLE",
     "QUALIFICATION_SUSTAINED",
@@ -67,8 +81,14 @@ __all__ = [
     "DnsTunnelKey",
     "DnsTunnellingConfig",
     "DnsTunnellingDetector",
+    "EncryptedMalwareConfig",
+    "EncryptedMalwareDetector",
     "ExfilKey",
     "ExfilStats",
+    "FingerprintKey",
     "PortScanConfig",
     "PortScanDetector",
+    "TlsAggregate",
+    "TlsObservation",
+    "TlsPairKey",
 ]

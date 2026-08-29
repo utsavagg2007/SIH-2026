@@ -89,7 +89,13 @@ class TlsInfo(BaseModel):
     """TLS data attached to a flow.
 
     ``ja3`` / ``ja3s`` / ``ja4`` / ``server_name`` are integration TODOs:
-    current ingestion emits only the ``has_ja3`` / ``has_ja3s`` booleans.
+    current ingestion emits only the ``has_ja3`` / ``has_ja3s`` booleans and
+    an encoded SSL version. ``sni_length`` / ``sni_entropy`` are the same
+    kind of TODO - slots for derived SNI features an ingestion release could
+    supply, mirroring what ``DnsInfo`` already gets for query names.
+
+    Everything optional here defaults to ``None`` meaning *not available*.
+    Nothing is ever invented, and no absent value is defaulted to 0.
     """
 
     model_config = _BLOCK_CONFIG
@@ -108,6 +114,12 @@ class TlsInfo(BaseModel):
     # Derived features - supplied by current ingestion.
     has_ja3: bool | None = None
     has_ja3s: bool | None = None
+
+    # Derived SNI features - NOT supplied by current ingestion. Present so
+    # the adapter can carry them the day it is emitted; detection_core can
+    # also compute the same two numbers itself from a raw ``server_name``.
+    sni_length: int | None = Field(default=None, ge=0)
+    sni_entropy: float | None = None
 
 
 class HttpInfo(BaseModel):

@@ -279,10 +279,12 @@ def test_detector_defaults():
 
 
 def test_shipped_detectors():
-    """Five rule detectors ship so far; no ML model yet."""
+    """Six rule detectors ship so far; no trained ML model yet."""
     from detection_core import detectors, ml
 
     assert detectors.__all__ == [
+        "DETECTION_FINGERPRINT",
+        "DETECTION_METADATA",
         "QUALIFICATION_BOTH",
         "QUALIFICATION_SINGLE",
         "QUALIFICATION_SUSTAINED",
@@ -298,9 +300,15 @@ def test_shipped_detectors():
         "DnsTunnelKey",
         "DnsTunnellingConfig",
         "DnsTunnellingDetector",
+        "EncryptedMalwareConfig",
+        "EncryptedMalwareDetector",
         "ExfilKey",
         "ExfilStats",
+        "FingerprintKey",
         "PortScanConfig",
         "PortScanDetector",
+        "TlsAggregate",
+        "TlsObservation",
+        "TlsPairKey",
     ]
     assert ml.__all__ == []
