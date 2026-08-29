@@ -11,6 +11,11 @@ entity at all (see SCHEMA.md).
 
 Time comes from ``FlowEvent.timestamp`` (epoch seconds), never wall clock,
 so a PCAP replay behaves exactly like a live stream.
+
+:class:`ActivityWindow` maintains its counts incrementally rather than
+rescanning its deque per call. That is a performance change only: every
+observation is still retained until it expires on event time, and every
+derived value is exactly what a full scan would return.
 """
 
 from __future__ import annotations
@@ -77,9 +82,24 @@ class ActivityWindow:
     ``now - timestamp < window_seconds``, so one exactly ``window_seconds``
     old has expired.
 
-    Counts are derived by scanning the window rather than maintained
-    incrementally. The window is small by construction, and it keeps the
-    expiry logic in one place instead of spread across counter bookkeeping.
+    Every derived count is maintained **incrementally**: an observation
+    updates the aggregates as it enters and reverses those updates as it
+    expires, so a read is O(distinct values) instead of O(observations).
+    The deque still holds the observations themselves - nothing is dropped,
+    approximated or capped - it is only no longer rescanned to answer
+    questions it has already answered.
+
+    This replaced a scan-per-call design after profiling showed the rescans
+    dominating at high per-key occupancy: repeated ``sum()`` over the deque,
+    and ``hosts_by_port`` rebuilding a dict of sets on every flow. The
+    observable results are unchanged, which
+    ``tests/test_sliding_window_equivalence.py`` pins against a reference
+    implementation of the original logic.
+
+    **Distinct values are reference-counted, never stored as a plain set.**
+    Two live observations can carry the same ``src_ip``; when one expires the
+    address must stay counted, and only disappear when the last one goes. A
+    set would forget that.
     """
 
     def __init__(self, window_seconds: float) -> None:
@@ -87,17 +107,117 @@ class ActivityWindow:
             raise ValueError("window_seconds must be positive")
         self.window_seconds = window_seconds
         self._events: deque[FlowObservation] = deque()
+        self._reset_aggregates()
+
+    def _reset_aggregates(self) -> None:
+        """Zero every incremental aggregate. The deque is the caller's job."""
+        # Additive totals: exact, O(1) to update and to read.
+        self._orig_packets_total = 0
+        self._orig_bytes_total = 0
+        self._resp_bytes_total = 0
+        # Reference counts: value -> how many live observations carry it.
+        # A zero count is deleted, so the key set is exactly the live values.
+        self._dst_port_counts: dict[int, int] = {}
+        self._dst_ip_counts: dict[str, int] = {}
+        self._src_ip_counts: dict[str, int] = {}
+        self._proto_counts: dict[str, int] = {}
+        # port -> host -> occurrences. Emptied containers are removed.
+        self._hosts_by_port: dict[int, dict[str, int]] = {}
+        # Extremes cannot be undone by subtraction, so they are cached with
+        # lazy invalidation: recomputed only when the extreme itself leaves.
+        self._orig_bytes_counts: dict[int, int] = {}
+        self._max_orig_bytes: int | None = 0
+        self._timestamp_counts: dict[float, int] = {}
+        self._min_timestamp: float | None = None
+        self._max_timestamp: float | None = None
+
+    # --- incremental bookkeeping ----------------------------------------
+
+    @staticmethod
+    def _increment(counts: dict, key) -> None:
+        counts[key] = counts.get(key, 0) + 1
+
+    @staticmethod
+    def _decrement(counts: dict, key) -> None:
+        """Drop one reference, deleting the key when the last one goes."""
+        remaining = counts[key] - 1
+        if remaining:
+            counts[key] = remaining
+        else:
+            del counts[key]
+
+    def _add(self, observation: FlowObservation) -> None:
+        """Fold one observation into every aggregate."""
+        self._orig_packets_total += observation.orig_packets
+        self._orig_bytes_total += observation.orig_bytes
+        self._resp_bytes_total += observation.resp_bytes
+
+        self._increment(self._dst_ip_counts, observation.dst_ip)
+        if observation.dst_port is not None:
+            self._increment(self._dst_port_counts, observation.dst_port)
+            # Only ports the observation actually carried: there is no port
+            # to correlate a portless flow across hosts.
+            hosts = self._hosts_by_port.get(observation.dst_port)
+            if hosts is None:
+                hosts = self._hosts_by_port[observation.dst_port] = {}
+            self._increment(hosts, observation.dst_ip)
+        if observation.src_ip is not None:
+            self._increment(self._src_ip_counts, observation.src_ip)
+        if observation.proto is not None:
+            self._increment(self._proto_counts, observation.proto)
+
+        self._increment(self._orig_bytes_counts, observation.orig_bytes)
+        if self._max_orig_bytes is not None and observation.orig_bytes > self._max_orig_bytes:
+            self._max_orig_bytes = observation.orig_bytes
+
+        self._increment(self._timestamp_counts, observation.timestamp)
+        if self._min_timestamp is None or observation.timestamp < self._min_timestamp:
+            self._min_timestamp = observation.timestamp
+        if self._max_timestamp is None or observation.timestamp > self._max_timestamp:
+            self._max_timestamp = observation.timestamp
+
+    def _remove(self, observation: FlowObservation) -> None:
+        """Exactly reverse :meth:`_add` for an observation that has expired."""
+        self._orig_packets_total -= observation.orig_packets
+        self._orig_bytes_total -= observation.orig_bytes
+        self._resp_bytes_total -= observation.resp_bytes
+
+        self._decrement(self._dst_ip_counts, observation.dst_ip)
+        if observation.dst_port is not None:
+            self._decrement(self._dst_port_counts, observation.dst_port)
+            hosts = self._hosts_by_port[observation.dst_port]
+            self._decrement(hosts, observation.dst_ip)
+            if not hosts:
+                del self._hosts_by_port[observation.dst_port]
+        if observation.src_ip is not None:
+            self._decrement(self._src_ip_counts, observation.src_ip)
+        if observation.proto is not None:
+            self._decrement(self._proto_counts, observation.proto)
+
+        self._decrement(self._orig_bytes_counts, observation.orig_bytes)
+        if observation.orig_bytes not in self._orig_bytes_counts:
+            # The largest value may have just left; recompute on next read.
+            if self._max_orig_bytes == observation.orig_bytes:
+                self._max_orig_bytes = None
+
+        self._decrement(self._timestamp_counts, observation.timestamp)
+        if observation.timestamp not in self._timestamp_counts:
+            if self._min_timestamp == observation.timestamp:
+                self._min_timestamp = None
+            if self._max_timestamp == observation.timestamp:
+                self._max_timestamp = None
 
     def observe(self, observation: FlowObservation) -> None:
         """Record an observation and drop anything it pushed out of the window."""
         self._events.append(observation)
+        self._add(observation)
         self.expire(observation.timestamp)
 
     def expire(self, now: float) -> None:
         """Drop observations older than the window, keeping memory bounded."""
         cutoff = now - self.window_seconds
         while self._events and self._events[0].timestamp <= cutoff:
-            self._events.popleft()
+            self._remove(self._events.popleft())
 
     # --- derived views --------------------------------------------------
 
@@ -108,15 +228,15 @@ class ActivityWindow:
 
     def dst_ports(self) -> set[int]:
         """Distinct destination ports. A missing port is not a port."""
-        return {e.dst_port for e in self._events if e.dst_port is not None}
+        return set(self._dst_port_counts)
 
     def dst_ips(self) -> set[str]:
         """Distinct destination hosts."""
-        return {e.dst_ip for e in self._events}
+        return set(self._dst_ip_counts)
 
     def src_ips(self) -> set[str]:
         """Distinct source hosts."""
-        return {e.src_ip for e in self._events if e.src_ip is not None}
+        return set(self._src_ip_counts)
 
     def hosts_by_port(self) -> dict[int, set[str]]:
         """Distinct destination hosts, grouped by destination port.
@@ -124,13 +244,12 @@ class ActivityWindow:
         This is the shape horizontal scanning needs: one source sweeping the
         *same* port across many hosts. Observations without a ``dst_port`` are
         excluded - there is no port to correlate them across hosts.
+
+        A fresh dict of fresh sets, so a caller cannot reach into the
+        window's own bookkeeping - the previous implementation built one from
+        scratch each call and callers may rely on it being theirs.
         """
-        grouped: dict[int, set[str]] = {}
-        for event in self._events:
-            if event.dst_port is None:
-                continue
-            grouped.setdefault(event.dst_port, set()).add(event.dst_ip)
-        return grouped
+        return {port: set(hosts) for port, hosts in self._hosts_by_port.items()}
 
     def total_orig_packets(self) -> int:
         """Originator-side packets across every flow still in the window.
@@ -138,11 +257,11 @@ class ActivityWindow:
         Keyed by destination, this is the packet volume *arriving at* that
         host - not what it sent back. See :class:`FlowObservation`.
         """
-        return sum(e.orig_packets for e in self._events)
+        return self._orig_packets_total
 
     def total_orig_bytes(self) -> int:
         """Originator-side bytes across every flow still in the window."""
-        return sum(e.orig_bytes for e in self._events)
+        return self._orig_bytes_total
 
     def max_orig_bytes(self) -> int:
         """Largest single flow's originator-side bytes, 0 when empty.
@@ -150,8 +269,14 @@ class ActivityWindow:
         One huge transfer and the same volume dribbled across many small
         flows are different behaviours; a total alone cannot tell them
         apart, so exfiltration-style detection needs the peak as well.
+
+        A maximum cannot be maintained by subtraction, so it is cached and
+        recomputed only when the largest value itself expires - over the
+        distinct byte counts held, not over every observation.
         """
-        return max((e.orig_bytes for e in self._events), default=0)
+        if self._max_orig_bytes is None:
+            self._max_orig_bytes = max(self._orig_bytes_counts, default=0)
+        return self._max_orig_bytes
 
     def total_resp_bytes(self) -> int:
         """Responder-side bytes across the window - **context only**.
@@ -160,26 +285,37 @@ class ActivityWindow:
         summed into it. A 500 MB download must never read as 500 MB of
         outbound data; see :class:`FlowObservation`.
         """
-        return sum(e.resp_bytes for e in self._events)
+        return self._resp_bytes_total
 
     def protocols(self) -> set[str]:
-        return {e.proto for e in self._events if e.proto is not None}
+        return set(self._proto_counts)
 
     def timestamps(self) -> list[float]:
         """Observation timestamps, in arrival order.
 
         Timing analysis (beacon periodicity) reads this. Order is arrival
         order, which the project assumes is roughly non-decreasing event
-        time - see the module docstring.
+        time - see the module docstring. Genuinely O(n): the *order* is the
+        information a caller wants, and no aggregate can stand in for it.
         """
         return [e.timestamp for e in self._events]
 
     def time_span(self) -> tuple[float, float] | None:
-        """(earliest, latest) timestamp in the window, or None if empty."""
+        """(earliest, latest) timestamp in the window, or None if empty.
+
+        Deliberately still min/max rather than the deque's two ends: the
+        project only assumes event time is *approximately* ordered, and a
+        record arriving slightly out of order must not silently widen or
+        narrow the span. Both extremes are cached, and recomputed over the
+        distinct timestamps only when one of them expires.
+        """
         if not self._events:
             return None
-        timestamps = [e.timestamp for e in self._events]
-        return min(timestamps), max(timestamps)
+        if self._min_timestamp is None:
+            self._min_timestamp = min(self._timestamp_counts)
+        if self._max_timestamp is None:
+            self._max_timestamp = max(self._timestamp_counts)
+        return self._min_timestamp, self._max_timestamp
 
     def duration(self) -> float:
         """Event-time seconds spanned by the window's contents.
@@ -196,6 +332,7 @@ class ActivityWindow:
 
     def clear(self) -> None:
         self._events.clear()
+        self._reset_aggregates()
 
     def __len__(self) -> int:
         return len(self._events)

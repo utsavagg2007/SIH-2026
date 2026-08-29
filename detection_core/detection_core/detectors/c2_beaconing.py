@@ -23,6 +23,7 @@ machine-timed", which is a lead to investigate, not a verdict.
 
 from __future__ import annotations
 
+import math
 import statistics
 from dataclasses import dataclass
 
@@ -41,6 +42,35 @@ from ..schemas import (
 from .scoring import normalize_score, severity_for, severity_rank
 
 __all__ = ["BeaconKey", "C2BeaconingConfig", "C2BeaconingDetector"]
+
+
+def _population_stddev(values: list[float], mean: float) -> float:
+    """Population standard deviation of ``values``, given their mean.
+
+    The textbook two-pass formula, and it replaced ``statistics.pstdev``
+    purely for speed: profiling put ``statistics._ss`` and its
+    ``_exact_ratio`` / ``as_integer_ratio`` machinery among the hottest
+    functions in the whole detection layer. ``pstdev`` converts every value
+    to an exact Fraction to guarantee a correctly-rounded result - excellent
+    for a statistics library, far more than a coefficient of variation
+    compared against 0.20 needs.
+
+    Two-pass, not the ``sum(x^2)/n - mean^2`` shortcut: that shortcut
+    subtracts two large nearly-equal numbers and loses most of its
+    significant digits on tightly-clustered intervals, which is exactly the
+    input this detector cares about. Summing squared deviations from the
+    mean has no such cancellation.
+
+    ``tests/test_c2_interval_equivalence.py`` compares this against
+    ``statistics.pstdev`` across beacon shapes and pins that the CV
+    boundary decision never differs.
+    """
+    count = len(values)
+    total = 0.0
+    for value in values:
+        deviation = value - mean
+        total += deviation * deviation
+    return math.sqrt(total / count)
 
 
 @dataclass(frozen=True)
@@ -242,7 +272,7 @@ class C2BeaconingDetector(Detector):
         if mean <= 0:  # unreachable given the filter above, but never divide blind
             return None
 
-        stddev = statistics.pstdev(intervals)
+        stddev = _population_stddev(intervals, mean)
         return IntervalStats(
             observation_count=len(timestamps),
             interval_count=len(intervals),
