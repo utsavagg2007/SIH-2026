@@ -17,9 +17,11 @@ Implemented:
     ddos          - many sources flooding one destination (destination-keyed)
     c2_beaconing  - regular timed contact on one relationship
                     (src, dst, port, proto)-keyed
+    dns_tunnelling - repeatedly abnormal DNS to one resolver
+                    (src, dst)-keyed
 
 Planned, one module per remaining threat class:
-    dga_domain, dns_tunnelling, encrypted_malware, data_exfiltration
+    dga_domain, encrypted_malware, data_exfiltration
 
 Note: several of those are blocked on raw fields current ingestion does not
 emit (see SCHEMA.md "Integration TODOs").
@@ -29,6 +31,13 @@ from __future__ import annotations
 
 from .c2_beaconing import BeaconKey, C2BeaconingConfig, C2BeaconingDetector
 from .ddos import DDoSConfig, DDoSDetector
+from .dns_tunnelling import (
+    DnsAggregate,
+    DnsObservation,
+    DnsTunnelKey,
+    DnsTunnellingConfig,
+    DnsTunnellingDetector,
+)
 from .port_scan import PortScanConfig, PortScanDetector
 
 __all__ = [
@@ -37,6 +46,11 @@ __all__ = [
     "C2BeaconingDetector",
     "DDoSConfig",
     "DDoSDetector",
+    "DnsAggregate",
+    "DnsObservation",
+    "DnsTunnelKey",
+    "DnsTunnellingConfig",
+    "DnsTunnellingDetector",
     "PortScanConfig",
     "PortScanDetector",
 ]
