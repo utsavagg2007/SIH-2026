@@ -18,9 +18,10 @@ file format, and that knowledge is confined to `detection_core/adapters/`.
 
 ## Status
 
-Schemas, adapter, engine and tests are complete. Three detectors ship:
-**`PortScanDetector`**, **`DDoSDetector`** and **`C2BeaconingDetector`**. No ML
-model yet — `ml/` is still a reserved namespace.
+Schemas, adapter, engine and tests are complete. Five rule detectors ship:
+**`PortScanDetector`**, **`DDoSDetector`**, **`C2BeaconingDetector`**,
+**`DnsTunnellingDetector`** and **`DataExfiltrationDetector`**. No trained ML
+model yet — `ml/` holds the offline DGA baseline only.
 
 ## Layout
 
@@ -30,8 +31,9 @@ detection_core/
 ├── adapters/         the ONLY code that understands features.jsonl
 ├── engine/           Detector interface + DetectionEngine
 ├── aggregators/      rolling sliding windows, keyed by whatever a detector needs
-├── detectors/        port_scan, ddos, c2_beaconing + shared scoring helpers
-└── ml/               reserved - empty
+├── detectors/        port_scan, ddos, c2_beaconing, dns_tunnelling,
+│                      data_exfiltration + shared scoring helpers
+└── ml/               offline DGA baseline (Part 1)
 ```
 
 `fixtures/` holds mock ingestion records; `tests/` is the pytest suite.
@@ -261,6 +263,125 @@ four configured thresholds, plus `total_orig_bytes`, `total_orig_packets` and
 Rates are `None` when the window spans no event time (one flow, or several
 sharing a timestamp). That is the honest answer — dividing by a fudged epsilon
 is how ingestion ends up publishing `flow_rate: 1000000.0` on its first record.
+
+## Data exfiltration detector
+
+**What it means.** Exfiltration is data *leaving* — a host shipping files,
+credentials or a database dump out of the network. The question is not "how
+busy is this host?" but "how much did it **send**, and did nearly all of it go
+to one place?"
+
+State is keyed by `(src_ip, dst_ip)`, so bytes bound for different destinations
+are never pooled. A second window keyed by `src_ip` alone supplies the
+denominator for *destination concentration*.
+
+### Direction is the whole point
+
+Volume is measured with **`orig_bytes`** — originator → responder — and
+**never** `total_bytes`.
+
+> Somebody downloading a 500 MB file has a huge `resp_bytes` and a tiny
+> `orig_bytes`. If volume were `orig + resp`, that download would be the
+> loudest alert in the system, and it would be completely wrong.
+
+`resp_bytes` is carried and reported as evidence — "uploaded 2 GB, received
+4 KB" is a far more legible alert than the upload figure alone — but it gates
+nothing and cannot raise the score. The target environment may be genuinely
+unidirectional, so **nothing here requires a response stream to exist**;
+`resp_bytes` may legitimately be zero throughout.
+
+### Two ways to qualify
+
+Both routes require concentration:
+
+* **sustained** — `total_orig_bytes >= min_total_orig_bytes` **and**
+  `flow_count >= min_flows` **and** concentration. Data leaving in chunks.
+* **single large transfer** —
+  `max_single_flow_orig_bytes >= min_single_flow_orig_bytes` **and**
+  concentration. One bulk upload, which needs no repetition to be worth
+  seeing. Its bar sits above the sustained one because a lone transfer gets
+  no corroboration from being repeated.
+
+`evidence["qualification_path"]` reports which fired: `sustained`,
+`single_large_transfer`, or `both`.
+
+### Destination concentration
+
+```
+destination_concentration = pair_total_orig_bytes / source_total_orig_bytes
+```
+
+Of everything this host uploaded in the window, what share went *here*. Both
+windows are trimmed to the same instant before the ratio is taken, so every
+byte in the numerator is also in the denominator and the result cannot exceed
+1.0. A source that sent nothing scores **0.0**, not 1.0 — with no outbound data
+there is no concentration to measure, and 0.0 is the reading that cannot
+qualify.
+
+Concentration gates both paths because volume alone is a poor signal: a backup
+client legitimately moves gigabytes, and so does a developer pushing a repo.
+What is less ordinary is a host whose outbound traffic is overwhelmingly aimed
+at a single peer.
+
+```python
+from detection_core import DataExfiltrationConfig, DataExfiltrationDetector
+
+detector = DataExfiltrationDetector(DataExfiltrationConfig(
+    window_seconds=300.0,
+    min_total_orig_bytes=50 * 1024 * 1024,          # 50 MiB, sustained path
+    min_flows=10,                                    # sustained path
+    min_single_flow_orig_bytes=100 * 1024 * 1024,   # 100 MiB, single path
+    min_destination_concentration=0.60,              # both paths
+    cooldown_seconds=300.0,
+))
+```
+
+> **THESE ARE UNTUNED DEMO HEURISTICS.** They were picked so an obvious bulk
+> transfer fires while ordinary browsing does not, on traffic nobody has
+> measured yet. They must be re-derived against real captures of this network's
+> normal uploads **and** simulated exfiltration before anyone trusts them.
+> Expect the byte thresholds in particular to be wrong for any specific network
+> by an order of magnitude in one direction or the other.
+
+### This does not prove data theft
+
+A large upload is not evidence of a crime. All of these look exactly like the
+pattern above, and all of them are ordinary:
+
+* cloud backups and sync clients (Drive, Dropbox, OneDrive, Backblaze)
+* a large `git push`
+* video uploads
+* database replication
+* software deployment and artefact publishing
+* any legitimate bulk file transfer
+
+An alert means *"this host sent a lot of data, concentrated on one
+destination"* — a lead to investigate, not a verdict. The evidence block
+carries the actual measurements so an analyst can see **why** it fired and
+dismiss the benign cases quickly.
+
+* `score` takes the stronger qualifying path's ratio, maps it onto the same
+  curve and severity bands as the other detectors (exactly at threshold →
+  0.5, `saturation_multiple`× → 1.0), then adds up to `concentration_bonus`
+  scaled from the concentration floor. Component ratios are capped *before*
+  averaging, so a huge flow count cannot ride one runaway component to
+  critical. Nothing in the calculation reads `resp_bytes`.
+* Cooldown and severity-escalation behave as elsewhere, keyed per pair. A
+  pair's cooldown deliberately outlives its traffic window: it is released on
+  elapsed cooldown, not on an empty window, so a pair cannot go quiet, return
+  and re-alert inside a cooldown it was still serving.
+
+### Evidence
+
+`qualification_path`, `flow_count`, `total_orig_bytes`, `total_orig_packets`,
+`max_single_flow_orig_bytes`, `source_total_orig_bytes`,
+`destination_concentration`, `window_seconds` and the four configured
+thresholds, plus `total_resp_bytes`, `observed_span_seconds` and
+`orig_bytes_per_second` as context.
+
+`total_orig_bytes` is originator-side: what the host **sent**.
+`total_resp_bytes` is what came back — reported, never scored.
+`orig_bytes_per_second` is `None` when the window spans no event time.
 
 ## DGA ML baseline (offline — Part 1)
 

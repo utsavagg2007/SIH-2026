@@ -35,6 +35,13 @@ class FlowObservation:
     server inflate its way past a volume threshold on the strength of the
     traffic it is serving.
 
+    ``resp_bytes`` is carried too, but strictly as **context**: it is never
+    folded into ``total_orig_bytes`` and no volume threshold reads it. It
+    exists so a detector can *report* what came back - "this host uploaded
+    2 GB and received 4 KB" is a far more legible alert than the upload
+    figure alone - without ever letting a download inflate an outbound
+    measurement.
+
     ``FlowEvent`` already guarantees these counters are non-negative
     integers, so they cannot go negative.
     """
@@ -46,6 +53,8 @@ class FlowObservation:
     src_ip: str | None = None
     orig_packets: int = 0
     orig_bytes: int = 0
+    #: Responder-side volume. Context only - see the class docstring.
+    resp_bytes: int = 0
 
     @classmethod
     def from_flow(cls, flow: FlowEvent) -> FlowObservation:
@@ -57,6 +66,7 @@ class FlowObservation:
             src_ip=flow.src_ip,
             orig_packets=flow.orig_pkts,
             orig_bytes=flow.orig_bytes,
+            resp_bytes=flow.resp_bytes,
         )
 
 
@@ -133,6 +143,24 @@ class ActivityWindow:
     def total_orig_bytes(self) -> int:
         """Originator-side bytes across every flow still in the window."""
         return sum(e.orig_bytes for e in self._events)
+
+    def max_orig_bytes(self) -> int:
+        """Largest single flow's originator-side bytes, 0 when empty.
+
+        One huge transfer and the same volume dribbled across many small
+        flows are different behaviours; a total alone cannot tell them
+        apart, so exfiltration-style detection needs the peak as well.
+        """
+        return max((e.orig_bytes for e in self._events), default=0)
+
+    def total_resp_bytes(self) -> int:
+        """Responder-side bytes across the window - **context only**.
+
+        Deliberately separate from :meth:`total_orig_bytes` and never
+        summed into it. A 500 MB download must never read as 500 MB of
+        outbound data; see :class:`FlowObservation`.
+        """
+        return sum(e.resp_bytes for e in self._events)
 
     def protocols(self) -> set[str]:
         return {e.proto for e in self._events if e.proto is not None}

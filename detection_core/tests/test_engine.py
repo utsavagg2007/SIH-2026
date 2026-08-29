@@ -279,13 +279,18 @@ def test_detector_defaults():
 
 
 def test_shipped_detectors():
-    """Port scan, DDoS, C2 beaconing and DNS tunnelling ship so far; no ML yet."""
+    """Five rule detectors ship so far; no ML model yet."""
     from detection_core import detectors, ml
 
     assert detectors.__all__ == [
+        "QUALIFICATION_BOTH",
+        "QUALIFICATION_SINGLE",
+        "QUALIFICATION_SUSTAINED",
         "BeaconKey",
         "C2BeaconingConfig",
         "C2BeaconingDetector",
+        "DataExfiltrationConfig",
+        "DataExfiltrationDetector",
         "DDoSConfig",
         "DDoSDetector",
         "DnsAggregate",
@@ -293,6 +298,8 @@ def test_shipped_detectors():
         "DnsTunnelKey",
         "DnsTunnellingConfig",
         "DnsTunnellingDetector",
+        "ExfilKey",
+        "ExfilStats",
         "PortScanConfig",
         "PortScanDetector",
     ]
