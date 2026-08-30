@@ -278,36 +278,137 @@ def test_the_sweep_selects_nothing(result):
 
 
 # --------------------------------------------------------------------------
-# 11. No fabricated family / group information
+# 11. Family labels: optional, never synthesized, family-disjoint when present
 # --------------------------------------------------------------------------
 
+#: A tiny hand-built family-labeled CSV. Family names are real malware
+#: families; the domains are a few examples per family. Enough distinct DGA
+#: families that a family-disjoint split has something to hold out.
+_FAMILY_CSV = (
+    "domain,label,family\n"
+    "google.com,0,benign\n"
+    "wikipedia.org,0,benign\n"
+    "github.com,0,benign\n"
+    "cloudflare.com,0,benign\n"
+    "microsoft.com,0,benign\n"
+    "reddit.com,0,benign\n"
+    "amazon.co.uk,0,benign\n"
+    "python.org,0,benign\n"
+    "knpqxlxcwtlvgrdyhd.com,1,ramnit\n"
+    "nvlyffuaxk.com,1,ramnit\n"
+    "hgyudheedieibxy.com,1,ramnit\n"
+    "abwqpoiuztrmk.com,1,ramnit\n"
+    "earnestnessbiophysicalohax.com,1,banjori\n"
+    "kwtoestnessbiophysicalohax.com,1,banjori\n"
+    "rvcxestnessbiophysicalohax.com,1,banjori\n"
+    "zzqestnessbiophysicalohax.com,1,banjori\n"
+    "blackfreeqazyio.cc,1,tinba\n"
+    "nvfowikhevmy.com,1,tinba\n"
+    "qwezxcvbnmlk.net,1,tinba\n"
+    "mkoijnbhugt.cc,1,tinba\n"
+    "bqkrtxgkmriwsiwcngtivpx.info,1,qakbot\n"
+    "jdtmfupdyueqeldvhsjzdvzob.net,1,qakbot\n"
+    "guhmpoxzivhbahj.com,1,qakbot\n"
+    "plmoknijbuhvygtfc.info,1,qakbot\n"
+)
 
-def test_the_dataset_contract_carries_no_group_labels():
-    """The premise of the "no grouped split" decision, pinned.
 
-    If a genuine ``family`` / ``campaign`` / ``seed`` column is ever added to
-    the CSV contract, this test fails and a group-aware split becomes both
-    possible and required.
+def _write_family_csv(tmp_path):
+    path = tmp_path / "families.csv"
+    path.write_text(_FAMILY_CSV, encoding="utf-8")
+    return path
+
+
+def test_family_column_is_optional_and_never_synthesized():
+    """The two-column contract still holds; family is an opt-in third column.
+
+    A CSV without ``family`` loads with ``families is None`` - the label is
+    never derived from the domain text, a missing column means missing.
     """
     assert REQUIRED_COLUMNS == ("domain", "label")
 
-    dataset = load_dataset(FIXTURE)
-    for attribute in ("families", "family", "groups", "group", "campaigns", "seeds"):
-        assert not hasattr(dataset, attribute), f"unexpected grouping: {attribute}"
+    dataset = load_dataset(FIXTURE)  # the shipped fixture has no family column
+    assert dataset.families is None
+    assert dataset.has_families is False
+    assert dataset.stats.family_count == 0
+    assert dataset.stats.family_breakdown == {}
 
 
-def test_no_grouping_is_synthesized_from_domain_text():
+def test_a_family_less_dataset_still_gets_a_stratified_split():
+    """No family column -> the original label-stratified behaviour, unchanged."""
     split = split_dataset(load_dataset(FIXTURE), random_state=42)
 
+    # No fabricated grouping attributes under these names.
     for attribute in ("groups", "train_groups", "test_groups", "family_aware"):
         assert not hasattr(split, attribute), f"fabricated grouping: {attribute}"
-    # The split reports honestly what it is: stratified by label, not by family.
+    assert split.grouped is False
     assert split.stratified is True
+    assert split.train_families is None and split.test_families is None
 
 
-def test_metrics_state_that_the_split_is_not_group_aware(result):
+def test_metrics_state_the_split_is_not_group_aware_without_a_family_column(result):
     assert result.metrics["group_aware_split"] is False
     assert result.metrics["split_strategy"] == "stratified"
+    assert "test_dga_family_count" not in result.metrics
+
+
+def test_a_family_column_enables_a_family_disjoint_split(tmp_path):
+    """With a family column the DGA families in test are held out of training."""
+    dataset = load_dataset(_write_family_csv(tmp_path))
+    assert dataset.has_families is True
+    assert dataset.stats.family_count == 5  # benign + 4 DGA families
+
+    split = split_dataset(dataset, test_size=0.3, random_state=42)
+    assert split.grouped is True
+    assert split.stratified is False
+
+    train_dga_fams = {
+        f for f, y in zip(split.train_families, split.train_labels) if y == 1
+    }
+    test_dga_fams = {
+        f for f, y in zip(split.test_families, split.test_labels) if y == 1
+    }
+    assert train_dga_fams and test_dga_fams
+    assert train_dga_fams.isdisjoint(test_dga_fams), "a DGA family leaked across the split"
+    # Domains are disjoint too, and both classes appear in both folds.
+    assert set(split.train_domains).isdisjoint(split.test_domains)
+    assert 0 in split.train_labels and 1 in split.train_labels
+    assert 0 in split.test_labels and 1 in split.test_labels
+
+
+def test_a_conflicting_family_on_a_duplicate_domain_is_rejected(tmp_path):
+    path = tmp_path / "conflict.csv"
+    path.write_text(
+        "domain,label,family\nbad.com,1,ramnit\nbad.com,1,tinba\n", encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="conflicting families"):
+        load_dataset(path)
+
+
+def test_an_empty_family_cell_is_rejected_when_the_column_is_present(tmp_path):
+    path = tmp_path / "blank.csv"
+    path.write_text(
+        "domain,label,family\ngoogle.com,0,benign\nbad.com,1,\n", encoding="utf-8"
+    )
+    with pytest.raises(ValueError, match="must never be synthesized"):
+        load_dataset(path)
+
+
+def test_training_reports_group_disjoint_when_families_are_present(tmp_path):
+    """The training metrics and summary say, honestly, what split ran."""
+    outcome = train_dga(_write_family_csv(tmp_path), n_estimators=30, sweep=None)
+
+    assert outcome.metrics["group_aware_split"] is True
+    assert outcome.metrics["split_strategy"] == "group_disjoint"
+    assert outcome.metrics["dga_family_count"] == 4
+    assert outcome.metrics["train_dga_family_count"] >= 1
+    assert outcome.metrics["test_dga_family_count"] >= 1
+    assert set(outcome.metrics["train_dga_families"]).isdisjoint(
+        outcome.metrics["test_dga_families"]
+    )
+    text = outcome.summary()
+    assert "group_disjoint" in text
+    assert "unseen-family generalization" in text
 
 
 # --------------------------------------------------------------------------
