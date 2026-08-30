@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+/// <reference types="vite/client" />
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { Alert, Incident, Metrics } from "../lib/types";
 import { fmtUptime } from "../lib/format";
 

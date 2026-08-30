@@ -9,7 +9,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "../lib/api";
 import { fmt } from "../lib/format";
-import { sevKey } from "../components/Evidence";
+import { sevKey } from "../components/EvidencePanel";
 import type {
   Alert,
   Capture,

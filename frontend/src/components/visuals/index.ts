@@ -1,7 +1,7 @@
 import { createElement } from "react";
 import type { Alert } from "../../lib/types";
 import { BeaconComb } from "./BeaconComb";
-import { FanoutMatrix } from "./FanoutMatrix";
+import { FanoutMatrix } from "./FanoutmMatrix";
 import { EntropyRateChart } from "./EntropyRateChart";
 import { StringInspector } from "./StringInspector";
 import { SubdomainFanout } from "./SubdomainFanout";
