@@ -1,0 +1,11 @@
+{
+  "capture": "beacon_hour.jsonl",
+  "description": "Sixty beacon check-ins from one (src, dst, dport) tuple. Tests the deduplication requirement: expect ONE alert with occurrences=60.",
+  "generated_by": "tools/make_fixtures.py",
+  "duration_s": 3600,
+  "expected_result": {
+    "alerts_created": 1,
+    "alerts_deduplicated": 59,
+    "occurrences": 60
+  }
+}

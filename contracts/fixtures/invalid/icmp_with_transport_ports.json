@@ -1,0 +1,22 @@
+{
+  "schema_version": "1.0",
+  "record_id": "co-v1:invalid:icmp-ports",
+  "observation_type": "flow",
+  "telemetry_source": "zeek",
+  "sensor_id": "sensor-fixture-invalid",
+  "observed_at": "2026-08-30T13:02:00Z",
+  "quality": { "fidelity": "exact", "truncated": false, "loss_detected": false },
+  "provenance": { "input_mode": "pcap_file", "parser_name": "fixture", "parser_version": "1" },
+  "data": {
+    "start_time": "2026-08-30T13:01:59Z",
+    "src_ip": "192.0.2.105",
+    "dst_ip": "198.51.100.105",
+    "src_port": 8,
+    "dst_port": 0,
+    "icmp_type": 8,
+    "icmp_code": 0,
+    "ip_protocol": 1,
+    "direction_mode": "originator_responder",
+    "counters": { "src_to_dst": { "packets": 1 } }
+  }
+}

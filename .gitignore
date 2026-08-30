@@ -1,0 +1,43 @@
+# --- Python -----------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# --- Rust -------------------------------------------------------------
+target/
+wheels/
+*.so
+*.pyd
+
+# --- Node -------------------------------------------------------------
+node_modules/
+frontend/dist/
+*.tsbuildinfo
+
+# --- Secrets and local config ----------------------------------------
+.env
+.env.local
+*.local.toml
+
+# --- Generated data ---------------------------------------------------
+artifacts/
+zeek_output/
+*.pcap
+run/
+data/features*.jsonl
+data/alerts*.jsonl
+benchmark_report.json
+
+# --- Legacy snapshot folders, superseded by the monorepo layout.
+# Their content is fully recoverable from git (see docs/REPO_HISTORY.md).
+SIH-2026-fullstack/
+SIH-2026-ML_model/
+SIH-2026-Threat-ingestion/
+*.zip

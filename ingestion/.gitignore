@@ -1,0 +1,11 @@
+# Generated Zeek logs (large, reproducible from PCAPs)
+zeek_output/
+# Raw / large PCAP captures (keep sample PCAPs out of git)
+pcaps/
+# Python / Rust build artifacts
+target/
+__pycache__/
+*.so
+*.pyc
+.venv/
+venv/

@@ -1,0 +1,33 @@
+{
+  "schema_version": "1.0",
+  "record_id": "co-v1:fixture:dns:unlinked-001",
+  "source_record_id": "CfixtureDns002",
+  "observation_type": "dns",
+  "telemetry_source": "zeek",
+  "sensor_id": "sensor-fixture-01",
+  "observed_at": "2026-08-30T10:04:01Z",
+  "quality": {
+    "fidelity": "exact",
+    "truncated": false,
+    "loss_detected": false
+  },
+  "provenance": {
+    "input_mode": "pcap_file",
+    "parser_name": "ingestion_core-zeek-normalizer",
+    "parser_version": "fixture-1"
+  },
+  "data": {
+    "event_time": "2026-08-30T10:04:00.500000Z",
+    "src_ip": "192.0.2.50",
+    "dst_ip": "203.0.113.53",
+    "src_port": 54000,
+    "dst_port": 53,
+    "ip_protocol": 17,
+    "query": "text.example.test",
+    "qtype": 16,
+    "qclass": 1,
+    "rcode": 3,
+    "rejected": false,
+    "answer_count": 0
+  }
+}

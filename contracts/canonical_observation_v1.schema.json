@@ -1,0 +1,403 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://utsavagg2007.github.io/SIH-2026/contracts/canonical_observation_v1.schema.json",
+  "title": "CanonicalObservation v1",
+  "description": "The versioned serialized telemetry boundary between source-specific ingestion and detector-side processing.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "record_id",
+    "observation_type",
+    "telemetry_source",
+    "sensor_id",
+    "observed_at",
+    "quality",
+    "provenance",
+    "data"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "record_id": {
+      "$ref": "#/$defs/nonEmptyString"
+    },
+    "source_record_id": {
+      "$ref": "#/$defs/nonEmptyString"
+    },
+    "observation_type": {
+      "enum": ["flow", "dns", "tls", "http"]
+    },
+    "telemetry_source": {
+      "enum": ["zeek", "netflow_v5", "netflow_v9", "ipfix"]
+    },
+    "sensor_id": {
+      "$ref": "#/$defs/nonEmptyString"
+    },
+    "observed_at": {
+      "$ref": "#/$defs/rfc3339Utc"
+    },
+    "quality": {
+      "$ref": "#/$defs/quality"
+    },
+    "provenance": {
+      "$ref": "#/$defs/provenance"
+    },
+    "data": {
+      "type": "object"
+    }
+  },
+  "oneOf": [
+    {
+      "properties": {
+        "observation_type": { "const": "flow" },
+        "data": { "$ref": "#/$defs/flowData" }
+      }
+    },
+    {
+      "properties": {
+        "observation_type": { "const": "dns" },
+        "data": { "$ref": "#/$defs/dnsData" }
+      }
+    },
+    {
+      "properties": {
+        "observation_type": { "const": "tls" },
+        "data": { "$ref": "#/$defs/tlsData" }
+      }
+    },
+    {
+      "properties": {
+        "observation_type": { "const": "http" },
+        "data": { "$ref": "#/$defs/httpData" }
+      }
+    }
+  ],
+  "$defs": {
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1
+    },
+    "rfc3339Utc": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](\\.[0-9]+)?Z$"
+    },
+    "ipv4": {
+      "type": "string",
+      "format": "ipv4",
+      "pattern": "^(0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\\.(0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])){3}$"
+    },
+    "ipv6": {
+      "type": "string",
+      "format": "ipv6",
+      "pattern": "^(?:([0-9A-Fa-f]{1,4}:){7}[0-9A-Fa-f]{1,4}|([0-9A-Fa-f]{1,4}:){1,7}:|([0-9A-Fa-f]{1,4}:){1,6}:[0-9A-Fa-f]{1,4}|([0-9A-Fa-f]{1,4}:){1,5}(:[0-9A-Fa-f]{1,4}){1,2}|([0-9A-Fa-f]{1,4}:){1,4}(:[0-9A-Fa-f]{1,4}){1,3}|([0-9A-Fa-f]{1,4}:){1,3}(:[0-9A-Fa-f]{1,4}){1,4}|([0-9A-Fa-f]{1,4}:){1,2}(:[0-9A-Fa-f]{1,4}){1,5}|[0-9A-Fa-f]{1,4}:((:[0-9A-Fa-f]{1,4}){1,6})|:((:[0-9A-Fa-f]{1,4}){1,7}|:)|::(?:[Ff]{4}(?::0{1,4})?:)?(0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\\.(0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])){3}|(?:[0-9A-Fa-f]{1,4}:){1,4}:(0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\\.(0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])){3})$"
+    },
+    "ipAddress": {
+      "oneOf": [
+        { "$ref": "#/$defs/ipv4" },
+        { "$ref": "#/$defs/ipv6" }
+      ]
+    },
+    "port": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    "ipProtocol": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 255
+    },
+    "nullableCounter": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "quality": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fidelity", "truncated", "loss_detected"],
+      "properties": {
+        "fidelity": {
+          "enum": ["exact", "sampled", "estimated", "unknown"]
+        },
+        "sampling_rate": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "sampling_probability": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 1
+        },
+        "truncated": {
+          "type": "boolean"
+        },
+        "loss_detected": {
+          "type": "boolean"
+        },
+        "missed_content_bytes": {
+          "$ref": "#/$defs/nullableCounter"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "fidelity": { "const": "exact" } },
+            "required": ["fidelity"]
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                { "required": ["sampling_rate"] },
+                { "required": ["sampling_probability"] }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input_mode", "parser_name", "parser_version"],
+      "properties": {
+        "input_mode": {
+          "enum": ["pcap_file", "live_interface", "export_stream", "export_file"]
+        },
+        "parser_name": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "parser_version": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "input_sha256": {
+          "type": "string",
+          "pattern": "^[0-9A-Fa-f]{64}$"
+        },
+        "capture_interface": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "exporter_id": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "observation_domain_id": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "template_id": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "message_sequence": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        }
+      }
+    },
+    "directionCounters": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "packets": { "$ref": "#/$defs/nullableCounter" },
+        "payload_bytes": { "$ref": "#/$defs/nullableCounter" },
+        "ip_bytes": { "$ref": "#/$defs/nullableCounter" },
+        "l2_bytes": { "$ref": "#/$defs/nullableCounter" }
+      }
+    },
+    "flowCounters": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["src_to_dst"],
+      "properties": {
+        "src_to_dst": { "$ref": "#/$defs/directionCounters" },
+        "dst_to_src": { "$ref": "#/$defs/directionCounters" }
+      }
+    },
+    "tcpFlags": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "enum": ["fin", "syn", "rst", "psh", "ack", "urg", "ece", "cwr", "ns"]
+      }
+    },
+    "flowData": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "start_time",
+        "src_ip",
+        "dst_ip",
+        "ip_protocol",
+        "direction_mode",
+        "counters"
+      ],
+      "properties": {
+        "start_time": { "$ref": "#/$defs/rfc3339Utc" },
+        "end_time": { "$ref": "#/$defs/rfc3339Utc" },
+        "src_ip": { "$ref": "#/$defs/ipAddress" },
+        "dst_ip": { "$ref": "#/$defs/ipAddress" },
+        "src_port": { "$ref": "#/$defs/port" },
+        "dst_port": { "$ref": "#/$defs/port" },
+        "icmp_type": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "icmp_code": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "ip_protocol": { "$ref": "#/$defs/ipProtocol" },
+        "direction_mode": {
+          "enum": ["originator_responder", "unidirectional", "unknown"]
+        },
+        "service": { "$ref": "#/$defs/nonEmptyString" },
+        "connection_state": { "$ref": "#/$defs/nonEmptyString" },
+        "connection_history": { "$ref": "#/$defs/nonEmptyString" },
+        "tcp_flags": { "$ref": "#/$defs/tcpFlags" },
+        "end_reason": { "$ref": "#/$defs/nonEmptyString" },
+        "ingress_interface": { "$ref": "#/$defs/nonEmptyString" },
+        "egress_interface": { "$ref": "#/$defs/nonEmptyString" },
+        "counters": { "$ref": "#/$defs/flowCounters" }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "ip_protocol": { "enum": [1, 58] } },
+            "required": ["ip_protocol"]
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                { "required": ["src_port"] },
+                { "required": ["dst_port"] }
+              ]
+            }
+          },
+          "else": {
+            "not": {
+              "anyOf": [
+                { "required": ["icmp_type"] },
+                { "required": ["icmp_code"] }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": { "direction_mode": { "const": "unidirectional" } },
+            "required": ["direction_mode"]
+          },
+          "then": {
+            "properties": {
+              "counters": {
+                "not": { "required": ["dst_to_src"] }
+              }
+            }
+          }
+        }
+      ]
+    },
+    "protocolTuple": {
+      "type": "object",
+      "required": ["event_time", "src_ip", "dst_ip", "ip_protocol"],
+      "properties": {
+        "event_time": { "$ref": "#/$defs/rfc3339Utc" },
+        "flow_record_id": { "$ref": "#/$defs/nonEmptyString" },
+        "src_ip": { "$ref": "#/$defs/ipAddress" },
+        "dst_ip": { "$ref": "#/$defs/ipAddress" },
+        "src_port": { "$ref": "#/$defs/port" },
+        "dst_port": { "$ref": "#/$defs/port" },
+        "ip_protocol": { "$ref": "#/$defs/ipProtocol" }
+      }
+    },
+    "dnsData": {
+      "allOf": [
+        { "$ref": "#/$defs/protocolTuple" }
+      ],
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "event_time",
+        "src_ip",
+        "dst_ip",
+        "ip_protocol"
+      ],
+      "properties": {
+        "event_time": { "$ref": "#/$defs/rfc3339Utc" },
+        "flow_record_id": { "$ref": "#/$defs/nonEmptyString" },
+        "src_ip": { "$ref": "#/$defs/ipAddress" },
+        "dst_ip": { "$ref": "#/$defs/ipAddress" },
+        "src_port": { "$ref": "#/$defs/port" },
+        "dst_port": { "$ref": "#/$defs/port" },
+        "ip_protocol": { "$ref": "#/$defs/ipProtocol" },
+        "query": { "type": "string" },
+        "qtype": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "qclass": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "rcode": { "type": "integer", "minimum": 0, "maximum": 4095 },
+        "authoritative_answer": { "type": "boolean" },
+        "dns_truncated": { "type": "boolean" },
+        "recursion_desired": { "type": "boolean" },
+        "recursion_available": { "type": "boolean" },
+        "rejected": { "type": "boolean" },
+        "answer_count": { "type": "integer", "minimum": 0, "maximum": 65535 }
+      }
+    },
+    "tlsData": {
+      "allOf": [
+        { "$ref": "#/$defs/protocolTuple" }
+      ],
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["event_time", "src_ip", "dst_ip", "src_port", "dst_port", "ip_protocol"],
+      "properties": {
+        "event_time": { "$ref": "#/$defs/rfc3339Utc" },
+        "flow_record_id": { "$ref": "#/$defs/nonEmptyString" },
+        "src_ip": { "$ref": "#/$defs/ipAddress" },
+        "dst_ip": { "$ref": "#/$defs/ipAddress" },
+        "src_port": { "$ref": "#/$defs/port" },
+        "dst_port": { "$ref": "#/$defs/port" },
+        "ip_protocol": { "$ref": "#/$defs/ipProtocol" },
+        "version": { "$ref": "#/$defs/nonEmptyString" },
+        "cipher": { "$ref": "#/$defs/nonEmptyString" },
+        "server_name": { "$ref": "#/$defs/nonEmptyString" },
+        "ja3": { "$ref": "#/$defs/nonEmptyString" },
+        "ja3s": { "$ref": "#/$defs/nonEmptyString" },
+        "ja4": { "$ref": "#/$defs/nonEmptyString" }
+      }
+    },
+    "httpData": {
+      "allOf": [
+        { "$ref": "#/$defs/protocolTuple" }
+      ],
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["event_time", "src_ip", "dst_ip", "src_port", "dst_port", "ip_protocol"],
+      "properties": {
+        "event_time": { "$ref": "#/$defs/rfc3339Utc" },
+        "flow_record_id": { "$ref": "#/$defs/nonEmptyString" },
+        "src_ip": { "$ref": "#/$defs/ipAddress" },
+        "dst_ip": { "$ref": "#/$defs/ipAddress" },
+        "src_port": { "$ref": "#/$defs/port" },
+        "dst_port": { "$ref": "#/$defs/port" },
+        "ip_protocol": { "$ref": "#/$defs/ipProtocol" },
+        "method": { "$ref": "#/$defs/nonEmptyString" },
+        "host": { "$ref": "#/$defs/nonEmptyString" },
+        "uri": { "type": "string" },
+        "user_agent": { "type": "string" },
+        "status_code": { "type": "integer", "minimum": 100, "maximum": 599 },
+        "request_body_bytes": { "$ref": "#/$defs/nullableCounter" },
+        "response_body_bytes": { "$ref": "#/$defs/nullableCounter" }
+      }
+    }
+  }
+}

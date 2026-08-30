@@ -1,0 +1,17 @@
+{
+  "schema_version": "1.0",
+  "record_id": "co-v1:semantic-invalid:dns-event-calendar",
+  "observation_type": "dns",
+  "telemetry_source": "zeek",
+  "sensor_id": "sensor-fixture-invalid",
+  "observed_at": "2026-08-30T13:10:00Z",
+  "quality": { "fidelity": "exact", "truncated": false, "loss_detected": false },
+  "provenance": { "input_mode": "pcap_file", "parser_name": "fixture", "parser_version": "1" },
+  "data": {
+    "event_time": "2026-02-30T10:00:00Z",
+    "src_ip": "192.0.2.113",
+    "dst_ip": "203.0.113.53",
+    "ip_protocol": 17,
+    "query": "calendar.example.test"
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "schema_version": "1.0",
+  "record_id": "co-v1:fixture:flow:unidirectional-001",
+  "source_record_id": "exporter-row-0001",
+  "observation_type": "flow",
+  "telemetry_source": "netflow_v5",
+  "sensor_id": "collector-fixture-01",
+  "observed_at": "2026-08-30T10:03:10Z",
+  "quality": {
+    "fidelity": "exact",
+    "truncated": false,
+    "loss_detected": false
+  },
+  "provenance": {
+    "input_mode": "export_file",
+    "parser_name": "fixture-netflow-normalizer",
+    "parser_version": "fixture-1",
+    "exporter_id": "exporter-fixture-01"
+  },
+  "data": {
+    "start_time": "2026-08-30T10:03:00Z",
+    "end_time": "2026-08-30T10:03:09Z",
+    "src_ip": "192.0.2.40",
+    "dst_ip": "198.51.100.40",
+    "src_port": 40000,
+    "dst_port": 22,
+    "ip_protocol": 6,
+    "direction_mode": "unidirectional",
+    "ingress_interface": "7",
+    "egress_interface": "9",
+    "counters": {
+      "src_to_dst": {
+        "packets": 12,
+        "ip_bytes": 1200
+      }
+    }
+  }
+}
