@@ -43,6 +43,11 @@ pub enum DiagnosticKind {
     MissingRequiredField,
     MissingRequiredCounters,
     NegativeDuration,
+    MalformedBoolean,
+    InvalidAnswersEncoding,
+    OutOfRangeValue,
+    AmbiguousFlowLink,
+    InconsistentFlowLink,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +102,13 @@ pub struct SourceIp {
     pub parsed: IpAddr,
 }
 
+/// A parsed source code together with its original lexical representation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceCode<T> {
+    pub raw: String,
+    pub value: T,
+}
+
 /// Lossless source representation of one physical conn.log data row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ZeekConnRecord {
@@ -121,6 +133,39 @@ pub struct ZeekConnRecord {
     pub orig_ip_bytes: SourceValue<u64>,
     pub resp_ip_bytes: SourceValue<u64>,
     pub missed_bytes: SourceValue<u64>,
+}
+
+/// Lossless source representation of one physical dns.log data row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZeekDnsRecord {
+    pub row_ordinal: u64,
+    pub row_too_short_for_legacy: bool,
+    pub uid: SourceValue<String>,
+    pub timestamp_raw: SourceValue<String>,
+    pub src_ip: SourceValue<SourceIp>,
+    pub src_port: SourceValue<u16>,
+    pub dst_ip: SourceValue<SourceIp>,
+    pub dst_port: SourceValue<u16>,
+    pub proto: SourceValue<String>,
+    pub ip_proto: SourceValue<u8>,
+    pub transaction_id: SourceValue<SourceCode<u16>>,
+    pub rtt_raw: SourceValue<String>,
+    pub query: SourceValue<String>,
+    pub qclass: SourceValue<SourceCode<u16>>,
+    pub qclass_name: SourceValue<String>,
+    pub qtype: SourceValue<SourceCode<u16>>,
+    pub qtype_name: SourceValue<String>,
+    pub rcode: SourceValue<SourceCode<u16>>,
+    pub rcode_name: SourceValue<String>,
+    pub authoritative_answer: SourceValue<bool>,
+    pub truncated: SourceValue<bool>,
+    pub recursion_desired: SourceValue<bool>,
+    pub recursion_available: SourceValue<bool>,
+    pub z: SourceValue<SourceCode<u8>>,
+    pub answers_raw: SourceValue<String>,
+    pub answer_count: SourceValue<u16>,
+    pub ttls_raw: SourceValue<String>,
+    pub rejected: SourceValue<bool>,
 }
 
 /// Validate the lexical form of a non-exponent decimal while retaining its text.

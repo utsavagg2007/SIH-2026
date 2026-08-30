@@ -1,3 +1,5 @@
+pub mod correlation;
+pub mod dns_producer;
 pub mod id;
 pub mod producer;
 pub mod time;
@@ -8,6 +10,7 @@ use serde::Serialize;
 #[serde(rename_all = "lowercase")]
 pub enum ObservationType {
     Flow,
+    Dns,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -151,9 +154,46 @@ pub struct FlowData {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DnsData {
+    pub event_time: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flow_record_id: Option<String>,
+    pub src_ip: String,
+    pub dst_ip: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub src_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dst_port: Option<u16>,
+    pub ip_protocol: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qtype: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub qclass: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rcode: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authoritative_answer: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dns_truncated: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recursion_desired: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recursion_available: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rejected: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answer_count: Option<u16>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
+// Boxing Flow would break the frozen M1A Rust API solely to reduce enum stack size.
+#[allow(clippy::large_enum_variant)]
 pub enum CanonicalData {
     Flow(FlowData),
+    Dns(DnsData),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
