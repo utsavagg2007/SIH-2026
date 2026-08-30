@@ -26,13 +26,14 @@ questions:
 The raw score is a RandomForest class-1 vote fraction and is **not a
 calibrated probability** anywhere in this module.
 
-**Group-aware splitting is not available**, because the dataset contract
-(``domain,label`` - see :mod:`.dataset`) carries no family, campaign or seed
-column. Family-aware evaluation needs genuine group metadata from the data
-source; deriving "families" from the domain text itself would invent the very
-labels the split is supposed to respect, and would report leakage-free
-numbers that are nothing of the kind. Until such a column exists, the
-supported split is the label-stratified one in :func:`.split_dataset`.
+**Group-aware (family-disjoint) splitting** is used automatically when the
+input CSV carries a ``family`` column (see :mod:`.dataset`). The DGA rows are
+split so that no malware family in the test fold was seen in training, which
+measures the real task - catching domains from families the model was not
+trained on - rather than the easier in-family task. Family labels are read
+from the data source and never derived from the domain text; without the
+column the split is the label-stratified one in :func:`.split_dataset`, and
+the reported ``split_strategy`` / ``group_aware_split`` say which one ran.
 """
 
 from __future__ import annotations
@@ -57,7 +58,14 @@ from sklearn.metrics import (
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
-from .dataset import LABEL_BENIGN, LABEL_DGA, Dataset, load_dataset, split_dataset
+from .dataset import (
+    BENIGN_FAMILY,
+    LABEL_BENIGN,
+    LABEL_DGA,
+    Dataset,
+    load_dataset,
+    split_dataset,
+)
 from .features import extract_feature_matrix
 from .model import DGAModel
 
@@ -127,6 +135,8 @@ class TrainingResult:
             f"  train / test      : {self.metrics['train_size']}"
             f" / {self.metrics['test_size']}"
             f" (stratified={self.metrics['stratified']})",
+            f"  split strategy    : {self.metrics['split_strategy']}"
+            f" (group_aware={self.metrics['group_aware_split']})",
             f"  threshold         : {self.metrics['threshold']}"
             " (decision metrics below are measured at it)",
             f"  accuracy          : {self.metrics['accuracy']:.4f}",
@@ -141,6 +151,18 @@ class TrainingResult:
         ]
         if self.metrics.get("note"):
             lines.append(f"  note              : {self.metrics['note']}")
+
+        if self.metrics.get("group_aware_split"):
+            lines.append(
+                f"  dga families      : {self.metrics['dga_family_count']} total"
+                f" -> {self.metrics['train_dga_family_count']} in train,"
+                f" {self.metrics['test_dga_family_count']} held out for test"
+                " (disjoint)"
+            )
+            lines.append(
+                "  NOTE: metrics are on DGA families NOT seen in training - "
+                "unseen-family generalization, the harder and more honest number."
+            )
 
         baseline = self.metrics.get("baseline")
         if baseline is None:
@@ -419,8 +441,10 @@ def train_dga(
     It changes nothing the saved artifact does, and it does not tune the live
     detector, which owns its own ``DGAConfig.score_threshold``.
 
-    The split is label-stratified. It is **not** family-aware, because the
-    dataset contract has no family column - see this module's docstring.
+    The split is family-disjoint when the input CSV carries a ``family``
+    column, and label-stratified otherwise. ``metrics["split_strategy"]`` and
+    ``metrics["group_aware_split"]`` report which one ran - see this module's
+    docstring.
     """
     dataset = load_dataset(input_csv)
     if dataset.stats.dga_count == 0 or dataset.stats.benign_count == 0:
@@ -468,6 +492,13 @@ def train_dga(
             split.test_labels, test_scores, sweep, model=evaluation.model
         )
 
+    if split.grouped:
+        split_strategy = "group_disjoint"
+    elif split.stratified:
+        split_strategy = "stratified"
+    else:
+        split_strategy = "random"
+
     metrics = {
         "raw_rows": dataset.stats.raw_rows,
         "deduplicated_rows": dataset.stats.deduplicated_rows,
@@ -477,13 +508,33 @@ def train_dga(
         "train_size": split.train_size,
         "test_size": split.test_size,
         "stratified": split.stratified,
-        # Stratified by label only; no group/family split is available.
-        "split_strategy": "stratified" if split.stratified else "random",
-        "group_aware_split": False,
+        "split_strategy": split_strategy,
+        # True only when the DGA test families were held out of training.
+        "group_aware_split": split.grouped,
         **evaluation.to_dict(),
         "baseline": baseline.to_dict() if baseline is not None else None,
         "threshold_sweep": threshold_sweep,
     }
+    if split.grouped:
+        train_dga_families = {
+            f for f, y in zip(split.train_families, split.train_labels)
+            if y == LABEL_DGA
+        }
+        test_dga_families = {
+            f for f, y in zip(split.test_families, split.test_labels)
+            if y == LABEL_DGA
+        }
+        metrics.update(
+            {
+                "dga_family_count": dataset.stats.family_count
+                - (1 if BENIGN_FAMILY in dataset.stats.family_breakdown else 0),
+                "train_dga_family_count": len(train_dga_families),
+                "test_dga_family_count": len(test_dga_families),
+                "train_dga_families": sorted(train_dga_families),
+                "test_dga_families": sorted(test_dga_families),
+                "family_breakdown": dataset.stats.family_breakdown,
+            }
+        )
 
     model_path = None
     if output_path is not None:
@@ -506,7 +557,15 @@ def main(argv: list[str] | None = None) -> int:
         prog="python -m detection_core.ml.dga.training",
         description="Train the offline DGA lexical classifier.",
     )
-    parser.add_argument("-i", "--input", required=True, help="CSV with domain,label")
+    parser.add_argument(
+        "-i",
+        "--input",
+        required=True,
+        help=(
+            "CSV with columns domain,label (and an optional family column, "
+            "which switches evaluation to a family-disjoint split)"
+        ),
+    )
     parser.add_argument("-o", "--output", help="Where to write the .joblib bundle")
     parser.add_argument("--test-size", type=float, default=0.25)
     parser.add_argument("--random-state", type=int, default=42)
