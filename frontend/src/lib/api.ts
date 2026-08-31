@@ -21,6 +21,26 @@ import type {
 
 const BASE = "/api/v1";
 
+/**
+ * Where the analyst service lives.
+ *
+ * Same-origin by default, which is correct under the Vite dev server: its proxy
+ * routes `/api/v1/analyst` to :8100 ahead of the backend rule. It is NOT correct
+ * when the built bundle is served by the backend itself on :8000, because that
+ * process does not serve those routes and the call 404s - the analyst panel
+ * would report a healthy service as broken.
+ *
+ * So the base is a build-time setting. To serve the bundle from the backend and
+ * still reach Layer 8:
+ *
+ *     VITE_ANALYST_BASE=http://127.0.0.1:8100/api/v1/analyst npm run build
+ *
+ * The analyst allows that origin in its CORS list. Left unset, this is exactly
+ * the previous behaviour.
+ */
+const ANALYST_BASE =
+  (import.meta.env?.VITE_ANALYST_BASE as string | undefined) || `${BASE}/analyst`;
+
 async function get<T>(path: string): Promise<T> {
   const r = await fetch(`${BASE}${path}`);
   if (!r.ok) throw new Error(`${r.status} ${r.statusText} on ${path}`);
@@ -123,7 +143,7 @@ export class AnalystUnavailable extends Error {
 async function analystPost<T>(path: string, body: unknown): Promise<T> {
   let r: Response;
   try {
-    r = await fetch(`${BASE}/analyst${path}`, {
+    r = await fetch(`${ANALYST_BASE}${path}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -161,7 +181,7 @@ export const analyst = {
   health: async (): Promise<AnalystHealth> => {
     let r: Response;
     try {
-      r = await fetch(`${BASE}/analyst/health`);
+      r = await fetch(`${ANALYST_BASE}/health`);
     } catch {
       throw new AnalystUnavailable();
     }

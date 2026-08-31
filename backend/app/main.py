@@ -19,7 +19,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .api import alerts, hosts, incidents, replay as replay_api, system, ws
@@ -211,7 +211,7 @@ def _mount_dashboard(application: FastAPI) -> None:
     read-only static file serving; it adds no route toward the monitored
     network, which is what ``ConstraintAuditor`` is counting.
     """
-    dist = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
+    dist = DASHBOARD_DIST
     if not dist.is_dir():
         log.info("no built dashboard at %s; API-only (run 'npm run build')", dist)
         return
@@ -219,8 +219,37 @@ def _mount_dashboard(application: FastAPI) -> None:
     log.info("serving the dashboard from %s", dist)
 
 
-@app.get("/", tags=["system"], summary="Service descriptor")
-async def root() -> dict:
+#: Where ``npm run build`` puts the bundle. Resolved once so the root route and
+#: the mount cannot disagree about it.
+DASHBOARD_DIST = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
+
+
+@app.get("/", include_in_schema=False)
+async def root():
+    """The dashboard when it has been built, the service descriptor otherwise.
+
+    A ``StaticFiles`` mount at ``/`` does serve ``/index.html`` and ``/assets/*``,
+    but it does NOT win for ``/`` itself: this route is registered first and
+    routes are matched in order, so the bare origin returned a JSON blob and the
+    documented "open http://127.0.0.1:8000" produced no dashboard at all.
+
+    Handled here rather than by dropping the descriptor, because the descriptor
+    is genuinely useful when no bundle has been built - which is the state every
+    backend-only checkout is in. It stays available unconditionally at ``/api``.
+    """
+    index = DASHBOARD_DIST / "index.html"
+    if index.is_file():
+        return FileResponse(index)
+    return _descriptor()
+
+
+@app.get("/api", tags=["system"], summary="Service descriptor")
+async def descriptor() -> dict:
+    """Always the descriptor, whether or not a dashboard is built."""
+    return _descriptor()
+
+
+def _descriptor() -> dict:
     settings = get_settings()
     return {
         "service": settings.app_name,

@@ -35,6 +35,16 @@ if not PY.exists():  # POSIX layout
 if not PY.exists():
     PY = Path(sys.executable)
 
+# This script needs the project's dependencies in its OWN process - it opens a
+# WebSocket to watch the frames the dashboard receives. Running it with the
+# system interpreter is the obvious mistake to make, and the resulting
+# ModuleNotFoundError points at the wrong problem, so re-exec under the venv
+# rather than explaining it in a README nobody reads at that moment.
+if Path(sys.executable).resolve() != PY.resolve() and PY.exists():
+    import os
+
+    os.execv(str(PY), [str(PY), str(Path(__file__).resolve()), *sys.argv[1:]])
+
 BACKEND = "http://127.0.0.1:8000"
 ANALYST = "http://127.0.0.1:8100"
 DATA = ROOT / "data"

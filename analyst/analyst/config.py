@@ -71,6 +71,11 @@ class Settings(BaseSettings):
             "http://127.0.0.1:5173",
             "http://localhost:4173",
             "http://127.0.0.1:4173",
+            # The backend serves the built dashboard on :8000, and from that
+            # origin the panel calls this service cross-origin rather than
+            # through the Vite proxy.
+            "http://localhost:8000",
+            "http://127.0.0.1:8000",
         ]
     )
 

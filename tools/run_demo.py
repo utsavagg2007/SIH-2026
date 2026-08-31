@@ -185,7 +185,14 @@ def main() -> int:
 
     dist = ROOT / "frontend" / "dist"
     print("\n" + "=" * 66)
-    print(f"  dashboard    http://127.0.0.1:{VITE_PORT if args.ui else BACKEND_PORT}"
+    # The Vite dev server binds ::1 and answers to "localhost" but NOT to
+    # "127.0.0.1"; uvicorn is bound explicitly to 127.0.0.1. Printing the wrong
+    # one sends the operator to a URL that refuses the connection.
+    dashboard = (
+        f"http://localhost:{VITE_PORT}" if args.ui
+        else f"http://127.0.0.1:{BACKEND_PORT}"
+    )
+    print(f"  dashboard    {dashboard}"
           + ("" if args.ui or dist.is_dir() else "   (run 'npm run build' in frontend/ first)"))
     print(f"  API docs     http://127.0.0.1:{BACKEND_PORT}/docs")
     print(f"  constraints  http://127.0.0.1:{BACKEND_PORT}/api/v1/system/constraints")

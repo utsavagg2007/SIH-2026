@@ -31,9 +31,15 @@ artifacts/
 zeek_output/
 *.pcap
 run/
-data/features*.jsonl
-data/alerts*.jsonl
 benchmark_report.json
+
+# Everything under data/ is a build product of tools/synth_flows.py and the
+# detection runner. The manifest in particular embeds base_time, which defaults
+# to "now", so a tracked copy shows as modified after every single run and buries
+# real changes in the diff. It is deterministic from --seed, so regenerating it
+# costs nothing:
+#     python tools/synth_flows.py -o data/features.jsonl
+data/
 
 # --- Legacy snapshot folders, superseded by the monorepo layout.
 # Their content is fully recoverable from git (see docs/REPO_HISTORY.md).
