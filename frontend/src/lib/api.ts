@@ -7,10 +7,13 @@
 
 import type {
   Alert,
+  AnalystAnswer,
+  AnalystHealth,
   Capture,
   ConstraintProof,
   Frame,
   Health,
+  HostView,
   Incident,
   ReplayStatus,
   Throughput,
@@ -65,7 +68,7 @@ export const api = {
       `/incidents/${encodeURIComponent(id)}`
     ),
   hosts: () => get<{ items: string[]; total: number }>("/hosts"),
-  host: (ip: string) => get<any>(`/hosts/${encodeURIComponent(ip)}`),
+  host: (ip: string) => get<HostView>(`/hosts/${encodeURIComponent(ip)}`),
 
   health: () => get<Health>("/system/health"),
   throughput: () => get<Throughput>("/system/throughput"),
@@ -73,16 +76,98 @@ export const api = {
 
   captures: () => get<{ items: Capture[] }>("/replay/captures"),
   replayStatus: () => get<ReplayStatus>("/replay/status"),
-  replayStart: (capture: string, speed: number, maxRate?: number) =>
+  /**
+   * `ReplayStartRequest` in the backend accepts `loop`, and the replay screen
+   * has always had a checkbox for it, but the flag was never put on the wire -
+   * so the control moved and nothing happened. Options object rather than a
+   * fourth positional argument: `(capture, speed, maxRate, loop)` puts two
+   * optionals of different types in a row, which is how the flag went missing
+   * in the first place.
+   */
+  replayStart: (
+    capture: string,
+    speed: number,
+    opts: { maxRate?: number; loop?: boolean } = {}
+  ) =>
     post<ReplayStatus>("/replay/start", {
       capture,
       speed,
-      max_rate: maxRate ?? null,
+      loop: opts.loop ?? false,
+      max_rate: opts.maxRate ?? null,
     }),
   replayStop: () => post<ReplayStatus>("/replay/stop"),
 
   telemetry: (body: Record<string, unknown>) =>
     post<void>("/telemetry", body),
+};
+
+/**
+ * Layer 8 runs in its own process on its own port (see analyst/README.md), and
+ * that separation is the point: stop it and nothing upstream changes. The dev
+ * proxy routes `/api/v1/analyst` to :8100 ahead of the backend rule, so the
+ * paths below stay relative and the browser never learns there are two
+ * services.
+ *
+ * Every call here can fail without consequence. `AnalystUnavailable` marks the
+ * failures that mean "the service is not there" - a transport error, or a 502
+ * or 503 from a proxy with nothing to reach - so the panel can say so in the
+ * register spec 9 asks for instead of showing a stack trace.
+ */
+export class AnalystUnavailable extends Error {
+  constructor(message = "Analyst unavailable. Detection is unaffected.") {
+    super(message);
+    this.name = "AnalystUnavailable";
+  }
+}
+
+async function analystPost<T>(path: string, body: unknown): Promise<T> {
+  let r: Response;
+  try {
+    r = await fetch(`${BASE}/analyst${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch {
+    // Connection refused, DNS failure, proxy with no upstream. The service is
+    // not running; that is a statement about the analyst layer and nothing else.
+    throw new AnalystUnavailable();
+  }
+  if (r.status === 502 || r.status === 503 || r.status === 504) {
+    throw new AnalystUnavailable();
+  }
+  if (!r.ok) {
+    // A 404 or 422 is the service answering, so it is reported as itself: the
+    // analyst is up and this particular request did not resolve.
+    let detail = `${r.status} ${r.statusText}`;
+    try {
+      const j = await r.json();
+      detail = j.detail ?? detail;
+    } catch {
+      /* non-JSON error body; the status line is what we have */
+    }
+    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+  }
+  return (await r.json()) as T;
+}
+
+export const analyst = {
+  explain: (alertId: string) =>
+    analystPost<AnalystAnswer>("/explain", { alert_id: alertId }),
+  narrate: (incidentId: string) =>
+    analystPost<AnalystAnswer>("/narrate", { incident_id: incidentId }),
+  ask: (question: string, limit?: number) =>
+    analystPost<AnalystAnswer>("/ask", { question, limit: limit ?? null }),
+  health: async (): Promise<AnalystHealth> => {
+    let r: Response;
+    try {
+      r = await fetch(`${BASE}/analyst/health`);
+    } catch {
+      throw new AnalystUnavailable();
+    }
+    if (!r.ok) throw new AnalystUnavailable();
+    return (await r.json()) as AnalystHealth;
+  },
 };
 
 export type ConnState = "connecting" | "open" | "closed";

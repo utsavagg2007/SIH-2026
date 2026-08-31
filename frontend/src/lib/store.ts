@@ -15,7 +15,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { connectFeed, type ConnState } from "./api";
-import type { Alert, Frame, Incident, Metrics } from "./types";
+import type { Alert, Frame, Incident, MetricsFrame } from "./types";
 
 const RING = 500;
 
@@ -35,7 +35,11 @@ export interface WireBuffer {
 export interface LiveState {
   alerts: Alert[];
   incidents: Incident[];
-  metrics: Metrics | null;
+  /** The last metrics frame as it arrived on the socket. Kept in wire
+   *  shape rather than mapped to a view model here: the System view needs
+   *  fields the instrument bar does not, and re-deriving them from a lossy
+   *  intermediate is how the two screens drift apart. */
+  metrics: MetricsFrame | null;
   conn: ConnState;
   /** Alerts received since load, including ones evicted from the ring. */
   received: number;
@@ -53,7 +57,7 @@ export function useLiveFeed() {
   // Accumulators drained once per animation frame.
   const pending = useRef<Alert[]>([]);
   const pendingIncidents = useRef<Incident[]>([]);
-  const pendingMetrics = useRef<Metrics | null>(null);
+  const pendingMetrics = useRef<MetricsFrame | null>(null);
   const raf = useRef<number | undefined>(undefined);
 
   // Read by the Wire's own rAF loop. Deliberately outside React state.

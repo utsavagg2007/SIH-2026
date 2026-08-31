@@ -23,9 +23,17 @@ Two deliberate choices:
 from __future__ import annotations
 
 import hashlib
-import time
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
+
+#: How many contributing alert_ids each finding remembers, so a redelivery can
+#: be told from a new occurrence.  Bounded on purpose: an hour-long beacon
+#: contributes sixty ids and there may be a hundred thousand live findings, so
+#: remembering all of them would trade a correctness bug for a memory one.  A
+#: retry follows its original closely - detection resends on POST failure - so a
+#: short memory catches the case that actually happens, and the ceiling is
+#: stated rather than hoped for.
+_RECENT_ID_MEMORY = 16
 
 from ..schemas.alert_v11 import ThreatAlertV11
 from ..schemas.enums import EventScope
@@ -72,6 +80,10 @@ class DedupState:
     #: most useful one to show; the counts below preserve the history that
     #: matters.
     latest_evidence: dict = field(default_factory=dict)
+    #: The most recent alert_ids folded into this finding, newest last, capped
+    #: at :data:`_RECENT_ID_MEMORY`.  Used to recognise a *resend* of an alert
+    #: already counted, as distinct from a genuine new occurrence.
+    recent_alert_ids: deque[str] = field(default_factory=lambda: deque(maxlen=_RECENT_ID_MEMORY))
 
 
 @dataclass(slots=True)
@@ -93,18 +105,40 @@ class Deduplicator:
         self._window = window_s
         self._max_keys = max_keys
         self._states: OrderedDict[str, DedupState] = OrderedDict()
+        #: Highest event time seen. Eviction runs against this rather than the
+        #: wall clock - see :meth:`_evict`.
+        self._clock: float = 0.0
 
     def __len__(self) -> int:
         return len(self._states)
 
     def observe(self, alert: ThreatAlertV11, now: float | None = None) -> DedupResult:
-        """Record an alert and say whether it folded into an existing one."""
-        now = time.time() if now is None else now
+        """Record an alert and say whether it folded into an existing one.
+
+        ``now`` is accepted for callers that want to drive the clock explicitly;
+        it is interpreted as *event* time, not wall time, for the reason given
+        in :meth:`_evict`.
+        """
         key = dedup_key(alert)
         ts = alert.detected_at.timestamp()
+        # Event time only. Advancing monotonically means a capture replayed out
+        # of order cannot rewind the clock and expire live state.
+        self._clock = max(self._clock, ts if now is None else now)
 
         existing = self._states.get(key)
         if existing is not None and (ts - existing.last_seen) <= self._window:
+            if alert.alert_id in existing.recent_alert_ids:
+                # A redelivery of an alert already counted, not a new
+                # occurrence.  The integration guide states that detection
+                # resends after a failed POST and asks the backend to be safe to
+                # replay; counting the resend would inflate the number the
+                # dashboard shows as "this has happened N times" and the count
+                # the incident narrative quotes.  Nothing about the finding has
+                # changed, so nothing about the state changes either.
+                self._states.move_to_end(key)
+                return DedupResult(is_duplicate=True, state=existing)
+
+            existing.recent_alert_ids.append(alert.alert_id)
             existing.occurrences += 1
             existing.last_seen = ts
             existing.max_score = max(existing.max_score, alert.score)
@@ -130,20 +164,31 @@ class Deduplicator:
             event_end=alert.event_end.timestamp(),
             latest_evidence=dict(alert.evidence),
         )
+        state.recent_alert_ids.append(alert.alert_id)
         self._states[key] = state
         self._states.move_to_end(key)
-        self._evict(now)
+        self._evict()
         return DedupResult(is_duplicate=False, state=state)
 
-    def _evict(self, now: float) -> None:
+    def _evict(self) -> None:
         """Drop expired entries, then trim to the hard ceiling.
 
         Time-based expiry runs first because it is the predictable rule; the
         size cap is the backstop for when arrival rate outpaces expiry.  Build
         Plan layer 3: "Expire state on a timer, not on memory pressure.
         Predictable eviction beats clever eviction."
+
+        **Event time, not wall time.**  ``last_seen`` is taken from the alert's
+        ``detected_at``, so comparing it against ``time.time()`` mixes two
+        clocks that only agree on live traffic.  Replay a capture recorded
+        yesterday and every entry is already older than the cutoff the moment it
+        is written: the state is evicted on the same call that created it, the
+        next repeat finds nothing to fold into, and deduplication silently does
+        nothing at all - on precisely the path the demo runs.  The window
+        comparison in :meth:`observe` was always event-time; this now matches
+        it.
         """
-        cutoff = now - self._window
+        cutoff = self._clock - self._window
         while self._states:
             oldest_key = next(iter(self._states))
             if self._states[oldest_key].last_seen >= cutoff:

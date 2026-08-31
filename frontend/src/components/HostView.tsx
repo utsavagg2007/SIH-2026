@@ -16,7 +16,7 @@ interface Props {
 
 export function HostView({ host, alerts, incidents, onSelectAlert }: Props) {
   const hostAlerts = alerts.filter((a) => a.src_ip === host || a.dst_ip === host);
-  const hostIncidents = incidents.filter((i) => i.host === host);
+  const hostIncidents = incidents.filter((i) => i.pivot_host === host);
 
   // In production these three come from GET /hosts/{ip} (section 7). Mocked
   // here so the screen is fully browsable before that endpoint is wired up.
@@ -86,7 +86,9 @@ export function HostView({ host, alerts, incidents, onSelectAlert }: Props) {
           {hostIncidents.length === 0 && <div style={{ fontFamily: SANS, fontSize: 13, color: T.text3 }}>None.</div>}
           {hostIncidents.map((inc) => (
             <div key={inc.incident_id} style={{ fontFamily: MONO, fontSize: 12, color: T.text2, padding: "4px 0" }}>
-              {inc.stages.map((s) => CLASS_META[s.threat_class].code).join(" \u2192 ")}
+              {(inc.members ?? [])
+                .map((m) => m.threat_code || CLASS_META[m.threat_class]?.code || "??")
+                .join(" \u2192 ")}
             </div>
           ))}
         </div>

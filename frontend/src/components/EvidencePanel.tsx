@@ -1,6 +1,14 @@
+import { memo } from "react";
 import { T, SEV, CLASS_META, MONO, SANS, labelStyle } from "../lib/tokens";
-import type { Alert, EvidenceItem } from "../lib/types";
+import type { Alert, EvidenceItem, Severity } from "../lib/types";
 import { classVisual } from "./visuals";
+
+/** Severity to the suffix used by the `--sev-*` custom properties in
+ *  styles.css. The token names are abbreviated where the enum is not, so the
+ *  mapping is explicit rather than a string slice. */
+export function sevKey(s: Severity): string {
+  return s === "medium" ? "med" : s === "critical" ? "crit" : s;
+}
 
 function IpLink({ ip, onOpenHost }: { ip: string; onOpenHost: (ip: string) => void }) {
   return (
@@ -26,7 +34,13 @@ function EvidenceBar({ item, severityColor }: { item: EvidenceItem; severityColo
   const [lo, hi] = item.scale || [0, (item.threshold as number) * 2 || 1];
   const pct = (v: number) => Math.max(0, Math.min(100, ((v - lo) / (hi - lo)) * 100));
   const value = item.value as number;
-  const crossed = item.direction === "above" ? value >= (item.threshold as number) : value <= (item.threshold as number);
+  // The backend decides which side of the line the value landed on and ships it
+  // as `exceeded`; recomputing it here can disagree with the detector that
+  // actually fired, so its answer is preferred and the comparison is only a
+  // fallback for an evidence item that predates the field.
+  const crossed =
+    item.exceeded ??
+    (item.direction === "above" ? value >= (item.threshold as number) : value <= (item.threshold as number));
   return (
     <div style={{ padding: "8px 0", borderBottom: `1px solid ${T.rule}` }}>
       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
@@ -47,7 +61,7 @@ function EvidenceBar({ item, severityColor }: { item: EvidenceItem; severityColo
   );
 }
 
-export function EvidencePanel({ alert, onOpenHost }: { alert: Alert | null; onOpenHost: (ip: string) => void }) {
+function EvidencePanelImpl({ alert, onOpenHost }: { alert: Alert | null; onOpenHost: (ip: string) => void }) {
   if (!alert) {
     return (
       <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: T.text3, fontFamily: SANS, fontSize: 13 }}>
@@ -103,3 +117,31 @@ export function EvidencePanel({ alert, onOpenHost }: { alert: Alert | null; onOp
     </div>
   );
 }
+/**
+ * Spec 8.2: "Memoize the evidence panel on alert id. It re-renders on every
+ * stream update otherwise."
+ *
+ * The parent re-renders once per animation frame while the feed is running,
+ * and this subtree is the most expensive one in the product - evidence bars
+ * plus a class-specific visual plus a full JSON serialisation of the alert.
+ * Re-running all of that sixty times a second to draw an unchanged panel is
+ * the single largest avoidable cost during a flood.
+ *
+ * The comparison is the alert's identity plus its deduplication state rather
+ * than the id alone. `occurrences` and `last_seen` are the only fields the
+ * backend revises on an existing alert_id, and they are exactly what a
+ * repeating alert changes, so including them keeps a live-updating selection
+ * honest while still ignoring every update that concerns a different alert.
+ */
+export const EvidencePanel = memo(EvidencePanelImpl, (prev, next) => {
+  if (prev.onOpenHost !== next.onOpenHost) return false;
+  const a = prev.alert;
+  const b = next.alert;
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return (
+    a.alert_id === b.alert_id &&
+    a.occurrences === b.occurrences &&
+    a.last_seen === b.last_seen
+  );
+});

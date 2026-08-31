@@ -438,8 +438,20 @@ def test_a_config_override_actually_reaches_the_detectors(tmp_path):
 
 
 def test_a_dga_section_without_a_model_is_reported_not_silently_ignored(
-    tmp_path, capsys
+    tmp_path, capsys, monkeypatch
 ):
+    """With no artifact anywhere, a [dga_domain] section must say it is inert.
+
+    The default model path is pointed at nothing on purpose. This test is
+    about the case where the detector genuinely cannot run, and since the
+    runner now *discovers* a built artifact, a real one in ``artifacts/``
+    would otherwise make this assert the opposite of what it is checking -
+    and it would pass or fail depending on whether someone had run the
+    training step, which is not a property of the code under test.
+    """
+    monkeypatch.setattr(
+        runner, "DEFAULT_DGA_MODEL_PATH", tmp_path / "absent" / "dga_model.joblib"
+    )
     path = write(tmp_path, "input.jsonl", scan_records())
     config = tmp_path / "dga.toml"
     config.write_text("[dga_domain]\nscore_threshold = 0.9\n", encoding="utf-8")

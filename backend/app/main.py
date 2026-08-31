@@ -20,6 +20,7 @@ from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from .api import alerts, hosts, incidents, replay as replay_api, system, ws
 from .config import get_settings
@@ -70,7 +71,10 @@ async def lifespan(app: FastAPI):
     )
 
     auditor = ConstraintAuditor()
-    metrics = MetricsRegistry(window_s=settings.metrics_window_s)
+    metrics = MetricsRegistry(
+        window_s=settings.metrics_window_s,
+        max_plausible_latency_ms=settings.max_plausible_latency_ms,
+    )
     hub = ConnectionHub(queue_max=settings.ws_queue_max)
     repository = _build_repository(settings, auditor)
 
@@ -193,6 +197,28 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+def _mount_dashboard(application: FastAPI) -> None:
+    """Serve the built dashboard from this process, when it has been built.
+
+    The frontend talks to ``/api/v1`` and ``/ws/alerts`` as same-origin relative
+    URLs, which the Vite dev proxy makes true during development and nothing
+    made true afterwards: the production bundle loaded from any other origin
+    failed every request. Mounting it here makes the relative URLs correct for
+    free, and removes the need for CORS on the only path anyone actually runs.
+
+    Mounted last and guarded on the directory existing, so a checkout that has
+    never run ``npm run build`` starts exactly as before. The mount is
+    read-only static file serving; it adds no route toward the monitored
+    network, which is what ``ConstraintAuditor`` is counting.
+    """
+    dist = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
+    if not dist.is_dir():
+        log.info("no built dashboard at %s; API-only (run 'npm run build')", dist)
+        return
+    application.mount("/", StaticFiles(directory=dist, html=True), name="dashboard")
+    log.info("serving the dashboard from %s", dist)
+
+
 @app.get("/", tags=["system"], summary="Service descriptor")
 async def root() -> dict:
     settings = get_settings()
@@ -205,3 +231,6 @@ async def root() -> dict:
         "live_feed": "/ws/alerts",
         "constraint_proof": "/api/v1/system/constraints",
     }
+
+
+_mount_dashboard(app)

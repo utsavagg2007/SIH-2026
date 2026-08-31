@@ -1,8 +1,10 @@
 import { T, MONO, labelStyle } from "../../lib/tokens";
+import type { ClassVisual } from "../../lib/types";
+import { SourceBadge, type VisualChrome } from "./chrome";
 
-interface Props { parent: string; count: number; subs: string[]; lengths: number[]; }
+type Props = Extract<ClassVisual, { kind: "subdomain_fanout" }> & VisualChrome;
 
-export function SubdomainFanout({ parent, count, subs, lengths }: Props) {
+export function SubdomainFanout({ parent, count, subs, lengths, source, sevColor }: Props) {
   const maxLen = Math.max(...lengths, 63);
   const bins = 12;
   const hist = new Array(bins).fill(0);
@@ -11,10 +13,11 @@ export function SubdomainFanout({ parent, count, subs, lengths }: Props) {
 
   return (
     <div>
+      <SourceBadge source={source} />
       <div style={{ ...labelStyle, marginBottom: 4 }}>parent domain</div>
       <div style={{ fontFamily: MONO, fontSize: 16, color: T.text, marginBottom: 10 }}>{parent}</div>
       <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 10 }}>
-        <span style={{ fontFamily: MONO, fontSize: 28, color: T.sevHigh, fontVariantNumeric: "tabular-nums" }}>{count}</span>
+        <span style={{ fontFamily: MONO, fontSize: 28, color: sevColor, fontVariantNumeric: "tabular-nums" }}>{count}</span>
         <span style={labelStyle}>distinct subdomains, last hour</span>
       </div>
       <div style={{ ...labelStyle, marginBottom: 4 }}>recent queries</div>

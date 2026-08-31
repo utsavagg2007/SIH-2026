@@ -119,6 +119,19 @@ class Interval:
     note: str = ""
     #: For confounders: the threat class this innocent traffic resembles.
     mimics: str | None = None
+    #: Every source and destination that participated. ``src_ip``/``dst_ip``
+    #: above name the principal actor for display; these are what the evaluator
+    #: matches an alert against, because a confounder like the time daemon runs
+    #: on several hosts and an alert naming any of them is the same finding.
+    src_ips: list[str] = field(default_factory=list)
+    dst_ips: list[str] = field(default_factory=list)
+
+
+def _endpoints(records: list[dict]) -> tuple[list[str], list[str]]:
+    return (
+        sorted({r["src_ip"] for r in records}),
+        sorted({r["dst_ip"] for r in records}),
+    )
 
 
 @dataclass
@@ -379,9 +392,48 @@ def attack_port_scan(base: float, rng: random.Random) -> tuple[list[dict], Inter
                  conn_state="S0", rng=rng)
         )
         t += 0.25
+    srcs, dsts = _endpoints(records)
     return records, Interval(
         "port_scan", SCANNER_HOST, "10.4.1.5", start, t, len(records),
         "vertical scan, 40 ports, all S0",
+        src_ips=srcs,
+        dst_ips=dsts,
+    )
+
+
+def attack_intrusion_recon(base: float, rng: random.Random) -> tuple[list[dict], Interval]:
+    """The compromised host's own scan, so one host walks the kill chain.
+
+    Without this, every finding on 10.4.2.19 sits at the same kill-chain stage -
+    DGA, beaconing and encrypted-session malware are all command-and-control -
+    and the incident ribbon has nothing to order. The correlation layer is the
+    highest-value component in the build relative to its cost, and the screen
+    that shows it needs a host that went reconnaissance, then command and
+    control, then exfiltration.
+
+    That is also the example the frontend specification uses by name
+    (section 6.1: ``HOST 10.4.2.19 ... PS -> BC -> EX``), and it is what an
+    actual intrusion looks like: the same machine does all three.
+    """
+    start = base + 5
+    records = []
+    t = start
+    for port in (22, 23, 80, 135, 139, 443, 445, 1433, 3306, 3389,
+                 5432, 5900, 8080, 8443, 9200, 27017, 6379, 11211):
+        for host_id in (12, 13, 14):
+            records.append(
+                flow(t, COMPROMISED_HOST, f"10.4.1.{host_id}", port, service=None,
+                     duration=0.001, orig_bytes=0, resp_bytes=0, orig_pkts=1,
+                     resp_pkts=0, conn_state="S0", rng=rng)
+            )
+            t += 0.12
+    srcs, dsts = _endpoints(records)
+    return records, Interval(
+        "port_scan", COMPROMISED_HOST, None, start, t, len(records),
+        "the compromised host's own recon: 18 ports across 3 hosts, all S0 - "
+        "stage one of the kill chain this host then walks",
+        src_ips=srcs,
+        dst_ips=dsts,
     )
 
 
@@ -398,9 +450,12 @@ def attack_ddos(base: float, rng: random.Random) -> tuple[list[dict], Interval]:
                  resp_pkts=0, conn_state="S0", rng=rng)
         )
         t += 0.02
+    srcs, dsts = _endpoints(records)
     return records, Interval(
         "ddos", None, FLOOD_TARGET, start, t, len(records),
         "spoofed SYN flood, 320 flows from 320 distinct sources in ~6s",
+        src_ips=srcs,
+        dst_ips=dsts,
     )
 
 
@@ -425,9 +480,12 @@ def attack_beacon(base: float, duration: float, rng: random.Random) -> tuple[lis
             )
         )
         t += 45.0 * (1.0 + rng.uniform(-0.06, 0.06))
+    srcs, dsts = _endpoints(records)
     return records, Interval(
         "c2_beaconing", COMPROMISED_HOST, C2_SERVER, start, t, len(records),
         "45s interval, 6% jitter, no SNI, scripting-library JA3",
+        src_ips=srcs,
+        dst_ips=dsts,
     )
 
 
@@ -451,9 +509,12 @@ def attack_dga(base: float, rng: random.Random) -> tuple[list[dict], Interval]:
             )
         )
         t += rng.uniform(0.8, 2.2)
+    srcs, dsts = _endpoints(records)
     return records, Interval(
         "dga_domain", COMPROMISED_HOST, RESOLVER, start, t, len(records),
         "30 generated domains, 90% NXDOMAIN",
+        src_ips=srcs,
+        dst_ips=dsts,
     )
 
 
@@ -474,47 +535,93 @@ def attack_dns_tunnel(base: float, rng: random.Random) -> tuple[list[dict], Inte
             )
         )
         t += rng.uniform(0.3, 0.9)
+    srcs, dsts = _endpoints(records)
     return records, Interval(
         "dns_tunnelling", TUNNEL_HOST, RESOLVER, start, t, len(records),
         f"60 unique 48-char subdomains under {parent}, all TXT",
+        src_ips=srcs,
+        dst_ips=dsts,
     )
 
 
 def attack_encrypted_malware(base: float, rng: random.Random) -> tuple[list[dict], Interval]:
-    """TLS sessions presenting a fingerprint nothing else on the network uses.
+    """TLS sessions the encrypted-session detector can actually qualify.
 
     No payload is involved at any point - this is handshake metadata only.
+
+    Both of the detector's paths are exercised on purpose, because they answer
+    different questions and a demo that only shows one is misleading:
+
+    * **Signature** - a JA3 that matches a locally configured fingerprint list.
+      This is how a *known* implant is caught, and it needs
+      ``--ja3-feed tools/ja3_feed.example.txt`` or the path stays inert by
+      design (the detector never downloads a feed).
+    * **Heuristic** - a long, high-entropy server name over an obsolete TLS
+      version. This is how an *unknown* one is caught.
+
+    An earlier version of this generator emitted sessions with no SNI at all
+    and TLSv12, and the detector correctly stayed silent: absence of SNI is not
+    evidence (ECH and ordinary TLS both hide the name) and TLSv12 is not
+    obsolete. The traffic was wrong, not the detector - worth recording, because
+    the tempting fix was to loosen the detector until the demo lit up.
     """
     start = base + 240
     records = []
     t = start
-    for _ in range(12):
+
+    # Heuristic path: one host pair, long random SNI, obsolete negotiated
+    # version. The detector needs at least six observations on the pair and a
+    # suspicious majority, so ten of eleven here are suspicious.
+    for index in range(11):
+        label = "".join(
+            rng.choice(string.ascii_lowercase + string.digits) for _ in range(46)
+        )
+        sni = f"{label}.cdn-node.test" if index < 10 else "ordinary.example.test"
         records.append(
             with_tls(
                 flow(t, COMPROMISED_HOST, "45.134.26.9", 443, service="ssl",
                      duration=rng.uniform(1.0, 3.0), orig_bytes=rng.randint(600, 1400),
                      resp_bytes=rng.randint(700, 2200), orig_pkts=9, resp_pkts=11,
                      rng=rng),
-                None, JA3_MALWARE, version="TLSv12",
+                sni, JA3_MALWARE, version="TLSv10",
             )
         )
         t += rng.uniform(4, 9)
+
+    # Signature path: a fingerprint on the configured list. One flow is enough -
+    # an exact IOC match is not a statistical argument.
+    for _ in range(3):
+        records.append(
+            with_tls(
+                flow(t, COMPROMISED_HOST, "45.134.26.10", 443, service="ssl",
+                     duration=rng.uniform(0.5, 2.0), orig_bytes=rng.randint(400, 900),
+                     resp_bytes=rng.randint(500, 1500), orig_pkts=7, resp_pkts=8,
+                     rng=rng),
+                None, JA3_MALWARE, version="TLSv12",
+            )
+        )
+        t += rng.uniform(3, 7)
+
+    srcs, dsts = _endpoints(records)
     return records, Interval(
         "encrypted_malware", COMPROMISED_HOST, "45.134.26.9", start, t, len(records),
-        "12 sessions, rare JA3, absent SNI, obsolete TLS version",
+        "11 sessions with long high-entropy SNI over obsolete TLS (heuristic "
+        "path) plus 3 carrying a listed JA3 (signature path)",
+        src_ips=srcs,
+        dst_ips=dsts,
     )
 
 
 def attack_exfiltration(base: float, rng: random.Random) -> tuple[list[dict], Interval]:
     """Bulk outbound to a destination this host has never contacted."""
-    start = base + 300
+    start = base + 420
     records = []
     t = start
     for _ in range(16):
         payload = rng.randint(2_500_000, 6_000_000)
         records.append(
             with_tls(
-                flow(t, EXFIL_HOST, EXFIL_SERVER, 443, service="ssl",
+                flow(t, COMPROMISED_HOST, EXFIL_SERVER, 443, service="ssl",
                      duration=rng.uniform(8, 20), orig_bytes=payload,
                      resp_bytes=rng.randint(800, 3000),
                      orig_pkts=payload // 1400, resp_pkts=rng.randint(15, 40), rng=rng),
@@ -522,9 +629,13 @@ def attack_exfiltration(base: float, rng: random.Random) -> tuple[list[dict], In
             )
         )
         t += rng.uniform(3, 8)
+    srcs, dsts = _endpoints(records)
     return records, Interval(
-        "data_exfiltration", EXFIL_HOST, EXFIL_SERVER, start, t, len(records),
-        "16 bulk uploads to a novel destination, ~99% outbound",
+        "data_exfiltration", COMPROMISED_HOST, EXFIL_SERVER, start, t, len(records),
+        "16 bulk uploads to a novel destination, ~99% outbound - stage three "
+        "of the kill chain, on the same host that scanned and then beaconed",
+        src_ips=srcs,
+        dst_ips=dsts,
     )
 
 
@@ -573,10 +684,13 @@ def generate(
                     len(produced),
                     note,
                     mimics,
+                    src_ips=sorted({r["src_ip"] for r in produced}),
+                    dst_ips=sorted({r["dst_ip"] for r in produced}),
                 )
             )
 
     for attack in (
+        attack_intrusion_recon(base, rng),
         attack_port_scan(base, rng),
         attack_ddos(base, rng),
         attack_beacon(base, duration, rng),

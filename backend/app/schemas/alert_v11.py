@@ -159,12 +159,31 @@ class ThreatAlertV11(BaseModel):
         a detector bug, not a legitimate null.
         """
         required: dict[EventScope, tuple[str, ...]] = {
-            EventScope.FLOW: ("flow_id",),
+            # FLOW is deliberately absent from this table. The contract says in
+            # section 3 that flow_id is "null for aggregate/window alerts" and
+            # again in section 16 that the full-stack team must not assume every
+            # alert has a real one - and the encrypted-session detector emits a
+            # per-flow signature match built from a FlowEvent whose flow_id is
+            # legitimately None. Requiring it here rejected a conforming alert
+            # with a 422, which reads to the detection team as a schema bug on
+            # their side. The endpoints below identify the flow well enough for
+            # everything downstream to pivot on.
             EventScope.SOURCE_HOST: ("src_ip",),
             EventScope.DESTINATION_HOST: ("dst_ip",),
             EventScope.HOST_PAIR: ("src_ip", "dst_ip"),
             EventScope.NETWORK: (),
         }
+        if self.event_scope is EventScope.FLOW:
+            # A flow-scoped alert still has to name *something*: an identifier,
+            # or both endpoints. Naming neither is the detector bug this
+            # validator exists to catch.
+            if self.flow_id is None and (self.src_ip is None or self.dst_ip is None):
+                raise ValueError(
+                    "event_scope='flow' requires either flow_id, or both src_ip "
+                    "and dst_ip, so the flow can be identified"
+                )
+            return self
+
         missing = [n for n in required[self.event_scope] if getattr(self, n) is None]
         if missing:
             raise ValueError(

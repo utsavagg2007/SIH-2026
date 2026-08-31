@@ -1,14 +1,10 @@
 import { T, labelStyle } from "../../lib/tokens";
+import type { ClassVisual } from "../../lib/types";
+import { SourceBadge, type VisualChrome } from "./chrome";
 
-interface Props {
-  rateSeries: number[];
-  entropySeries: number[];
-  spoofed: boolean;
-  baselineLow: number;
-  baselineHigh: number;
-}
+type Props = Extract<ClassVisual, { kind: "entropy_rate" }> & VisualChrome;
 
-export function EntropyRateChart({ rateSeries, entropySeries, spoofed, baselineLow, baselineHigh }: Props) {
+export function EntropyRateChart({ rateSeries, entropySeries, spoofed, baselineLow, baselineHigh, source, sevColor }: Props) {
   const width = 480, rateH = 70, entH = 70, gapY = 18;
   const n = rateSeries.length || 1;
   const stepX = width / (n - 1 || 1);
@@ -21,6 +17,7 @@ export function EntropyRateChart({ rateSeries, entropySeries, spoofed, baselineL
 
   return (
     <div>
+      <SourceBadge source={source} />
       <div style={{ ...labelStyle, marginBottom: 4 }}>packet rate</div>
       <svg width="100%" viewBox={`0 0 ${width} ${rateH}`} style={{ display: "block", marginBottom: gapY }}>
         <line x1="0" y1={rateH} x2={width} y2={rateH} stroke={T.rule} strokeWidth="1" />
@@ -30,7 +27,7 @@ export function EntropyRateChart({ rateSeries, entropySeries, spoofed, baselineL
       <svg width="100%" viewBox={`0 0 ${width} ${entH}`} style={{ display: "block" }}>
         <rect x="0" y={baseY(baselineHigh)} width={width} height={baseY(baselineLow) - baseY(baselineHigh)} fill={T.baseline} opacity="0.18" />
         <line x1="0" y1={rateH} x2={width} y2={rateH} stroke={T.rule} strokeWidth="1" />
-        <path d={pathFor(entropySeries, entH, 1)} fill="none" stroke={spoofed ? T.sevHigh : T.sevCrit} strokeWidth="1.5" />
+        <path d={pathFor(entropySeries, entH, 1)} fill="none" stroke={sevColor} strokeWidth="1.5" />
       </svg>
       <div style={{ fontFamily: "monospace", fontSize: 12, color: T.text2, marginTop: 8 }}>
         {spoofed ? "entropy climbing out of the learned band — spoofed sources" : "entropy collapsing out of the learned band — direct flood"}

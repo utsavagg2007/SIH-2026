@@ -70,9 +70,15 @@ class MetricsRegistry:
     than a histogram sketch, and it keeps the percentiles exact.
     """
 
-    def __init__(self, window_s: float = 60.0, max_samples: int = 200_000) -> None:
+    def __init__(
+        self,
+        window_s: float = 60.0,
+        max_samples: int = 200_000,
+        max_plausible_latency_ms: float = 300_000.0,
+    ) -> None:
         self._window = window_s
         self._max_samples = max_samples
+        self._max_plausible_latency_ms = max_plausible_latency_ms
         self._alert_times: deque[float] = deque()
         self._latencies: deque[tuple[float, float]] = deque()
         self._started = time.time()
@@ -81,6 +87,13 @@ class MetricsRegistry:
         self.alerts_deduplicated = 0
         self.alerts_rejected = 0
         self.incidents_total = 0
+        #: Alerts whose packet-to-alert delay exceeded any plausible bound,
+        #: which means their event time came from a recorded capture rather
+        #: than from live traffic. Excluded from the latency distribution and
+        #: reported separately, so the System view can say "replayed capture -
+        #: pipeline latency not measurable" instead of showing a number in the
+        #: billions.
+        self.historical_alerts = 0
 
         self.traffic = TrafficTelemetry()
         self.detectors: dict[str, DetectorRecord] = {}
@@ -114,7 +127,23 @@ class MetricsRegistry:
         # rather than discard: a distorted percentile is more useful than a
         # silently missing sample, and the System view surfaces clock skew
         # through detector_latency_ms separately.
-        self._latencies.append((now, max(pipeline_latency_ms, 0.0)))
+        latency = max(pipeline_latency_ms, 0.0)
+        if latency > self._max_plausible_latency_ms:
+            # Not a latency at all: the age of a replayed capture.
+            # pipeline_latency_ms is (receipt - event_end), which is the true
+            # packet-to-alert delay on live traffic and is meaningless on a
+            # capture recorded last month - it reads in the billions of
+            # milliseconds and drags p50, p95 and the whole histogram with it.
+            # The backend's own ReplayEngine shifts fixture timestamps onto the
+            # wall clock for exactly this reason, but alerts POSTed by the
+            # detection layer from a historical PCAP do not go through it.
+            #
+            # Counted, not silently dropped: the System view labels these as
+            # replayed rather than pretending the sample never arrived, and the
+            # honest per-alert value still travels on the alert itself.
+            self.historical_alerts += 1
+        else:
+            self._latencies.append((now, latency))
         self._trim(now)
 
         rec = self.detectors.get(detector)

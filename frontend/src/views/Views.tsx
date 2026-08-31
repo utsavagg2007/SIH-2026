@@ -113,7 +113,7 @@ export function IncidentsView({
           </div>
           <div className="data-sm" style={{ color: "var(--text-3)", marginTop: 4 }}>
             {i.alert_count} alerts · {fmt.duration(i.elapsed_sec)} elapsed ·
-            stages {i.stages.join(" → ")}
+            stages {(i.stages ?? []).join(" → ")}
             {i.members_truncated && " · ribbon truncated"}
           </div>
         </div>
@@ -526,7 +526,10 @@ export function ReplayView() {
     setErr(null);
     try {
       setStatus(
-        await api.replayStart(capture, speed, maxRate === "" ? undefined : maxRate)
+        await api.replayStart(capture, speed, {
+          maxRate: maxRate === "" ? undefined : maxRate,
+          loop,
+        })
       );
     } catch (e) {
       setErr(String(e));

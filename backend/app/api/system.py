@@ -33,6 +33,11 @@ class HealthResponse(BaseModel):
     alerts_total: int
     alerts_deduplicated: int
     alerts_rejected: int
+    #: Alerts whose event time came from a recorded capture rather than live
+    #: traffic, and are therefore excluded from the latency distribution. A
+    #: non-zero value here is why the latency panel may look sparse during a
+    #: replay; it is not a measurement failure.
+    alerts_historical: int
     incidents_total: int
     dedup_keys_tracked: int
     incidents_tracked: int
@@ -62,10 +67,14 @@ async def health(
         storage_queue_depth=bus.write_queue_depth,
         storage_writes_shed=bus.writes_shed,
         storage_write_errors=bus.write_errors,
-        ws_clients=0,
+        # The real count, not a placeholder. This is the readout an operator
+        # checks to confirm the live feed is actually being consumed, and it
+        # reported zero while dashboards were connected.
+        ws_clients=bus.metrics_frame().ws_clients,
         alerts_total=metrics.alerts_total,
         alerts_deduplicated=metrics.alerts_deduplicated,
         alerts_rejected=metrics.alerts_rejected,
+        alerts_historical=metrics.historical_alerts,
         incidents_total=metrics.incidents_total,
         dedup_keys_tracked=len(bus.dedup),
         incidents_tracked=len(bus.incidents),

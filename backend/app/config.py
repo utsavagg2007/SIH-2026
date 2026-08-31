@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from typing import Literal
+from urllib.parse import quote
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -52,6 +53,16 @@ class Settings(BaseSettings):
     #: Postgres URL is derived from them.
     supabase_db_password: str | None = None
     supabase_project_ref: str | None = None
+    #: The Supabase pooler region. This is NOT guessable - it is whatever region
+    #: the project was created in - and it was previously hardcoded to
+    #: ap-south-1, which silently produced an unreachable host for a project
+    #: created anywhere else. Copy it from Supabase > Project Settings >
+    #: Database > Connection pooling, or paste the whole connection string into
+    #: DATABASE_URL and ignore this.
+    supabase_region: str = "ap-south-1"
+    #: Transaction pooler. The right choice for short-lived batched writes;
+    #: 5432 is the direct connection.
+    supabase_pooler_port: int = 6543
 
     db_pool_min: int = 1
     db_pool_max: int = 8
@@ -91,6 +102,14 @@ class Settings(BaseSettings):
     #: Rolling window over which alerts/sec and latency percentiles are
     #: computed.
     metrics_window_s: float = 60.0
+    #: Above this, a packet-to-alert delay is not a latency - it is the age of
+    #: a recorded capture. Alerts produced by replaying a historical PCAP
+    #: through the detection layer carry event times from when the traffic was
+    #: captured, so the difference against wall-clock receipt reads in the
+    #: billions of milliseconds and destroys the p50/p95 figures the System
+    #: view exists to report. Five minutes is generous for anything genuinely
+    #: live and far below anything replayed.
+    max_plausible_latency_ms: float = 300_000.0
 
     # --- telemetry -------------------------------------------------------
     #: Traffic-rate telemetry older than this is treated as stale, and the
@@ -106,17 +125,23 @@ class Settings(BaseSettings):
 
     @property
     def resolved_database_url(self) -> str | None:
-        """Postgres URL, derived from the Supabase settings when necessary."""
+        """Postgres URL, derived from the Supabase settings when necessary.
+
+        The password is percent-encoded rather than interpolated raw. Supabase
+        generates passwords containing ``@``, ``/``, ``#`` and ``?``, every one
+        of which terminates a component of a URI - an unencoded ``@`` splits the
+        authority early and the driver reports a host that does not exist, which
+        is a genuinely baffling failure to debug at the moment someone first
+        points the backend at a real project.
+        """
         if self.database_url:
             return self.database_url
         if self.supabase_project_ref and self.supabase_db_password:
-            # Supabase's pooled connection endpoint.  Port 6543 is the
-            # transaction pooler, which is the right choice for short-lived
-            # batched writes.
+            password = quote(self.supabase_db_password, safe="")
             return (
-                f"postgresql://postgres.{self.supabase_project_ref}:"
-                f"{self.supabase_db_password}"
-                f"@aws-0-ap-south-1.pooler.supabase.com:6543/postgres"
+                f"postgresql://postgres.{self.supabase_project_ref}:{password}"
+                f"@aws-0-{self.supabase_region}.pooler.supabase.com:"
+                f"{self.supabase_pooler_port}/postgres"
             )
         return None
 

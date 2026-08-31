@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ..schemas import FlowEvent, ThreatAlert
 from .detector import Detector
@@ -26,11 +26,26 @@ class EngineStats:
     flows_processed: int = 0
     alerts_emitted: int = 0
     detector_errors: int = 0
+    #: Names of detectors that have failed at least once this run.
+    #:
+    #: ``detector_errors`` counts *failures*, which is the wrong number for
+    #: the question "how many detectors are still working": one detector
+    #: raising on every flow of a long capture produces thousands of errors
+    #: but takes exactly one detector offline. Telemetry reports
+    #: ``detectors_online`` as the total minus the size of this set, so a
+    #: dashboard can show six of seven working rather than an error count
+    #: that grows without bound.
+    #:
+    #: A name lands here on its first failure and stays: a detector that has
+    #: thrown once has already missed traffic, and quietly promoting it back
+    #: to "online" would hide that. Reset with the rest of the counters.
+    errored_detectors: set[str] = field(default_factory=set)
 
     def reset(self) -> None:
         self.flows_processed = 0
         self.alerts_emitted = 0
         self.detector_errors = 0
+        self.errored_detectors = set()
 
 
 class DetectionEngine:
@@ -128,6 +143,7 @@ class DetectionEngine:
             result = getattr(detector, method)(*args)
         except Exception:
             self.stats.detector_errors += 1
+            self.stats.errored_detectors.add(detector.name)
             self.log.exception(
                 "detector %r raised in %s(); skipping it for this call",
                 detector.name,
@@ -149,6 +165,7 @@ class DetectionEngine:
             return []
         if not isinstance(result, (list, tuple)):
             self.stats.detector_errors += 1
+            self.stats.errored_detectors.add(detector.name)
             self.log.error(
                 "detector %r returned %s from %s(); expected a list of ThreatAlert",
                 detector.name,
@@ -165,6 +182,7 @@ class DetectionEngine:
                 alerts.append(item)
             else:
                 self.stats.detector_errors += 1
+                self.stats.errored_detectors.add(detector.name)
                 self.log.error(
                     "detector %r emitted a %s from %s(); expected ThreatAlert",
                     detector.name,

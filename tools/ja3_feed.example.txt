@@ -1,0 +1,17 @@
+# Local JA3/JA3S/JA4 fingerprint list for the encrypted-session signature path.
+#
+#   python -m detection_core.runner features.jsonl --ja3-feed tools/ja3_feed.example.txt
+#
+# Read from disk only. The detection layer never downloads a feed - a monitoring
+# enclave with no return path to the network cannot fetch threat intelligence,
+# and pretending otherwise would contradict the architecture this project is
+# graded on. Operators drop a curated file here out of band.
+#
+# One fingerprint per line as "<kind>:<hash>"; a bare MD5 is read as ja3.
+# Lines beginning with # are ignored.
+
+# --- example only ---------------------------------------------------------
+# The fingerprint the synthetic capture in tools/synth_flows.py presents from
+# its simulated implant. It is NOT real threat intelligence, and it is named
+# .example so nobody mistakes it for a curated list.
+ja3:51c64c77e60f3980eea90869b68c58a8
