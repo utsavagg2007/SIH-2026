@@ -48,6 +48,7 @@ pub enum DiagnosticKind {
     OutOfRangeValue,
     AmbiguousFlowLink,
     InconsistentFlowLink,
+    MissingRequiredProtocol,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,6 +167,50 @@ pub struct ZeekDnsRecord {
     pub answer_count: SourceValue<u16>,
     pub ttls_raw: SourceValue<String>,
     pub rejected: SourceValue<bool>,
+}
+
+/// Lossless source representation of one physical ssl.log data row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZeekTlsRecord {
+    pub row_ordinal: u64,
+    pub row_too_short_for_legacy: bool,
+    pub uid: SourceValue<String>,
+    pub timestamp_raw: SourceValue<String>,
+    pub src_ip: SourceValue<SourceIp>,
+    pub src_port: SourceValue<u16>,
+    pub dst_ip: SourceValue<SourceIp>,
+    pub dst_port: SourceValue<u16>,
+    pub proto: SourceValue<String>,
+    pub ip_proto: SourceValue<u8>,
+    pub version: SourceValue<String>,
+    pub cipher: SourceValue<String>,
+    pub server_name: SourceValue<String>,
+    pub ja3: SourceValue<String>,
+    pub ja3s: SourceValue<String>,
+    pub ja4: SourceValue<String>,
+}
+
+/// Lossless source representation of one physical http.log data row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZeekHttpRecord {
+    pub row_ordinal: u64,
+    pub row_too_short_for_legacy: bool,
+    pub uid: SourceValue<String>,
+    pub timestamp_raw: SourceValue<String>,
+    pub src_ip: SourceValue<SourceIp>,
+    pub src_port: SourceValue<u16>,
+    pub dst_ip: SourceValue<SourceIp>,
+    pub dst_port: SourceValue<u16>,
+    pub proto: SourceValue<String>,
+    pub ip_proto: SourceValue<u8>,
+    pub trans_depth: SourceValue<u64>,
+    pub method: SourceValue<String>,
+    pub host: SourceValue<String>,
+    pub uri: SourceValue<String>,
+    pub user_agent: SourceValue<String>,
+    pub status_code: SourceValue<u16>,
+    pub request_body_len: SourceValue<u64>,
+    pub response_body_len: SourceValue<u64>,
 }
 
 /// Validate the lexical form of a non-exponent decimal while retaining its text.

@@ -22,10 +22,26 @@ pub struct DnsCorrelationTuple {
     pub ip_protocol: u8,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EndpointCorrelationTuple {
+    pub src_ip: IpAddr,
+    pub dst_ip: IpAddr,
+    pub src_port: u16,
+    pub dst_port: u16,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CorrelationOutcome {
     NoCandidates,
     Unique(String),
+    Ambiguous,
+    Inconsistent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CandidateCorrelationOutcome {
+    NoCandidates,
+    Unique(FlowCorrelationCandidate),
     Ambiguous,
     Inconsistent,
 }
@@ -94,6 +110,67 @@ impl FlowCorrelationIndex {
             CorrelationOutcome::Ambiguous
         } else {
             CorrelationOutcome::Unique(first.record_id.clone())
+        }
+    }
+
+    /// Resolve one canonical flow using a complete protocol tuple.
+    ///
+    /// Unlike DNS correlation, both candidate ports must be present and exactly
+    /// equal. TLS/HTTP producers use this only for optional linking after their
+    /// required protocol has already been established directly from the source.
+    pub fn correlate_exact_protocol_tuple(
+        &self,
+        uid: &str,
+        tuple: EndpointCorrelationTuple,
+        ip_protocol: u8,
+    ) -> CorrelationOutcome {
+        let Some(candidates) = self.by_uid.get(uid) else {
+            return CorrelationOutcome::NoCandidates;
+        };
+        let mut matching = candidates.iter().filter(|candidate| {
+            candidate.src_ip == tuple.src_ip
+                && candidate.dst_ip == tuple.dst_ip
+                && candidate.src_port == Some(tuple.src_port)
+                && candidate.dst_port == Some(tuple.dst_port)
+                && candidate.ip_protocol == ip_protocol
+        });
+
+        let Some(first) = matching.next() else {
+            return CorrelationOutcome::Inconsistent;
+        };
+        if matching.next().is_some() {
+            CorrelationOutcome::Ambiguous
+        } else {
+            CorrelationOutcome::Unique(first.record_id.clone())
+        }
+    }
+
+    /// Resolve one canonical flow by UID and an exact source-reported endpoint tuple.
+    ///
+    /// This deliberately excludes protocol so TLS/HTTP producers can establish a
+    /// missing required `ip_protocol` only from one unambiguous flow candidate.
+    pub fn correlate_endpoints(
+        &self,
+        uid: &str,
+        tuple: EndpointCorrelationTuple,
+    ) -> CandidateCorrelationOutcome {
+        let Some(candidates) = self.by_uid.get(uid) else {
+            return CandidateCorrelationOutcome::NoCandidates;
+        };
+        let mut matching = candidates.iter().filter(|candidate| {
+            candidate.src_ip == tuple.src_ip
+                && candidate.dst_ip == tuple.dst_ip
+                && candidate.src_port == Some(tuple.src_port)
+                && candidate.dst_port == Some(tuple.dst_port)
+        });
+
+        let Some(first) = matching.next() else {
+            return CandidateCorrelationOutcome::Inconsistent;
+        };
+        if matching.next().is_some() {
+            CandidateCorrelationOutcome::Ambiguous
+        } else {
+            CandidateCorrelationOutcome::Unique(first.clone())
         }
     }
 }

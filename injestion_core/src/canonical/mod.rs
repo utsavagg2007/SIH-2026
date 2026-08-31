@@ -1,8 +1,10 @@
 pub mod correlation;
 pub mod dns_producer;
+pub mod http_producer;
 pub mod id;
 pub mod producer;
 pub mod time;
+pub mod tls_producer;
 
 use serde::Serialize;
 
@@ -11,6 +13,8 @@ use serde::Serialize;
 pub enum ObservationType {
     Flow,
     Dns,
+    Tls,
+    Http,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -188,12 +192,64 @@ pub struct DnsData {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TlsData {
+    pub event_time: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flow_record_id: Option<String>,
+    pub src_ip: String,
+    pub dst_ip: String,
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub ip_protocol: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cipher: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ja3: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ja3s: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ja4: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct HttpData {
+    pub event_time: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flow_record_id: Option<String>,
+    pub src_ip: String,
+    pub dst_ip: String,
+    pub src_port: u16,
+    pub dst_port: u16,
+    pub ip_protocol: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_agent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_code: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_body_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_body_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(untagged)]
 // Boxing Flow would break the frozen M1A Rust API solely to reduce enum stack size.
 #[allow(clippy::large_enum_variant)]
 pub enum CanonicalData {
     Flow(FlowData),
     Dns(DnsData),
+    Tls(TlsData),
+    Http(HttpData),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
