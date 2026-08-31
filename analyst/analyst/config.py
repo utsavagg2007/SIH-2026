@@ -10,15 +10,21 @@ only thing that opens an outbound connection.
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+#: Anchored to this package, not the working directory - see the same note in
+#: backend/app/config.py.
+_ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=_ENV_FILE,
         env_file_encoding="utf-8",
         env_prefix="ANALYST_",
         extra="ignore",

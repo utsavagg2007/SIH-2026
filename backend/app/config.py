@@ -10,6 +10,7 @@ sounds: the fallback path is the demo-day insurance policy.
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 from urllib.parse import quote
 
@@ -17,9 +18,16 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+#: Anchored to this package, not the working directory. A bare ".env" is
+#: resolved relative to CWD, so `python backend/tools/migrate.py` run from the
+#: repo root found no configuration and reported "no database configured" while
+#: the very same settings started the server fine under `cd backend`.
+_ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=_ENV_FILE,
         env_file_encoding="utf-8",
         extra="ignore",
     )

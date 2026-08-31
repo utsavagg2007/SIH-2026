@@ -918,3 +918,57 @@ def test_three_detectors_keep_independent_state(config):
     assert sum(a.detector == "c2_beaconing" for a in alerts) == 1
     assert sum(a.detector == "port_scan" for a in alerts) == 1
     assert sum(a.detector == "ddos" for a in alerts) == 1
+
+
+# --- benign periodic services (the confounders) -------------------------
+
+
+def _beacon_run(detector, *, dst_port: int, orig_bytes: int, count: int = 8):
+    """A textbook beacon: perfectly even 60s intervals, one relationship."""
+    alerts = []
+    for i in range(count):
+        alerts += detector.process(
+            make_flow(
+                timestamp=1_000_000.0 + i * 60.0,
+                src_ip=SRC,
+                dst_ip=DST,
+                dst_port=dst_port,
+                proto="udp" if dst_port == 123 else "tcp",
+                orig_bytes=orig_bytes,
+            )
+        )
+    return alerts
+
+
+def test_a_time_daemon_is_not_a_beacon():
+    """NTP polls on a fixed timer forever, which is more regular than real C2.
+
+    No timing threshold can separate them - the service is what separates
+    them, so port 123 is excluded outright.
+    """
+    detector = C2BeaconingDetector()
+    assert _beacon_run(detector, dst_port=123, orig_bytes=48) == []
+
+
+def test_a_scheduled_bulk_transfer_is_not_a_beacon():
+    """A nightly backup is just as regular and megabytes wide.
+
+    If it is malicious it is exfiltration, and that detector owns it.
+    """
+    detector = C2BeaconingDetector()
+    assert _beacon_run(detector, dst_port=443, orig_bytes=8_000_000) == []
+
+
+def test_a_real_check_in_still_fires():
+    """The guards must not cost the detection they are protecting."""
+    detector = C2BeaconingDetector()
+    alerts = _beacon_run(detector, dst_port=443, orig_bytes=880)
+    assert alerts
+    assert alerts[0].threat_class is ThreatClass.C2_BEACONING
+
+
+def test_the_size_ceiling_is_configurable():
+    detector = C2BeaconingDetector(
+        config=C2BeaconingConfig(max_mean_orig_bytes_per_flow=16_000_000.0)
+    )
+    assert _beacon_run(detector, dst_port=443, orig_bytes=8_000_000)

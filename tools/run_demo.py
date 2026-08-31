@@ -140,7 +140,7 @@ def ensure_dga_model() -> None:
         print("  DGA training did not produce an artifact; continuing on six detectors")
 
 
-def main() -> int:
+def _run() -> int:
     ap = argparse.ArgumentParser(description="Run the whole pipeline end to end")
     ap.add_argument("--pcap", default=None, help="run the real Zeek + Rust ingestion path")
     ap.add_argument("--features", default=None, help="use an existing features.jsonl")
@@ -178,8 +178,13 @@ def main() -> int:
         wait_for(f"http://127.0.0.1:{ANALYST_PORT}/health", timeout=25)
 
     if args.ui:
-        if shutil.which("npm"):
-            spawn("dashboard (vite)", ["npm", "run", "dev"], ROOT / "frontend")
+        # Windows ships npm as npm.cmd, and CreateProcess will not launch it
+        # from the bare name "npm" - which() returns the resolved path that it
+        # will. shutil.which() was already being called here purely as a
+        # boolean, one line above the call that then failed.
+        npm = shutil.which("npm")
+        if npm:
+            spawn("dashboard (vite)", [npm, "run", "dev"], ROOT / "frontend")
         else:
             print("  npm not found; skipping the dev server")
 
@@ -235,9 +240,21 @@ def main() -> int:
             time.sleep(1)
     except KeyboardInterrupt:
         pass
+    return 0
+
+
+def main() -> int:
+    """Whatever happens, do not leave a backend and an analyst running.
+
+    The services start before the wait loop, so any failure between the two -
+    npm missing, a port already held, a typo - used to propagate straight out
+    and orphan them, and the next run then failed on the port instead of on
+    the original cause.
+    """
+    try:
+        return _run()
     finally:
         shutdown()
-    return 0
 
 
 if __name__ == "__main__":

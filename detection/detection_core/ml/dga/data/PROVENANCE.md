@@ -98,3 +98,24 @@ and resulting metrics in `docs/dga_model.md`.
 
 No model binary is committed (`.gitignore` blocks `*.joblib`); retrain from the
 CSV with `python -m detection_core.ml.dga.training`.
+
+## Addendum: benign CDN-shaped hostnames (300 rows, `family=benign_cdn`)
+
+Added because the corpus had a hole exactly the shape of the false positives it
+produced. It contained 85 CDN *apex* domains (`akamai.com`, `akamaiedge.net`)
+and not one example of the thing that actually appears in traffic: a random
+looking label under a CDN or object-storage parent, like
+`d3f7k2mq9xz1lp.cloudfront.net`. The model had therefore never been shown that
+this shape is benign, and scored real CDN hostnames at 0.97 — above genuine DGA
+traffic — on the labelled evaluation capture.
+
+Generated deterministically (`random.seed(26145)`): hex, base36 and
+`<word>-<region>-<id>` labels under fourteen real CDN and object-storage
+parents. **Synthetic, not observed** — they are the right *shape*, and no claim
+is made that these specific names were ever resolved by anyone.
+
+Effect at the detector's live threshold of 0.75: precision 0.9127, recall
+0.5891 on the held-out family-disjoint split (was 0.9444 / 0.7109). Recall is
+genuinely lower — the model is now unwilling to call a random-looking string
+generated on the string alone, which is the correct trade and the reason the
+end-to-end false-positive count on the labelled capture went from 5 to 0.

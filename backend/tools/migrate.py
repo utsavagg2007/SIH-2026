@@ -66,7 +66,12 @@ async def run(dsn: str, *, dry_run: bool, status_only: bool) -> int:
         print(f"no migrations found in {MIGRATIONS_DIR}", file=sys.stderr)
         return 1
 
-    conn = await asyncpg.connect(dsn)
+    # statement_cache_size=0 is mandatory through Supabase's transaction
+    # pooler (port 6543): pgbouncer multiplexes connections, so asyncpg's
+    # cached prepared statements collide with "prepared statement already
+    # exists". app/storage/postgres.py sets it on the pool for the same
+    # reason; this file is the one that forgot.
+    conn = await asyncpg.connect(dsn, statement_cache_size=0)
     try:
         await conn.execute(_LEDGER)
         rows = await conn.fetch("SELECT version, checksum FROM schema_migrations")

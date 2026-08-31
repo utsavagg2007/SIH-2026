@@ -151,6 +151,19 @@ class C2BeaconingConfig:
     #: Periodicity is the core signal, so it weighs more.
     regularity_weight: float = 0.6
 
+    #: Destination ports whose traffic is periodic by design. A time daemon
+    #: polls its server every 64 seconds forever, which is a *more* perfect
+    #: beacon than most real C2 - measured here at CV 0.003 against 0.034 for
+    #: the genuine channel - so no timing threshold can separate them. The
+    #: service is what separates them.
+    ignored_dst_ports: frozenset[int] = frozenset({123})
+
+    #: A controller check-in is small: it asks for work and gets a short
+    #: answer. Scheduled bulk transfer - a nightly backup, or exfiltration on
+    #: a timer - is just as regular and orders of magnitude larger, and it is
+    #: the exfiltration detector's finding, not this one's.
+    max_mean_orig_bytes_per_flow: float = 65_536.0
+
     def __post_init__(self) -> None:
         if self.window_seconds <= 0:
             raise ValueError("window_seconds must be positive")
@@ -166,6 +179,8 @@ class C2BeaconingConfig:
             )
         if self.max_interval_cv < 0:
             raise ValueError("max_interval_cv must not be negative")
+        if self.max_mean_orig_bytes_per_flow <= 0:
+            raise ValueError("max_mean_orig_bytes_per_flow must be positive")
         if self.cooldown_seconds < 0:
             raise ValueError("cooldown_seconds must not be negative")
         if self.saturation_multiple <= 1:
@@ -300,6 +315,10 @@ class C2BeaconingDetector(Detector):
     def process(self, flow: FlowEvent) -> list[ThreatAlert]:
         """Update this relationship's history and alert if it looks timed."""
         key = BeaconKey.from_flow(flow)
+        if key.dst_port is not None and key.dst_port in self.config.ignored_dst_ports:
+            # Before the window, not after: a service that can never alert
+            # should not cost state either.
+            return []
         window = self._windows.observe(key, FlowObservation.from_flow(flow))
         # On every flow, not only when alerting: a relationship that alerts
         # once and then goes quiet must still have its cooldown released.
@@ -307,6 +326,8 @@ class C2BeaconingDetector(Detector):
 
         stats = self._interval_stats(self._interval_state(key, window, flow.timestamp))
         if stats is None or not self._qualifies(stats):
+            return []
+        if not self._plausible_check_in_size(window, stats):
             return []
 
         score = self._rule_score(stats)
@@ -440,6 +461,23 @@ class C2BeaconingDetector(Detector):
             <= config.max_mean_interval_seconds
             and stats.coefficient_of_variation <= config.max_interval_cv
         )
+
+    def _plausible_check_in_size(self, window, stats: IntervalStats) -> bool:
+        """Is the average transfer the size of a check-in rather than a payload?
+
+        Regularity alone cannot tell a controller check-in from a nightly
+        backup or a transfer on a timer - both are periodic, and the backup is
+        often the more regular of the two. Size can: a check-in asks for work
+        and gets a short answer, in hundreds of bytes.
+
+        This suppresses rather than rescores, because a large regular transfer
+        is not a weak beacon - it is a different finding, and
+        ``data_exfiltration`` is the detector that owns it.
+        """
+        if stats.observation_count <= 0:
+            return False
+        mean_bytes = window.total_orig_bytes() / stats.observation_count
+        return mean_bytes <= self.config.max_mean_orig_bytes_per_flow
 
     # --- scoring --------------------------------------------------------
 
