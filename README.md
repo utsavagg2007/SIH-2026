@@ -510,7 +510,7 @@ From `tools/evaluate.py` over the labelled synthetic capture:
 | encrypted_malware | 1.00 | 1.00 |
 | data_exfiltration | 1.00 | 1.00 |
 | **c2_beaconing** | **0.50** | 1.00 |
-| **dga_domain** | **0.17** | 1.00 |
+| **dga_domain** | ~~0.17~~ → **1.00** | 1.00 |
 
 No overall accuracy figure is reported. With rare positives it is dominated by
 the negative class, and a detector that fires on nothing scores extremely well.
@@ -523,17 +523,38 @@ exactly like beaconing, exfiltration, DGA and recon:
 
 - The **beacon** detector fires on the NTP daemon at score 0.79 — *higher* than
   the real C2 channel at 0.76. It has no benign-periodicity discrimination.
-- The **DGA** model flags legitimate CDN hostnames as `critical` at 0.97. Its
-  training corpus contains no content-delivery or cloud-storage names.
+  **Still open.**
+- The **DGA** model flagged legitimate CDN hostnames as `critical` at 0.97,
+  because its training corpus contained no content-delivery or cloud-storage
+  names. **Fixed** — see below.
 
-Both are detector-tuning problems with known fixes (destination novelty and a
-known-service allowlist for beaconing; CDN/cloud-storage hostnames in the DGA
-benign corpus). They are reported rather than hidden because a precision figure
-measured without confounders is meaningless — see
+They are reported rather than hidden because a precision figure measured
+without confounders is meaningless — see
 [docs/SIH-Layered-Build-Plan.txt](docs/SIH-Layered-Build-Plan.txt) §3.2.
 
+### DGA precision: fixed
+
+The benign corpus now also carries **1 824 real CDN / object-storage hostnames**
+from the Cisco Umbrella top 1M — the machine-assigned names
+(`d9ojso6xukdhq.cloudfront.net`) that Tranco's registrable domains never
+contain. The confounder that scored 0.985 now scores 0.285, and `dga_domain`
+goes from **precision 0.17 → 1.00 with recall unchanged at 1.00**; the run's
+overall false positives fall from 48/hr to 18/hr. Measured on real held-out
+CDN providers the model has never seen, false positives drop 14×.
+
+The decision threshold was re-derived with it: **0.65**, shipped as
+`detection/detectors.dga-precision.toml` for the runner's `--config` flag, so
+no detection code changes. The cost is stated in the doc — subdomain-hosted DGA
+sensitivity is largely lost, because the DGA corpus is 99.5% two-label while
+CDN hostnames are all three-or-more.
+
+Full evidence, the sweeps behind every parameter, and what is flagged for the
+detector owner: **[docs/DGA_PRECISION.md](docs/DGA_PRECISION.md)**.
+
 The DGA model itself, measured family-disjoint (no DGA family in both train and
-test): precision 0.944, recall 0.711, F1 0.811 at its live threshold of 0.75.
+test): precision 0.895, recall 0.569 at 0.75 and 0.711 at the recommended 0.65
+— on a test fold whose composition changed with the corpus, so compare it to
+the old 0.944/0.711 only via the identical-population table in that doc.
 
 ## Known gaps
 

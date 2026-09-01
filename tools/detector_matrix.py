@@ -60,7 +60,7 @@ sys.path.insert(0, str(ROOT / "detection"))
 import synth_flows as sf  # noqa: E402
 
 from detection_core.adapters import record_to_flow_event  # noqa: E402
-from detection_core.config import DetectorSettings  # noqa: E402
+from detection_core.config import DetectorSettings, load_detector_settings  # noqa: E402
 from detection_core.detectors import (  # noqa: E402
     C2BeaconingDetector,
     DataExfiltrationDetector,
@@ -159,9 +159,12 @@ def verify_identical(slices: dict[str, list[dict]], capture: Path) -> tuple[bool
 
 
 def detector_factories(
-    *, dga_model_path: Path | None, ja3_feed: Path | None
+    *, dga_model_path: Path | None, ja3_feed: Path | None, config: Path | None = None
 ) -> dict[str, Callable[[], Any]]:
-    settings = DetectorSettings()
+    # ``config`` is the same TOML the runner takes via --config, so a threshold
+    # measured here is a threshold the runner can actually be given. Only the
+    # values the file names are overridden; everything else keeps its default.
+    settings = load_detector_settings(config) if config else DetectorSettings()
     if ja3_feed:
         settings = settings.with_fingerprints(load_fingerprint_feed(ja3_feed))
 
@@ -210,6 +213,12 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--dga-model", default=str(ROOT / "artifacts" / "dga_model.joblib"))
     ap.add_argument("--ja3-feed", default=str(ROOT / "tools" / "ja3_feed.example.txt"))
+    ap.add_argument("--config", default=None,
+                    help="detector-settings TOML, same file the runner takes via --config")
+    ap.add_argument("--detectors", default=None,
+                    help="comma-separated subset to run (default: all that can be built). "
+                         "Only the named detectors are scored; useful when a change can "
+                         "only affect one of them and the other six would just be re-run")
     ap.add_argument("--seeds", type=int, default=10, help="number of independent captures")
     ap.add_argument("--first-seed", type=int, default=26145)
     ap.add_argument("--duration", type=float, default=600.0)
@@ -226,8 +235,18 @@ def main() -> int:
     if dga_path is None:
         print("!! no DGA model artifact - dga_domain will be absent from the matrix",
               file=sys.stderr)
-    factories = detector_factories(dga_model_path=dga_path, ja3_feed=ja3_path)
+    config_path = Path(args.config) if args.config else None
+    factories = detector_factories(
+        dga_model_path=dga_path, ja3_feed=ja3_path, config=config_path
+    )
     detectors = [name for name in THREAT_CLASSES if name in factories]
+    if args.detectors:
+        wanted = [d.strip() for d in args.detectors.split(",") if d.strip()]
+        unknown = [d for d in wanted if d not in factories]
+        if unknown:
+            print(f"!! not buildable here: {', '.join(unknown)}", file=sys.stderr)
+            return 1
+        detectors = [name for name in detectors if name in wanted]
 
     base_time = args.base_time if args.base_time is not None else time.time() - args.duration
     seeds = [args.first_seed + i for i in range(args.seeds)]
@@ -336,6 +355,7 @@ def main() -> int:
         "base_time": base_time,
         "dga_model": str(dga_path) if dga_path else None,
         "ja3_feed": str(ja3_path) if ja3_path else None,
+        "config": str(config_path) if config_path else None,
         "slice_flows_first_seed": slice_flows,
         "slice_labels": {k: {"class": v[0], "note": v[1]} for k, v in SLICES.items()},
         "verification": verification,

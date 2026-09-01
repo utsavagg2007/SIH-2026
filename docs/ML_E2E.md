@@ -150,6 +150,13 @@ identity before scoring and refuses to run if it has drifted.
 
 ### Result — 20 seeds, 1 820 detector×slice trials
 
+> **The `dga_domain` rows below are the BEFORE figures.** They were measured
+> against the model trained on the Tranco-only corpus. The corpus has since
+> gained 1 824 real CDN hostnames and the threshold has been re-derived, taking
+> that detector from precision 0.333 to **1.000** on this same matrix with
+> recall unchanged. See [`DGA_PRECISION.md`](DGA_PRECISION.md); the other six
+> detectors are unaffected and their numbers still stand.
+
 One trial = one detector over one traffic slice. TP/FN are counted over
 target-slice trials; FP/TN over benign + other-attack trials.
 
