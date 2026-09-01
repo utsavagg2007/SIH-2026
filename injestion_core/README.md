@@ -13,15 +13,17 @@ the passive threat-detection pipeline.
 - `scripts/run_zeek.sh` — Docker wrapper for legacy and deterministic canonical Zeek runs
 - `scripts/generate_synthetic_pcap.py` — dependency-free deterministic M1D PCAP generator
 
-## Build & install (per-project venv)
+## Build & install (single canonical venv at repo root)
 
 ```bash
+# from repository root
 python3 -m venv .venv
-.venv/bin/pip install maturin
-.venv/bin/maturin develop
+.venv/bin/pip install "maturin>=1.0,<2.0>"
+.venv/bin/maturin develop --manifest-path injestion_core/Cargo.toml
+# or: bash -c 'source .venv/bin/activate && maturin develop --manifest-path injestion_core/Cargo.toml'
 ```
 
-Uses pyo3 0.25, which supports Python 3.14 natively (no compat flag needed).
+Uses pyo3 0.25, which supports Python 3.14 natively (no compat flag needed). The `.venv` directory is ignored by git — do not commit it and do not create a nested `injestion_core/.venv`.
 
 ## Running Zeek
 
@@ -62,13 +64,14 @@ to run Zeek as root and the Python step as your normal user:
 
 ```bash
 sudo ./scripts/run_zeek.sh pcaps/capture.pcap zeek_output
-.venv/bin/python pipeline.py --skip-zeek -o features.jsonl --window 60
+# from repo root, or ../.venv/bin/python when inside injestion_core/
+.venv/bin/python injestion_core/pipeline.py --skip-zeek --keep-logs injestion_core/zeek_output -o features.jsonl --window 60
 ```
 
 Or, if your user can run Docker, do it in one shot (Zeek runs automatically):
 
 ```bash
-.venv/bin/python pipeline.py pcaps/capture.pcap -o features.jsonl --ja4
+.venv/bin/python injestion_core/pipeline.py pcaps/capture.pcap -o features.jsonl --ja4
 ```
 
 Output `features.jsonl` has one object per flow, with `dns`/`tls`/`http` nested
@@ -80,24 +83,26 @@ Canonical output is opt-in and does not replace or reshape `features.jsonl`:
 
 ```bash
 # Normal PCAP mode: hashes the original PCAP and uses fresh deterministic logs.
-.venv/bin/python pipeline.py pcaps/capture.pcap \
+.venv/bin/python injestion_core/pipeline.py injestion_core/pcaps/capture.pcap \
   -o features.jsonl \
   --canonical-output canonical_observations.jsonl \
   --sensor-id 'sensor/site-a'
 
 # Existing-log mode with the original PCAP still available.
-.venv/bin/python pipeline.py pcaps/capture.pcap --skip-zeek \
-  --keep-logs zeek_output -o features.jsonl \
+.venv/bin/python injestion_core/pipeline.py injestion_core/pcaps/capture.pcap --skip-zeek \
+  --keep-logs injestion_core/zeek_output -o features.jsonl \
   --canonical-output canonical_observations.jsonl \
   --sensor-id 'sensor/site-a'
 
 # Existing-log mode without the PCAP: caller asserts its original SHA-256.
-.venv/bin/python pipeline.py --skip-zeek --keep-logs zeek_output \
+.venv/bin/python injestion_core/pipeline.py --skip-zeek --keep-logs injestion_core/zeek_output \
   -o features.jsonl \
   --canonical-output canonical_observations.jsonl \
   --sensor-id 'sensor/site-a' \
   --input-sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 ```
+
+When running inside `injestion_core/`, use `../.venv/bin/python pipeline.py ...` instead of `.venv/bin/python ...`.
 
 Canonical mode requires the exact, nonempty `sensor_id`; it is preserved
 without case conversion or trimming because it participates in record identity.
@@ -150,7 +155,8 @@ and contains UDP DNS, TCP DNS, two HTTP transactions on one connection, and a
 minimal TLS handshake. Regenerate it only with:
 
 ```bash
-python scripts/generate_synthetic_pcap.py
+.venv/bin/python injestion_core/scripts/generate_synthetic_pcap.py
+# or from injestion_core/: ../.venv/bin/python scripts/generate_synthetic_pcap.py
 ```
 
 Its frozen digest is recorded beside the PCAP. Actual Zeek 8.0.10 `#fields`
@@ -211,6 +217,7 @@ from ingestion_core import (
     extract_dns_features, extract_tls_features, extract_http_features,
 )
 
+# requires: .venv/bin/maturin develop --manifest-path injestion_core/Cargo.toml
 conn_json = parse_conn_log("zeek_output/conn.log")
 flow_feats = extract_flow_features(conn_json)
 window_feats = extract_window_features(conn_json, window_secs=60.0)
@@ -397,9 +404,9 @@ uid; tighten this if your traffic has many requests per connection.
 ## Tests
 
 ```bash
-cargo test --locked
-python -m unittest discover -s tests -p 'test_pipeline_m1d.py'
-python -m unittest discover -s tests -p 'test_pipeline_cli_m1d.py'
-pwsh -NoProfile -File tests/test_m1d_docker_e2e.ps1
-pwsh -NoProfile -File ../contracts/tests/test_contract.ps1
+cargo test --locked --manifest-path injestion_core/Cargo.toml
+PYTHONPATH=injestion_core .venv/bin/python -m unittest discover -s injestion_core/tests -p 'test_pipeline_m1d.py' -v
+PYTHONPATH=injestion_core .venv/bin/python -m unittest discover -s injestion_core/tests -p 'test_pipeline_cli_m1d.py' -v
+pwsh -NoProfile -File injestion_core/tests/test_m1d_docker_e2e.ps1
+pwsh -NoProfile -File contracts/tests/test_contract.ps1
 ```

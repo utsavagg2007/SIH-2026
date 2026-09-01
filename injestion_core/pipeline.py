@@ -7,7 +7,8 @@ Two modes:
   * --skip-zeek: assumes Zeek already ran and reads logs from --keep-logs.
     Use this when you run Zeek yourself as root, e.g.:
         sudo ./scripts/run_zeek.sh pcaps/capture.pcap zeek_output
-        .venv/bin/python pipeline.py --skip-zeek -o features.jsonl
+        .venv/bin/python injestion_core/pipeline.py --skip-zeek -o features.jsonl
+        # or from injestion_core/: ../.venv/bin/python pipeline.py --skip-zeek -o features.jsonl
 
 Steps (parse/extract, both modes):
   1. Parse each Zeek log with the Rust library (ingestion_core).
@@ -16,8 +17,9 @@ Steps (parse/extract, both modes):
   4. Write one JSON object per line to the output file.
 
 Usage:
-  .venv/bin/python pipeline.py pcaps/capture.pcap -o features.jsonl --ja4
-  .venv/bin/python pipeline.py --skip-zeek -o features.jsonl
+  .venv/bin/python injestion_core/pipeline.py pcaps/capture.pcap -o features.jsonl --ja4
+  .venv/bin/python injestion_core/pipeline.py --skip-zeek -o features.jsonl
+  # from injestion_core/: ../.venv/bin/python pipeline.py ...
 """
 from __future__ import annotations
 

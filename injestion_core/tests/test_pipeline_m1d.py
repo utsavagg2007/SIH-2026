@@ -12,6 +12,15 @@ import ingestion_core
 import pipeline
 from scripts.generate_synthetic_pcap import build_fixture
 
+if not hasattr(ingestion_core, "sha256_input_file") or not hasattr(
+    ingestion_core, "write_canonical_observations_from_zeek_logs"
+):
+    raise ImportError(
+        "ingestion_core wheel is stale — run: "
+        "bash -c 'source .venv/bin/activate && maturin develop --manifest-path injestion_core/Cargo.toml' "
+        "from the repository root"
+    )
+
 
 FIXTURES = Path(__file__).parent / "fixtures"
 LOG_FIXTURE = FIXTURES / "zeek" / "legacy_regression"

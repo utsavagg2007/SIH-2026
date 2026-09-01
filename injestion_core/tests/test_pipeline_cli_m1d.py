@@ -6,6 +6,20 @@ import sys
 import tempfile
 import unittest
 
+try:
+    import ingestion_core
+
+    if not hasattr(ingestion_core, "sha256_input_file") or not hasattr(
+        ingestion_core, "write_canonical_observations_from_zeek_logs"
+    ):
+        raise ImportError(
+            "ingestion_core wheel is stale — run: "
+            "bash -c 'source .venv/bin/activate && maturin develop --manifest-path injestion_core/Cargo.toml' "
+            "from the repository root"
+        )
+except ModuleNotFoundError:
+    pass
+
 
 ROOT = Path(__file__).parents[1]
 PIPELINE = ROOT / "pipeline.py"
