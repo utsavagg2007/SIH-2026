@@ -1,0 +1,9 @@
+#separator \x09
+#set_separator	,
+#empty_field	(empty)
+#unset_field	-
+#path	conn
+#fields	ts	uid	id.orig_h	id.orig_p	id.resp_h	id.resp_p	proto	ip_proto	service	duration	orig_bytes	resp_bytes	conn_state	history	orig_pkts	resp_pkts	orig_ip_bytes	resp_ip_bytes	missed_bytes
+1000.000000	C1	192.0.2.10	50000	198.51.100.20	80	tcp	6	http,ssl	1.000000	100	200	SF	ShADadFf	5	4	300	400	0
+1001.000000	C2	192.0.2.10	53000	198.51.100.53	53	udp	17	dns	0.100000	30	50	SF	Dd	1	1	58	78	0
+#close	1970-01-01-00-16-42

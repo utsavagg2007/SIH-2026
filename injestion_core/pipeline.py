@@ -22,9 +22,14 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from datetime import datetime, timezone
 import json
+import os
+import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from ingestion_core import (
@@ -37,6 +42,8 @@ from ingestion_core import (
     extract_dns_features,
     extract_tls_features,
     extract_http_features,
+    sha256_input_file,
+    write_canonical_observations_from_zeek_logs,
 )
 
 # Map of log kind -> (Rust parser, Zeek filename).
@@ -47,8 +54,15 @@ _LOG_MAP = {
     "http": (parse_http_log, "http.log"),
 }
 
+_SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
-def run_zeek(pcap_path: str, out_dir: str, use_ja4: bool = False) -> None:
+
+def run_zeek(
+    pcap_path: str,
+    out_dir: str,
+    use_ja4: bool = False,
+    canonical_mode: bool = False,
+) -> None:
     """Run Zeek on a PCAP via the run_zeek.sh wrapper (Docker-based)."""
     script = Path(__file__).parent / "scripts" / "run_zeek.sh"
     if not script.exists():
@@ -56,6 +70,8 @@ def run_zeek(pcap_path: str, out_dir: str, use_ja4: bool = False) -> None:
     cmd = [str(script), pcap_path, out_dir]
     if use_ja4:
         cmd.append("--ja4")
+    elif canonical_mode:
+        cmd.append("--canonical")
     try:
         subprocess.run(cmd, check=True)
     except subprocess.CalledProcessError as exc:
@@ -67,19 +83,31 @@ def run_zeek(pcap_path: str, out_dir: str, use_ja4: bool = False) -> None:
             "    re-run this pipeline with --skip-zeek.\n"
             f"Underlying error: {exc}"
         )
+    except OSError as exc:
+        sys.exit(
+            "ERROR: unable to launch the Docker-backed Zeek wrapper; run normal "
+            "mode from Linux/WSL2 or another supported POSIX host.\n"
+            f"Underlying error: {exc}"
+        )
 
 
-def parse_logs(out_dir: str) -> dict[str, list[dict]]:
+def parse_logs(
+    out_dir: str, allow_empty_log_set: bool = False
+) -> dict[str, list[dict]]:
     """Parse every Zeek log present into a dict of record lists."""
     parsed: dict[str, list[dict]] = {}
     missing = []
+    found_supported_log = False
     for kind, (fn, fname) in _LOG_MAP.items():
         path = Path(out_dir) / fname
         if path.exists():
+            found_supported_log = True
             parsed[kind] = json.loads(fn(str(path)))
         elif kind == "conn":
             missing.append(fname)
     if missing:
+        if allow_empty_log_set and not found_supported_log:
+            return parsed
         sys.exit(
             f"ERROR: required Zeek log(s) not found in {out_dir}: {missing}.\n"
             "Run Zeek first (or with --skip-zeek, ensure logs exist)."
@@ -167,6 +195,176 @@ def extract_features(
     return vectors
 
 
+def _normalize_input_sha256(value: str) -> str:
+    if _SHA256_RE.fullmatch(value) is None:
+        raise ValueError("input SHA-256 must contain exactly 64 hexadecimal characters")
+    return value.lower()
+
+
+def _normalized_path(path: str) -> str:
+    return os.path.normcase(str(Path(path).resolve(strict=False)))
+
+
+def _validate_canonical_request(
+    canonical_output_path: str,
+    legacy_output_path: str,
+    sensor_id: str | None,
+    input_sha256: str | None,
+    use_ja4: bool,
+) -> str | None:
+    if sensor_id is None or sensor_id == "":
+        sys.exit("ERROR: --sensor-id is required and must be nonempty in canonical mode.")
+    if use_ja4:
+        sys.exit(
+            "ERROR: canonical + --ja4 is unsupported in M1D v1; the third-party "
+            "JA4 runtime profile is not qualified for canonical production."
+        )
+    if _normalized_path(canonical_output_path) == _normalized_path(legacy_output_path):
+        sys.exit("ERROR: canonical output and legacy output must be different files.")
+
+    target = Path(canonical_output_path)
+    if target.exists():
+        sys.exit(
+            f"ERROR: canonical output already exists and will not be overwritten: {target}"
+        )
+    parent = target.parent if str(target.parent) else Path(".")
+    if not parent.is_dir():
+        sys.exit(f"ERROR: canonical output parent directory does not exist: {parent}")
+
+    if input_sha256 is None:
+        return None
+    try:
+        return _normalize_input_sha256(input_sha256)
+    except ValueError as exc:
+        raise SystemExit(f"ERROR: {exc}") from exc
+
+
+def _hash_original_pcap(pcap_path: str) -> str:
+    path = Path(pcap_path)
+    if not path.is_file():
+        sys.exit(f"ERROR: PCAP file not found: {pcap_path}")
+    try:
+        return sha256_input_file(str(path))
+    except OSError as exc:
+        raise SystemExit(
+            f"ERROR: failed to hash original PCAP {pcap_path}: {exc}"
+        ) from exc
+
+
+def _resolve_input_identity(
+    pcap_path: str | None, supplied_sha256: str | None, skip_zeek: bool
+) -> str:
+    if pcap_path is not None:
+        computed = _hash_original_pcap(pcap_path)
+        if supplied_sha256 is not None and supplied_sha256 != computed:
+            sys.exit(
+                "ERROR: --input-sha256 does not match the SHA-256 of the supplied PCAP."
+            )
+        return computed
+    if skip_zeek and supplied_sha256 is not None:
+        return supplied_sha256
+    if not skip_zeek:
+        sys.exit("ERROR: --skip-zeek not set, so a PCAP argument is required.")
+    sys.exit(
+        "ERROR: canonical --skip-zeek mode requires either a readable PCAP or "
+        "--input-sha256."
+    )
+
+
+def _canonical_observed_at() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace(
+        "+00:00", "Z"
+    )
+
+
+def _publish_fresh_logs(source_dir: str, requested_dir: str) -> None:
+    source = Path(source_dir)
+    destination = Path(requested_dir)
+    destination.mkdir(parents=True, exist_ok=True)
+    for path in source.iterdir():
+        if path.is_file():
+            try:
+                shutil.copy2(path, destination / path.name)
+            except OSError as exc:
+                raise SystemExit(
+                    "ERROR: failed to copy fresh Zeek log "
+                    f"{path.name} into --keep-logs destination {destination}: {exc}. "
+                    "The destination may contain a partial set of current-run copies; "
+                    "unrelated pre-existing files were not removed."
+                ) from exc
+
+
+def _write_legacy_output(
+    log_dir: str,
+    output_path: str,
+    window_secs: float,
+    allow_empty_log_set: bool = False,
+) -> list[dict]:
+    parsed = parse_logs(log_dir, allow_empty_log_set=allow_empty_log_set)
+    joined = join_by_uid(parsed)
+    vectors = extract_features(joined, parsed, window_secs)
+    with open(output_path, "w") as f:
+        for v in vectors:
+            f.write(json.dumps(v) + "\n")
+    return vectors
+
+
+def _write_canonical_output(
+    log_dir: str,
+    canonical_output_path: str,
+    sensor_id: str,
+    input_sha256: str,
+    observed_at: str,
+    allow_empty_log_set: bool,
+) -> dict:
+    try:
+        summary = json.loads(
+            write_canonical_observations_from_zeek_logs(
+                log_dir,
+                canonical_output_path,
+                sensor_id,
+                input_sha256,
+                observed_at,
+                allow_empty_log_set,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        raise SystemExit(f"ERROR: canonical production failed: {exc}") from exc
+
+    for diagnostic in summary.get("diagnostics", []):
+        coordinates = [f"log={diagnostic['log_type']}"]
+        if diagnostic.get("row_ordinal") is not None:
+            coordinates.append(f"row={diagnostic['row_ordinal']}")
+        if diagnostic.get("source_record_id") is not None:
+            coordinates.append(f"uid={diagnostic['source_record_id']}")
+        if diagnostic.get("field") is not None:
+            coordinates.append(f"field={diagnostic['field']}")
+        coordinates.append(f"kind={diagnostic['kind']}")
+        print(
+            f"[canonical] diagnostic {' '.join(coordinates)}: {diagnostic['message']}",
+            file=sys.stderr,
+        )
+    if summary.get("diagnostics_truncated"):
+        print(
+            "[canonical] additional diagnostics omitted from CLI output",
+            file=sys.stderr,
+        )
+    missing = ",".join(summary.get("missing_optional_logs", [])) or "none"
+    print(
+        "[canonical] "
+        f"flow_emitted={summary['flow_emitted']} "
+        f"dns_emitted={summary['dns_emitted']} "
+        f"tls_emitted={summary['tls_emitted']} "
+        f"http_emitted={summary['http_emitted']} "
+        f"rows_skipped={summary['rows_skipped']} "
+        f"diagnostics={summary['diagnostics_count']} "
+        f"missing_optional_logs={missing} "
+        f"output={canonical_output_path}",
+        file=sys.stderr,
+    )
+    return summary
+
+
 def run_pipeline(
     pcap_path: str | None,
     out_dir: str,
@@ -174,18 +372,73 @@ def run_pipeline(
     window_secs: float = 60.0,
     use_ja4: bool = False,
     skip_zeek: bool = False,
+    *,
+    canonical_output_path: str | None = None,
+    sensor_id: str | None = None,
+    input_sha256: str | None = None,
+    observed_at: str | None = None,
 ) -> list[dict]:
-    if not skip_zeek:
-        if pcap_path is None:
-            sys.exit("ERROR: --skip-zeek not set, so a PCAP argument is required.")
-        run_zeek(pcap_path, out_dir, use_ja4)
-    parsed = parse_logs(out_dir)
-    joined = join_by_uid(parsed)
-    vectors = extract_features(joined, parsed, window_secs)
-    with open(output_path, "w") as f:
-        for v in vectors:
-            f.write(json.dumps(v) + "\n")
-    return vectors
+    if canonical_output_path is None:
+        if sensor_id is not None or input_sha256 is not None:
+            sys.exit(
+                "ERROR: --sensor-id and --input-sha256 require --canonical-output."
+            )
+        if not skip_zeek:
+            if pcap_path is None:
+                sys.exit("ERROR: --skip-zeek not set, so a PCAP argument is required.")
+            run_zeek(pcap_path, out_dir, use_ja4)
+        return _write_legacy_output(out_dir, output_path, window_secs)
+
+    normalized_supplied_sha = _validate_canonical_request(
+        canonical_output_path,
+        output_path,
+        sensor_id,
+        input_sha256,
+        use_ja4,
+    )
+    assert sensor_id is not None
+    resolved_sha = _resolve_input_identity(
+        pcap_path, normalized_supplied_sha, skip_zeek
+    )
+
+    if skip_zeek:
+        vectors = _write_legacy_output(out_dir, output_path, window_secs)
+        run_observed_at = observed_at or _canonical_observed_at()
+        _write_canonical_output(
+            out_dir,
+            canonical_output_path,
+            sensor_id,
+            resolved_sha,
+            run_observed_at,
+            False,
+        )
+        return vectors
+
+    if pcap_path is None:
+        sys.exit("ERROR: --skip-zeek not set, so a PCAP argument is required.")
+
+    with tempfile.TemporaryDirectory(prefix="sih-m1d-zeek-") as fresh_log_dir:
+        run_zeek(pcap_path, fresh_log_dir, canonical_mode=True)
+        post_zeek_sha = _hash_original_pcap(pcap_path)
+        if post_zeek_sha != resolved_sha:
+            sys.exit("ERROR: original PCAP changed while Zeek was processing it.")
+        _publish_fresh_logs(fresh_log_dir, out_dir)
+        vectors = _write_legacy_output(
+            fresh_log_dir,
+            output_path,
+            window_secs,
+            allow_empty_log_set=True,
+        )
+        run_observed_at = observed_at or _canonical_observed_at()
+        _write_canonical_output(
+            fresh_log_dir,
+            canonical_output_path,
+            sensor_id,
+            resolved_sha,
+            run_observed_at,
+            True,
+        )
+        return vectors
 
 
 def main() -> None:
@@ -204,10 +457,37 @@ def main() -> None:
     ap.add_argument(
         "--keep-logs", default="zeek_output", help="Directory for Zeek logs"
     )
+    ap.add_argument(
+        "--canonical-output",
+        help="Opt-in CanonicalObservation v1 JSON-lines sidecar output",
+    )
+    ap.add_argument(
+        "--sensor-id",
+        help="Explicit sensor identity (required with --canonical-output)",
+    )
+    ap.add_argument(
+        "--input-sha256",
+        help="Original PCAP SHA-256 for canonical --skip-zeek without a PCAP",
+    )
     args = ap.parse_args()
 
+    if args.canonical_output is None and (
+        args.sensor_id is not None or args.input_sha256 is not None
+    ):
+        ap.error("--sensor-id and --input-sha256 require --canonical-output")
+    if args.canonical_output is not None and args.sensor_id is None:
+        ap.error("--sensor-id is required with --canonical-output")
+
     vectors = run_pipeline(
-        args.pcap, args.keep_logs, args.output, args.window, args.ja4, args.skip_zeek
+        args.pcap,
+        args.keep_logs,
+        args.output,
+        args.window,
+        args.ja4,
+        args.skip_zeek,
+        canonical_output_path=args.canonical_output,
+        sensor_id=args.sensor_id,
+        input_sha256=args.input_sha256,
     )
     print(f"[+] Processed {len(vectors)} flows -> {args.output}")
 

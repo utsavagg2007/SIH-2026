@@ -1,0 +1,9 @@
+#separator \x09
+#set_separator	,
+#empty_field	(empty)
+#unset_field	-
+#path	dns
+#fields	ts	uid	id.orig_h	id.orig_p	id.resp_h	id.resp_p	proto	ip_proto	query	qtype	rcode	AA	TC	RD	RA	answers	rejected
+1001.010000	C2	192.0.2.10	53000	198.51.100.53	53	udp	17	abc.def	1	0	F	F	T	T	203.0.113.1	F
+1001.020000	C2	192.0.2.10	53000	198.51.100.53	53	udp	17	ghi.jkl	16	3	F	F	T	T	-	F
+#close	1970-01-01-00-16-42

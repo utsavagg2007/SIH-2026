@@ -2,6 +2,8 @@ pub mod correlation;
 pub mod dns_producer;
 pub mod http_producer;
 pub mod id;
+pub mod orchestrator;
+pub mod output;
 pub mod producer;
 pub mod time;
 pub mod tls_producer;

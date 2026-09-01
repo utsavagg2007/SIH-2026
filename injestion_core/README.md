@@ -9,8 +9,9 @@ the passive threat-detection pipeline.
 - `src/zeek_parser/` — header-aware parsers for each Zeek log type
 - `src/features/` — flow-level, sliding-window, DNS, TLS, and HTTP feature extractors
 - `src/utils/` — entropy helpers
-- `pipeline.py` — orchestration: PCAP → Zeek → parse → join by uid → features (JSON lines)
-- `scripts/run_zeek.sh` — Docker wrapper that runs Zeek on a PCAP
+- `pipeline.py` — legacy feature orchestration plus the opt-in canonical sidecar
+- `scripts/run_zeek.sh` — Docker wrapper for legacy and deterministic canonical Zeek runs
+- `scripts/generate_synthetic_pcap.py` — dependency-free deterministic M1D PCAP generator
 
 ## Build & install (per-project venv)
 
@@ -34,7 +35,24 @@ Zeek runs in Docker (no local install). Two options depending on Docker access:
 sudo ./scripts/run_zeek.sh pcaps/capture.pcap zeek_output
 ```
 
-For JA3/JA4 hashes add `--ja4` (uses the `activecm/zeek:8.0.6` image).
+The supported official runtime is frozen to:
+
+```text
+zeek/zeek:8.0.10@sha256:73e80e9cd23ff71fd28d158e9a9af5c7b2b0ef5d4036af61521827531347c0e3
+platform: linux/amd64
+canonical invocation: zeek -D -C -r <pcap> local
+```
+
+`-D` initializes random seeds deterministically, `-C` ignores invalid packet
+checksums for offline analysis, and `local` loads the standard local policy.
+Canonical replay must use all three. The official profile does not install
+fingerprint packages, so JA3/JA3S/JA4 remain optional. Legacy `--ja4` still uses
+`activecm/zeek:8.0.6`, but that third-party profile is unqualified and is
+rejected when canonical output is requested.
+
+The one-command shell wrapper is supported on Linux, WSL2, and compatible Linux
+Docker environments. Native Windows can canonicalize existing logs with
+`--skip-zeek`; guaranteed native-Windows `.sh` execution is not claimed.
 
 ## Pipeline (feature extraction)
 
@@ -55,6 +73,134 @@ Or, if your user can run Docker, do it in one shot (Zeek runs automatically):
 
 Output `features.jsonl` has one object per flow, with `dns`/`tls`/`http` nested
 feature blocks when those records exist. Hand the file to the ML team.
+
+## CanonicalObservation v1 sidecar
+
+Canonical output is opt-in and does not replace or reshape `features.jsonl`:
+
+```bash
+# Normal PCAP mode: hashes the original PCAP and uses fresh deterministic logs.
+.venv/bin/python pipeline.py pcaps/capture.pcap \
+  -o features.jsonl \
+  --canonical-output canonical_observations.jsonl \
+  --sensor-id 'sensor/site-a'
+
+# Existing-log mode with the original PCAP still available.
+.venv/bin/python pipeline.py pcaps/capture.pcap --skip-zeek \
+  --keep-logs zeek_output -o features.jsonl \
+  --canonical-output canonical_observations.jsonl \
+  --sensor-id 'sensor/site-a'
+
+# Existing-log mode without the PCAP: caller asserts its original SHA-256.
+.venv/bin/python pipeline.py --skip-zeek --keep-logs zeek_output \
+  -o features.jsonl \
+  --canonical-output canonical_observations.jsonl \
+  --sensor-id 'sensor/site-a' \
+  --input-sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+```
+
+Canonical mode requires the exact, nonempty `sensor_id`; it is preserved
+without case conversion or trimming because it participates in record identity.
+The original PCAP SHA-256 is authoritative when a readable PCAP is supplied.
+Without it, `--skip-zeek` requires a 64-hex caller assertion. Canonical and
+legacy output paths must differ, and an existing canonical target is rejected.
+In normal canonical mode the PCAP is hashed before Zeek and again immediately
+after Zeek. A mismatch stops before logs are copied and before either legacy or
+canonical output is published; the fresh temporary log workspace is cleaned.
+
+Normal canonical mode writes Zeek logs to a fresh run-scoped workspace, parses
+only that workspace, then copies generated logs into `--keep-logs`. This prevents
+stale optional logs from entering the canonical artifact. The artifact is
+published atomically through a same-directory temporary file and narrow sidecar
+reservation; it is compact UTF-8 JSONL with LF separators in flow, DNS, TLS,
+HTTP type order and physical source-row order within each type. Publication uses
+an atomic same-filesystem no-replace hard-link operation: an existing canonical
+file is never overwritten, there is no force option, and a target created at the
+publication instant wins unchanged. Concurrent writers fail safely. A successful
+zero-observation run publishes a zero-byte file. The destination filesystem must
+support hard links; an unsupported-filesystem error fails before publication and
+leaves no final artifact rather than falling back to overwrite-capable rename.
+
+`--keep-logs` is a **copy destination**, not an exact current-run snapshot.
+Canonical and legacy processing consume only the fresh run-scoped workspace,
+but the requested destination may retain unrelated files or older optional logs.
+The pipeline never deletes those files. If copying a current-run log fails, the
+operation stops before legacy/canonical publication and reports that the keep
+directory may contain a partial set of current-run copies.
+
+Missing optional-log behavior is explicit:
+
+- missing `dns.log` emits zero DNS observations plus a notice;
+- missing `ssl.log` emits zero TLS observations plus a notice;
+- missing `http.log` emits zero HTTP observations plus a notice;
+- external `--skip-zeek` input without `conn.log` fails;
+- protocol logs without `conn.log` are an incomplete-set failure;
+- a successful fresh Zeek run with no supported logs is allowed and publishes
+  empty legacy and canonical JSONL files.
+
+One UTC `observed_at` value is captured for the entire canonical run. Canonical
+counts, bounded redacted row diagnostics, and missing optional-log notices go to
+stderr; the existing legacy success line remains on stdout. If canonical
+publication fails after legacy output succeeds, the valid legacy artifact is
+preserved and the overall dual-output operation fails.
+
+The checked-in non-sensitive E2E fixture is
+`tests/fixtures/pcap/m1d_synthetic.pcap`. It uses only documentation addresses
+and contains UDP DNS, TCP DNS, two HTTP transactions on one connection, and a
+minimal TLS handshake. Regenerate it only with:
+
+```bash
+python scripts/generate_synthetic_pcap.py
+```
+
+Its frozen digest is recorded beside the PCAP. Actual Zeek 8.0.10 `#fields`
+evidence is stored in `tests/fixtures/runtime_headers/zeek_8.0.10_m1d_fields.txt`;
+parsers remain header-driven rather than positional.
+
+### Atomic output and stale-lock recovery
+
+For target `canonical.jsonl`, the writer reservation is named exactly
+`.canonical.jsonl.canonical.lock`. Temporary links are named
+`.canonical.jsonl.canonical.<PID>.<SEQUENCE>.tmp` in the same directory. The
+writer fails closed when the lock already exists and never removes an existing
+lock automatically: age alone cannot distinguish a crashed writer from a slow,
+active writer.
+
+After a crash, first verify that no pipeline/writer process is active, inspect
+the final target, and inspect same-directory `.tmp` files. A complete final
+target is authoritative and must not be overwritten. Leftover temporary files
+may be inspected and manually removed only after confirming no writer owns them.
+Remove the sidecar lock manually only after the same confirmation; never remove
+an active writer's lock. A subsequent run will then acquire a new lock normally.
+Use the process supervisor that launched ingestion as the primary ownership
+record. On Linux, corroborate with `ps -ef` and `lsof <lock-path>` when `lsof` is
+available; on Windows, inspect the owning pipeline/service process and open-file
+state with the deployment's process monitor. The lock intentionally contains no
+PID lease and no age-based deletion rule, so an empty or old lock alone is never
+proof that deletion is safe.
+
+On POSIX, the parent directory is synced after the complete artifact appears. If
+that durability confirmation fails, the API reports explicitly that the artifact
+was published completely but durability is unconfirmed; it does not delete the
+complete file or claim that no artifact exists. Windows flushes/syncs the complete
+temporary file before atomic publication but does not currently expose an
+equivalent directory-handle durability sync through this API.
+
+### Pinned Docker M1D replay
+
+With Docker Desktop/Engine available, this single repository-owned command
+regenerates all PCAP fixtures into a temporary directory, compares their bytes,
+runs fresh A/B and renamed-path C replays with the pinned Zeek image, compares
+runtime headers, validates every canonical line against the frozen schema,
+checks data minimization, and qualifies empty, ARP-only, and invalid PCAPs:
+
+```powershell
+pwsh -NoProfile -File tests/test_m1d_docker_e2e.ps1
+```
+
+The expected synthetic result is exactly 4 flow, 2 DNS, 1 TLS, and 2 HTTP
+observations (9 total), with identical UIDs, record IDs, flow links, ordering,
+and fixed-clock bytes across A/B/C.
 
 ## Library usage
 
@@ -112,9 +258,10 @@ ML/Python side can evolve without touching the Rust core.
 
 ### Binding layer — `src/lib.rs`
 
-Exposes eight `#[pyfunction]`s: four parsers (file → JSON array of records) and
-four extractors (JSON records → JSON array of feature objects). `maturin develop`
-builds the `ingestion_core` importable module.
+Exposes four parsers, five feature extractors, the streaming SHA-256 helper, and
+the narrow canonical JSONL orchestration binding. `maturin develop` builds the
+`ingestion_core` importable module. Canonical observations are serialized in
+Rust and are never returned to Python as one giant JSON array.
 
 ---
 
@@ -250,5 +397,9 @@ uid; tighten this if your traffic has many requests per connection.
 ## Tests
 
 ```bash
-cargo test
+cargo test --locked
+python -m unittest discover -s tests -p 'test_pipeline_m1d.py'
+python -m unittest discover -s tests -p 'test_pipeline_cli_m1d.py'
+pwsh -NoProfile -File tests/test_m1d_docker_e2e.ps1
+pwsh -NoProfile -File ../contracts/tests/test_contract.ps1
 ```

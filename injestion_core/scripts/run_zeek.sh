@@ -3,27 +3,44 @@
 # run_zeek.sh — Run Zeek (via Docker) on a PCAP and emit structured logs.
 #
 # Usage:
-#   ./run_zeek.sh <pcap> [output_dir] [--ja4]
+#   ./run_zeek.sh <pcap> [output_dir] [--canonical|--ja4]
 #
 # Examples:
 #   ./run_zeek.sh pcaps/capture.pcap
 #   ./run_zeek.sh pcaps/capture.pcap zeek_output
+#   ./run_zeek.sh pcaps/capture.pcap zeek_output --canonical
 #   ./run_zeek.sh pcaps/capture.pcap zeek_output --ja4
 #
-# The default image (zeek/zeek:latest) produces conn.log, dns.log,
-# http.log, ssl.log, etc. Pass --ja4 to use activecm/zeek which adds
-# JA3/JA4 TLS fingerprints needed for encrypted-malware detection.
+# Default and canonical modes use the frozen, digest-pinned M1D runtime.
+# Canonical mode additionally enables deterministic Zeek UIDs with -D.
+# --ja4 retains the legacy third-party image and is intentionally rejected by
+# the canonical producer because that runtime has not been qualified for it.
 #
 set -euo pipefail
 
-PCAP="${1:?Usage: run_zeek.sh <pcap> [output_dir] [--ja4]}"
+PCAP="${1:?Usage: run_zeek.sh <pcap> [output_dir] [--canonical|--ja4]}"
 OUT_DIR="${2:-zeek_output}"
-JA4_FLAG="${3:-}"
+MODE="${3:-}"
 
-IMAGE="zeek/zeek:latest"
-if [[ "$JA4_FLAG" == "--ja4" ]]; then
-  IMAGE="activecm/zeek:8.0.6"
-fi
+FROZEN_IMAGE="zeek/zeek:8.0.10@sha256:73e80e9cd23ff71fd28d158e9a9af5c7b2b0ef5d4036af61521827531347c0e3"
+IMAGE="$FROZEN_IMAGE"
+PLATFORM_ARGS=()
+ZEEK_ARGS=(-C -r)
+case "$MODE" in
+  "")
+    ;;
+  --canonical)
+    PLATFORM_ARGS=(--platform linux/amd64)
+    ZEEK_ARGS=(-D -C -r)
+    ;;
+  --ja4)
+    IMAGE="activecm/zeek:8.0.6"
+    ;;
+  *)
+    echo "Error: unsupported mode '$MODE' (expected --canonical or --ja4)" >&2
+    exit 2
+    ;;
+esac
 
 if [[ ! -f "$PCAP" ]]; then
   echo "Error: PCAP file not found: $PCAP" >&2
@@ -35,12 +52,12 @@ PCAP_NAME="$(basename "$PCAP")"
 
 mkdir -p "$OUT_DIR"
 
-docker run --rm \
+docker run --rm "${PLATFORM_ARGS[@]}" \
   -v "$PCAP_DIR":/pcaps:ro \
   -w /output \
   -v "$(realpath "$OUT_DIR")":/output \
   "$IMAGE" \
-  zeek -C -r "/pcaps/$PCAP_NAME" local
+  zeek "${ZEEK_ARGS[@]}" "/pcaps/$PCAP_NAME" local
 
 echo "[+] Logs written to $OUT_DIR"
 ls -1 "$OUT_DIR"

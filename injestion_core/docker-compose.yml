@@ -1,7 +1,8 @@
 services:
   zeek:
-    image: zeek/zeek:latest
-    # For JA3/JA4 fingerprinting (encrypted-malware detection), switch to:
+    image: zeek/zeek:8.0.10@sha256:73e80e9cd23ff71fd28d158e9a9af5c7b2b0ef5d4036af61521827531347c0e3
+    platform: linux/amd64
+    # Legacy-only JA3/JA4 profile (not qualified for canonical production):
     #   image: activecm/zeek:8.0.6
     volumes:
       - ./pcaps:/pcaps:ro
@@ -9,6 +10,7 @@ services:
     working_dir: /output
     entrypoint: ["zeek"]
     # Run with:
-    #   docker compose run --rm zeek -C -r /pcaps/capture.pcap local
+    # Canonical deterministic invocation:
+    #   docker compose run --rm zeek -D -C -r /pcaps/capture.pcap local
     # Interactive shell:
     #   docker compose run --rm zeek /bin/bash
