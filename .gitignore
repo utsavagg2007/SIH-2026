@@ -1,0 +1,12 @@
+# pcap_dataset binaries — never committed
+pcap_dataset/raw/*.pcap
+pcap_dataset/raw/*.pcapng
+pcap_dataset/raw/*.sha256
+pcap_dataset/output/*
+pcap_dataset/.tmp*/
+# keep registry + script versioned
+!pcap_dataset/metadata.json
+!pcap_dataset/ingest.py
+!pcap_dataset/README.md
+!pcap_dataset/raw/.gitkeep
+!pcap_dataset/output/.gitkeep
