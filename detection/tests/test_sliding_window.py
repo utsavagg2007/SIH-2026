@@ -8,7 +8,13 @@ from __future__ import annotations
 
 import pytest
 
-from detection_core.aggregators import ActivityWindow, FlowObservation, WindowIndex
+from detection_core.aggregators import (
+    DEFAULT_ESTABLISHED_RESP_BYTES,
+    INCOMPLETE_CONN_STATES,
+    ActivityWindow,
+    FlowObservation,
+    WindowIndex,
+)
 
 from .conftest import make_flow
 
@@ -21,6 +27,8 @@ def obs(
     src_ip: str | None = None,
     orig_packets: int = 0,
     orig_bytes: int = 0,
+    resp_bytes: int = 0,
+    conn_state: str | None = None,
 ):
     return FlowObservation(
         timestamp=ts,
@@ -30,6 +38,8 @@ def obs(
         src_ip=src_ip,
         orig_packets=orig_packets,
         orig_bytes=orig_bytes,
+        resp_bytes=resp_bytes,
+        conn_state=conn_state,
     )
 
 
@@ -368,3 +378,147 @@ def test_index_keeps_sources_that_are_still_active():
 def test_index_rejects_non_positive_window():
     with pytest.raises(ValueError):
         WindowIndex(-1)
+
+
+# --------------------------------------------------------------------------
+# Service ports and responder engagement
+#
+# The window reports these; port_scan decides on them. Both readings have to
+# behave sensibly when the evidence is absent, because on today's ingestion
+# that is the normal case - see INCOMPLETE_CONN_STATES.
+# --------------------------------------------------------------------------
+
+
+def test_observation_carries_a_connection_state():
+    flow = make_flow(conn_state="S0")
+    assert FlowObservation.from_flow(flow).conn_state == "S0"
+
+
+def test_observation_connection_state_defaults_to_none():
+    """The normal case today: ingestion supplies no usable conn_state."""
+    assert FlowObservation(timestamp=1.0, dst_ip="10.0.0.1").conn_state is None
+
+
+def test_service_ports_exclude_the_dynamic_range():
+    window = ActivityWindow(60.0)
+    for port in (22, 443, 49151, 49152, 60000):
+        window.observe(obs(100.0, port=port))
+    assert window.unique_dst_port_count() == 5
+    # 49151 is the last IANA registered port; 49152 begins the private range.
+    assert window.unique_service_port_count(49151) == 3
+
+
+def test_service_ports_count_distinct_values_only():
+    window = ActivityWindow(60.0)
+    for _ in range(5):
+        window.observe(obs(100.0, port=22))
+    assert window.unique_service_port_count(49151) == 1
+
+
+def test_service_ports_ignore_portless_observations():
+    window = ActivityWindow(60.0)
+    window.observe(obs(100.0, port=None))
+    assert window.unique_service_port_count(49151) == 0
+
+
+def test_service_ports_respect_expiry():
+    window = ActivityWindow(10.0)
+    window.observe(obs(100.0, port=22))
+    window.observe(obs(120.0, port=50000))
+    assert window.unique_service_port_count(49151) == 0
+
+
+def test_responder_readings_are_zero_on_an_empty_window():
+    window = ActivityWindow(60.0)
+    assert window.conn_state_coverage() == 0.0
+    assert window.incomplete_fraction() == 0.0
+    assert window.established_fraction() == 0.0
+
+
+def test_conn_state_coverage_is_the_share_that_carries_one():
+    window = ActivityWindow(60.0)
+    window.observe(obs(100.0, conn_state="SF"))
+    window.observe(obs(101.0))
+    window.observe(obs(102.0))
+    window.observe(obs(103.0))
+    assert window.conn_state_coverage() == 0.25
+
+
+def test_incomplete_fraction_is_measured_over_the_whole_window():
+    """Not over the labelled subset: an unlabelled flow is not known-complete.
+
+    Two of four flows say the connection never completed. The other two say
+    nothing at all, and reading the fraction as 1.0 over the labelled pair
+    would turn silence into evidence.
+    """
+    window = ActivityWindow(60.0)
+    window.observe(obs(100.0, conn_state="S0"))
+    window.observe(obs(101.0, conn_state="REJ"))
+    window.observe(obs(102.0))
+    window.observe(obs(103.0))
+    assert window.incomplete_fraction() == 0.5
+    assert window.conn_state_coverage() == 0.5
+
+
+def test_a_completed_connection_is_not_incomplete():
+    window = ActivityWindow(60.0)
+    for state in sorted(INCOMPLETE_CONN_STATES):
+        window.observe(obs(100.0, conn_state=state))
+    assert window.incomplete_fraction() == 1.0
+
+    window.clear()
+    for state in ("SF", "S1", "S2", "RSTO", "OTH"):
+        window.observe(obs(100.0, conn_state=state))
+    assert window.incomplete_fraction() == 0.0
+    assert window.conn_state_coverage() == 1.0
+
+
+def test_established_fraction_needs_real_payload_not_a_stub():
+    """The floor exists because some exporters bill a bare RST a few bytes."""
+    window = ActivityWindow(60.0)
+    window.observe(obs(100.0, resp_bytes=6))
+    window.observe(obs(101.0, resp_bytes=DEFAULT_ESTABLISHED_RESP_BYTES - 1))
+    window.observe(obs(102.0, resp_bytes=DEFAULT_ESTABLISHED_RESP_BYTES))
+    window.observe(obs(103.0, resp_bytes=9_000))
+    assert window.established_fraction() == 0.5
+
+
+def test_established_fraction_is_zero_on_a_unidirectional_capture():
+    """No reverse direction anywhere reads as "nothing to go on", not as 1.0."""
+    window = ActivityWindow(60.0)
+    for offset in range(6):
+        window.observe(obs(100.0 + offset, resp_bytes=0))
+    assert window.established_fraction() == 0.0
+
+
+def test_the_established_threshold_is_configurable():
+    window = ActivityWindow(60.0, established_resp_bytes=10)
+    window.observe(obs(100.0, resp_bytes=20))
+    assert window.established_fraction() == 1.0
+    assert ActivityWindow(60.0).established_fraction() == 0.0
+
+
+def test_window_rejects_a_negative_established_threshold():
+    with pytest.raises(ValueError):
+        ActivityWindow(60.0, established_resp_bytes=-1)
+
+
+def test_responder_readings_respect_expiry():
+    window = ActivityWindow(10.0)
+    window.observe(obs(100.0, conn_state="S0", resp_bytes=0))
+    window.observe(obs(120.0, conn_state="SF", resp_bytes=9_000))
+    assert window.conn_state_coverage() == 1.0
+    assert window.incomplete_fraction() == 0.0
+    assert window.established_fraction() == 1.0
+
+
+def test_index_passes_the_established_threshold_to_its_windows():
+    index = WindowIndex(60.0, established_resp_bytes=10)
+    window = index.observe("10.0.0.1", obs(100.0, resp_bytes=20))
+    assert window.established_resp_bytes == 10
+    assert window.established_fraction() == 1.0
+
+
+def test_index_rejects_a_negative_established_threshold():
+    with pytest.raises(ValueError):
+        WindowIndex(60.0, established_resp_bytes=-1)

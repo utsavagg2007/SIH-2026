@@ -15,6 +15,19 @@ Still reserved: grouping related ThreatAlerts into incidents by populating
 from __future__ import annotations
 
 from .extremes import WindowExtreme
-from .sliding_window import ActivityWindow, FlowObservation, WindowIndex
+from .sliding_window import (
+    DEFAULT_ESTABLISHED_RESP_BYTES,
+    INCOMPLETE_CONN_STATES,
+    ActivityWindow,
+    FlowObservation,
+    WindowIndex,
+)
 
-__all__ = ["ActivityWindow", "FlowObservation", "WindowExtreme", "WindowIndex"]
+__all__ = [
+    "DEFAULT_ESTABLISHED_RESP_BYTES",
+    "INCOMPLETE_CONN_STATES",
+    "ActivityWindow",
+    "FlowObservation",
+    "WindowExtreme",
+    "WindowIndex",
+]

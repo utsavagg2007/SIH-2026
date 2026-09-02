@@ -28,6 +28,7 @@ import argparse
 import json
 import logging
 import sys
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -36,9 +37,11 @@ sys.path.insert(0, str(ROOT / "detection"))
 
 from detection_core.adapters import IngestionJsonlAdapter  # noqa: E402
 from detection_core.adapters.encodings import (  # noqa: E402
+    CONN_STATE_BY_CODE,
     IGNORED_WINDOW_FIELDS,
     KNOWN_TOP_LEVEL_FIELDS,
 )
+from detection_core.aggregators import INCOMPLETE_CONN_STATES  # noqa: E402
 
 CORE_FIELDS = [
     "flow_id", "uid", "timestamp", "src_ip", "src_port", "dst_ip", "dst_port",
@@ -59,14 +62,30 @@ HTTP_FIELDS = [
     "response_body_len", "status_code",
 ]
 
+#: Fields a detector does not *require*, but is measurably worse without.
+#: Reported separately so "OK - every field it reads arrived" cannot be read as
+#: "this detector is at full strength".
+DETECTOR_DEGRADED_WITHOUT: dict[str, list[str]] = {
+    # Measured on UNSW-NB15: with conn_state, port_scan scores recall 1.000 /
+    # precision 1.000 on the four Reconnaissance episodes. Without it the
+    # responder-payload proxy has to stand in, and recall falls to 0.500 -
+    # banner-grabbing recon completes its connections, so only the connection
+    # state distinguishes it from ordinary traffic. See docs/REAL_DATA_EVAL.md.
+    "port_scan": ["conn_state"],
+}
+
 #: detector -> the FlowEvent fields it reads to decide. Dotted names are inside
 #: a protocol block. Transcribed from the frozen detector sources and from
 #: ``aggregators/sliding_window.py``, which is what the four window-based
 #: detectors read the flow through. Doc-comment mentions were excluded; only
 #: fields the code actually dereferences are listed.
 DETECTOR_NEEDS: dict[str, list[str]] = {
-    # via SlidingWindow: unique dst_port / dst_ip counts per source
-    "port_scan": ["src_ip", "dst_ip", "dst_port", "timestamp"],
+    # via SlidingWindow: unique dst_port / dst_ip counts per source, plus the
+    # responder-engagement check. `resp_bytes` is the proxy that runs today;
+    # `conn_state` is what it stands in for, and is listed separately in
+    # DETECTOR_DEGRADED_WITHOUT because its absence degrades the detector
+    # rather than breaking it.
+    "port_scan": ["src_ip", "dst_ip", "dst_port", "timestamp", "resp_bytes"],
     # via SlidingWindow keyed on the target: source cardinality + orig volume
     "ddos": ["src_ip", "dst_ip", "dst_port", "timestamp", "orig_pkts", "orig_bytes"],
     "c2_beaconing": ["src_ip", "dst_ip", "dst_port", "proto", "timestamp",
@@ -156,6 +175,7 @@ def main() -> int:
 
     print("  --- what each detector needs, and whether it arrived ---")
     gaps: dict[str, list[str]] = {}
+    degraded_by: dict[str, list[str]] = {}
     for detector, needs in DETECTOR_NEEDS.items():
         missing = []
         for field in needs:
@@ -167,8 +187,40 @@ def main() -> int:
         gaps[detector] = missing
         verdict = "OK - every field it reads arrived" if not missing else "MISSING: " + ", ".join(missing)
         print(f"    {detector:20s} {verdict}")
-    print()
+        # Immediately under the verdict, so "OK" is never read on its own: a
+        # detector can have every field it dereferences and still be running
+        # at reduced strength.
+        absent = [
+            field
+            for field in DETECTOR_DEGRADED_WITHOUT.get(detector, [])
+            if lookup.get(field, (0, 0))[0] == 0
+        ]
+        degraded_by[detector] = absent
+        for field in absent:
+            print(f"    {'':20s} DEGRADED: no {field} - runs on a proxy, "
+                  f"at reduced recall")
 
+    # --- connection states actually observed --------------------------------
+    # A field being "present" is not the same as a field being *usable*. The
+    # scan-relevant states are the ones that say the responder never engaged,
+    # and ingestion's integer encoding has no code for the most important of
+    # them, so no capture run through it can ever produce one.
+    observed = Counter(f.conn_state for f in flows if f.conn_state is not None)
+    print()
+    print("  --- conn_state values observed ---")
+    if not observed:
+        print("    (none - no flow carried a connection state)")
+    else:
+        for state, count in observed.most_common():
+            mark = "  <- incomplete (scan signal)" if state in INCOMPLETE_CONN_STATES else ""
+            print(f"    {state:8s} {count:8d}  {100*count/len(flows):5.1f}%{mark}")
+    unrepresentable = sorted(INCOMPLETE_CONN_STATES - set(CONN_STATE_BY_CODE.values()))
+    if unrepresentable:
+        print(f"    NOT REPRESENTABLE by ingestion's encoding: {', '.join(unrepresentable)}")
+        print("      encode_conn_state (ingestion/src/features/flow.rs) has no arm for")
+        print("      these, so they arrive as 0 - the same code as 'unknown'. S0 is the")
+        print("      primary port-scan signal; see docs/REAL_DATA_EVAL.md for what it costs.")
+    print()
     print("  --- schema drift: top-level keys the adapter does not know ---")
     if unknown_keys:
         for key in unknown_keys:
@@ -198,6 +250,12 @@ def main() -> int:
         "blocks_present": {"dns": len(with_dns), "tls": len(with_tls), "http": len(with_http)},
         "coverage": {k: {"present": v[0], "total": v[1]} for k, v in lookup.items()},
         "detector_gaps": gaps,
+        # Fields present in DETECTOR_NEEDS terms but absent in practice, which
+        # cost recall rather than breaking the detector. Serialised as well as
+        # printed: the ingestion team reads this file, not the terminal.
+        "detector_degraded_by_missing": {k: v for k, v in degraded_by.items() if v},
+        "conn_state_observed": dict(observed.most_common()),
+        "conn_state_unrepresentable_by_ingestion": unrepresentable,
         "unknown_top_level_keys": unknown_keys,
         "ignored_window_keys": window_keys,
     }

@@ -761,6 +761,9 @@ def test_both_detectors_keep_independent_state(config):
             dst_ip="10.0.0.80",
             dst_port=p,
             timestamp=2000.0 + i * 0.01,
+            # A probed port does not answer with a payload.
+            resp_bytes=0,
+            resp_pkts=0,
         )
         for i, p in enumerate([22, 23, 25, 80, 443])
     ]

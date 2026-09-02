@@ -67,6 +67,11 @@ def test_the_shipped_defaults_are_exactly_what_they_were():
         "window_seconds": 60.0, "min_unique_ports": 15, "min_unique_hosts": 20,
         "cooldown_seconds": 300.0, "saturation_multiple": 4.0,
         "combined_bonus": 0.1,
+        # 0.3.0: the two credibility checks derived from real captures. See
+        # docs/REAL_DATA_EVAL.md for where each number came from.
+        "max_service_port": 49151, "min_service_ports": 3,
+        "established_resp_bytes": 100, "max_established_fraction": 0.20,
+        "min_incomplete_fraction": 0.05, "min_conn_state_coverage": 0.50,
     }
     assert dc.asdict(DDoSConfig()) == {
         "window_seconds": 10.0, "min_unique_sources": 50, "min_flows": 200,
@@ -368,6 +373,60 @@ def test_a_fingerprint_array_must_be_an_array(tmp_path):
     path = write(tmp_path, '[encrypted_malware]\nja3_fingerprints = "abc"\n')
 
     with pytest.raises(ConfigError, match="must be an array"):
+        load_detector_settings(path)
+
+
+def test_a_switch_takes_a_boolean(tmp_path):
+    """One setting is a switch rather than a threshold, and must be reachable.
+
+    ``ignore_multicast_destinations`` is documented as configurable, so a
+    config file has to be able to turn it off - the blanket "no setting here
+    takes a boolean" rule that predates it would have made the knob
+    unreachable and said so with the wrong message.
+    """
+    path = write(
+        tmp_path, "[c2_beaconing]\nignore_multicast_destinations = false\n"
+    )
+
+    beaconing = load_detector_settings(path).c2_beaconing
+
+    assert beaconing.ignore_multicast_destinations is False
+    assert beaconing.ignored_dst_ports == C2BeaconingConfig().ignored_dst_ports
+
+
+def test_a_switch_rejects_a_number(tmp_path):
+    """`1` in a switch is a reader guessing; the guess is refused."""
+    path = write(tmp_path, "[c2_beaconing]\nignore_multicast_destinations = 1\n")
+
+    with pytest.raises(ConfigError, match="must be true or false"):
+        load_detector_settings(path)
+
+
+def test_the_periodic_service_list_takes_an_array_of_ports(tmp_path):
+    """Which services are periodic-by-design is a property of the network.
+
+    A site with no directory server, or one that runs something unusual on a
+    timer, has to be able to say so without editing frozen detector code.
+    """
+    path = write(tmp_path, "[c2_beaconing]\nignored_dst_ports = [123, 5353]\n")
+
+    beaconing = load_detector_settings(path).c2_beaconing
+
+    assert beaconing.ignored_dst_ports == frozenset({123, 5353})
+
+
+def test_the_periodic_service_list_rejects_strings(tmp_path):
+    path = write(tmp_path, '[c2_beaconing]\nignored_dst_ports = ["123"]\n')
+
+    with pytest.raises(ConfigError, match="must be an array of port numbers"):
+        load_detector_settings(path)
+
+
+def test_the_periodic_service_list_rejects_an_impossible_port(tmp_path):
+    """The dataclass's own range check, reported with the file that caused it."""
+    path = write(tmp_path, "[c2_beaconing]\nignored_dst_ports = [70000]\n")
+
+    with pytest.raises(ConfigError, match=r"\[0, 65535\]"):
         load_detector_settings(path)
 
 

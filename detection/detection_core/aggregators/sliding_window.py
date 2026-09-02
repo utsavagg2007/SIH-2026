@@ -27,7 +27,37 @@ from dataclasses import dataclass
 from ..schemas import FlowEvent
 from .extremes import WindowExtreme
 
-__all__ = ["FlowObservation", "ActivityWindow", "WindowIndex"]
+__all__ = [
+    "FlowObservation",
+    "ActivityWindow",
+    "WindowIndex",
+    "INCOMPLETE_CONN_STATES",
+    "DEFAULT_ESTABLISHED_RESP_BYTES",
+]
+
+#: Zeek ``conn_state`` values meaning *the responder never completed an
+#: exchange*: the connection was attempted and refused, reset, or simply never
+#: answered. These are the states a port scan produces and an ordinary session
+#: does not.
+#:
+#: ``S0`` heads the list and is the one that matters most - and the one current
+#: ingestion destroys: ``encode_conn_state`` in
+#: ``ingestion/src/features/flow.rs`` has no ``S0`` arm, so a scan's connection
+#: attempts arrive here encoded as ``0``, indistinguishable from "unknown".
+#: Detection therefore cannot rely on this set being populated today; see
+#: :meth:`ActivityWindow.conn_state_coverage`, which reports how much of a
+#: window actually carries the field so a detector can fall back.
+INCOMPLETE_CONN_STATES: frozenset[str] = frozenset(
+    {"S0", "REJ", "RSTOS0", "RSTRH", "SH", "SHR"}
+)
+
+#: Responder payload bytes at or above which a flow counts as a real exchange
+#: rather than a probe. A refused or unanswered connection returns no payload;
+#: a served page, a DNS answer or a TLS handshake returns far more than this.
+#: The floor exists because some flow exporters bill a bare RST a handful of
+#: bytes - CICFlowMeter reports 6 - so "greater than zero" is not the same
+#: question as "did anything actually come back".
+DEFAULT_ESTABLISHED_RESP_BYTES: int = 100
 
 
 @dataclass(frozen=True)
@@ -50,6 +80,12 @@ class FlowObservation:
 
     ``FlowEvent`` already guarantees these counters are non-negative
     integers, so they cannot go negative.
+
+    ``conn_state`` is carried for the same reason as ``resp_bytes``: as
+    *context*, never as volume. It lets a window report how many of its
+    connections actually completed - see
+    :meth:`ActivityWindow.incomplete_fraction` - and it is ``None`` whenever
+    ingestion did not supply one, which is the normal case today.
     """
 
     timestamp: float
@@ -61,6 +97,8 @@ class FlowObservation:
     orig_bytes: int = 0
     #: Responder-side volume. Context only - see the class docstring.
     resp_bytes: int = 0
+    #: Zeek connection state, or None when ingestion did not supply one.
+    conn_state: str | None = None
 
     @classmethod
     def from_flow(cls, flow: FlowEvent) -> FlowObservation:
@@ -73,6 +111,7 @@ class FlowObservation:
             orig_packets=flow.orig_pkts,
             orig_bytes=flow.orig_bytes,
             resp_bytes=flow.resp_bytes,
+            conn_state=flow.conn_state,
         )
 
 
@@ -103,10 +142,18 @@ class ActivityWindow:
     set would forget that.
     """
 
-    def __init__(self, window_seconds: float) -> None:
+    def __init__(
+        self,
+        window_seconds: float,
+        *,
+        established_resp_bytes: int = DEFAULT_ESTABLISHED_RESP_BYTES,
+    ) -> None:
         if window_seconds <= 0:
             raise ValueError("window_seconds must be positive")
+        if established_resp_bytes < 0:
+            raise ValueError("established_resp_bytes must not be negative")
         self.window_seconds = window_seconds
+        self.established_resp_bytes = established_resp_bytes
         self._events: deque[FlowObservation] = deque()
         self._reset_aggregates()
 
@@ -116,6 +163,12 @@ class ActivityWindow:
         self._orig_packets_total = 0
         self._orig_bytes_total = 0
         self._resp_bytes_total = 0
+        # Responder-engagement counters. Like every other aggregate here they
+        # are maintained on entry and reversed on expiry, so a read is O(1)
+        # and always equals what a full scan of the deque would return.
+        self._conn_state_known = 0
+        self._incomplete_total = 0
+        self._established_total = 0
         # Reference counts: value -> how many live observations carry it.
         # A zero count is deleted, so the key set is exactly the live values.
         self._dst_port_counts: dict[int, int] = {}
@@ -182,6 +235,12 @@ class ActivityWindow:
         self._orig_packets_total += observation.orig_packets
         self._orig_bytes_total += observation.orig_bytes
         self._resp_bytes_total += observation.resp_bytes
+        if observation.conn_state is not None:
+            self._conn_state_known += 1
+            if observation.conn_state in INCOMPLETE_CONN_STATES:
+                self._incomplete_total += 1
+        if observation.resp_bytes >= self.established_resp_bytes:
+            self._established_total += 1
 
         self._increment(self._dst_ip_counts, observation.dst_ip)
         if observation.dst_port is not None:
@@ -211,6 +270,12 @@ class ActivityWindow:
         self._orig_packets_total -= observation.orig_packets
         self._orig_bytes_total -= observation.orig_bytes
         self._resp_bytes_total -= observation.resp_bytes
+        if observation.conn_state is not None:
+            self._conn_state_known -= 1
+            if observation.conn_state in INCOMPLETE_CONN_STATES:
+                self._incomplete_total -= 1
+        if observation.resp_bytes >= self.established_resp_bytes:
+            self._established_total -= 1
 
         self._decrement(self._dst_ip_counts, observation.dst_ip)
         if observation.dst_port is not None:
@@ -270,6 +335,60 @@ class ActivityWindow:
     def unique_dst_ip_count(self) -> int:
         """Distinct destination hosts, as a number. See above."""
         return len(self._dst_ip_counts)
+
+    def unique_service_port_count(self, max_service_port: int) -> int:
+        """Distinct destination ports at or below ``max_service_port``.
+
+        The ports where a service could plausibly be *found*. Everything above
+        the boundary is IANA's dynamic/private range, which hosts hand out to
+        outbound connections - so a source touching many of those on one host
+        is the far end of ordinary client traffic (or a flow exporter that
+        recorded the server as the initiator), not something enumerating
+        services.
+
+        O(distinct ports), the same order as :meth:`dst_ports`, and the port
+        set is small even during a scan.
+        """
+        return sum(1 for port in self._dst_port_counts if port <= max_service_port)
+
+    def conn_state_coverage(self) -> float:
+        """Fraction of live observations that carry a ``conn_state`` at all.
+
+        0.0 on an empty window. A detector reads this before trusting
+        :meth:`incomplete_fraction`: with today's ingestion the field is absent
+        (or, worse, present-but-flattened - see
+        :data:`INCOMPLETE_CONN_STATES`), and a fraction computed over a handful
+        of records that happen to carry it says nothing about the window.
+        """
+        if not self._events:
+            return 0.0
+        return self._conn_state_known / len(self._events)
+
+    def incomplete_fraction(self) -> float:
+        """Share of the window whose connections never completed an exchange.
+
+        Measured over **every** live observation, not only those carrying a
+        ``conn_state``: a window that is half unlabelled has genuinely not
+        shown that half to be incomplete. Pair it with
+        :meth:`conn_state_coverage` before drawing a conclusion.
+        """
+        if not self._events:
+            return 0.0
+        return self._incomplete_total / len(self._events)
+
+    def established_fraction(self) -> float:
+        """Share of the window where the responder returned real payload.
+
+        The direction-safe stand-in for ``conn_state`` while ingestion still
+        drops ``S0``. A scan gets nothing back; a browsing session gets pages
+        back. **On a genuinely unidirectional capture this is 0.0 for every
+        window**, because no responder bytes exist to count - which is exactly
+        the reading that cannot suppress anything, so a detector gating on it
+        degrades to its unfiltered behaviour rather than going quiet.
+        """
+        if not self._events:
+            return 0.0
+        return self._established_total / len(self._events)
 
     def unique_src_ip_count(self) -> int:
         """Distinct source hosts, as a number - what a flood grows."""
@@ -412,11 +531,20 @@ class WindowIndex:
     every real port instead of collapsing it onto something like 0.
     """
 
-    def __init__(self, window_seconds: float, *, sweep_every: int = 500) -> None:
+    def __init__(
+        self,
+        window_seconds: float,
+        *,
+        sweep_every: int = 500,
+        established_resp_bytes: int = DEFAULT_ESTABLISHED_RESP_BYTES,
+    ) -> None:
         if window_seconds <= 0:
             raise ValueError("window_seconds must be positive")
+        if established_resp_bytes < 0:
+            raise ValueError("established_resp_bytes must not be negative")
         self.window_seconds = window_seconds
         self.sweep_every = sweep_every
+        self.established_resp_bytes = established_resp_bytes
         self._windows: dict[Hashable, ActivityWindow] = {}
         self._since_sweep = 0
 
@@ -424,7 +552,10 @@ class WindowIndex:
         """Record an observation for ``key`` and return that key's window."""
         window = self._windows.get(key)
         if window is None:
-            window = ActivityWindow(self.window_seconds)
+            window = ActivityWindow(
+                self.window_seconds,
+                established_resp_bytes=self.established_resp_bytes,
+            )
             self._windows[key] = window
         window.observe(observation)
 

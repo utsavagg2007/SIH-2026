@@ -22,7 +22,12 @@ import random
 
 import pytest
 
-from detection_core.aggregators import ActivityWindow, FlowObservation
+from detection_core.aggregators import (
+    DEFAULT_ESTABLISHED_RESP_BYTES,
+    INCOMPLETE_CONN_STATES,
+    ActivityWindow,
+    FlowObservation,
+)
 
 SEED = 20260829
 
@@ -39,8 +44,14 @@ class ReferenceWindow:
     must always hold identical observations as well as identical aggregates.
     """
 
-    def __init__(self, window_seconds: float) -> None:
+    def __init__(
+        self,
+        window_seconds: float,
+        *,
+        established_resp_bytes: int = DEFAULT_ESTABLISHED_RESP_BYTES,
+    ) -> None:
         self.window_seconds = window_seconds
+        self.established_resp_bytes = established_resp_bytes
         self._events: list[FlowObservation] = []
 
     def observe(self, observation: FlowObservation) -> None:
@@ -81,6 +92,34 @@ class ReferenceWindow:
 
     def max_orig_bytes(self) -> int:
         return max((e.orig_bytes for e in self._events), default=0)
+
+    def unique_service_port_count(self, max_service_port: int) -> int:
+        return len(
+            {
+                e.dst_port
+                for e in self._events
+                if e.dst_port is not None and e.dst_port <= max_service_port
+            }
+        )
+
+    def conn_state_coverage(self) -> float:
+        if not self._events:
+            return 0.0
+        return sum(e.conn_state is not None for e in self._events) / len(self._events)
+
+    def incomplete_fraction(self) -> float:
+        if not self._events:
+            return 0.0
+        return sum(
+            e.conn_state in INCOMPLETE_CONN_STATES for e in self._events
+        ) / len(self._events)
+
+    def established_fraction(self) -> float:
+        if not self._events:
+            return 0.0
+        return sum(
+            e.resp_bytes >= self.established_resp_bytes for e in self._events
+        ) / len(self._events)
 
     def total_resp_bytes(self) -> int:
         return sum(e.resp_bytes for e in self._events)
@@ -124,6 +163,15 @@ def assert_equivalent(fast: ActivityWindow, reference: ReferenceWindow, context:
     assert fast.total_orig_packets() == reference.total_orig_packets(), context
     assert fast.total_orig_bytes() == reference.total_orig_bytes(), context
     assert fast.total_resp_bytes() == reference.total_resp_bytes(), context
+    # The responder-engagement counters are maintained the same way - added on
+    # entry, reversed on expiry - so they belong in the same differential net.
+    assert fast.conn_state_coverage() == reference.conn_state_coverage(), context
+    assert fast.incomplete_fraction() == reference.incomplete_fraction(), context
+    assert fast.established_fraction() == reference.established_fraction(), context
+    for boundary in (0, 1023, 49151, 65535):
+        assert fast.unique_service_port_count(boundary) == (
+            reference.unique_service_port_count(boundary)
+        ), f"{context} boundary={boundary}"
     assert fast.max_orig_bytes() == reference.max_orig_bytes(), context
     assert fast.timestamps() == reference.timestamps(), context
     assert fast.time_span() == reference.time_span(), context
@@ -140,6 +188,7 @@ def observation(
     orig_packets: int = 1,
     orig_bytes: int = 100,
     resp_bytes: int = 200,
+    conn_state: str | None = None,
 ) -> FlowObservation:
     return FlowObservation(
         timestamp=timestamp,
@@ -150,6 +199,7 @@ def observation(
         orig_packets=orig_packets,
         orig_bytes=orig_bytes,
         resp_bytes=resp_bytes,
+        conn_state=conn_state,
     )
 
 
@@ -176,6 +226,9 @@ def test_randomized_sequences_agree_at_every_step(window_seconds, run):
     ports = [22, 80, 443, None]
     protocols = ["tcp", "udp", None]
     byte_values = [0, 100, 100, 5_000]
+    # None dominates on purpose: today's ingestion supplies no conn_state, so
+    # the mixed-coverage window is the case that has to stay correct.
+    conn_states = ["S0", "SF", "REJ", None, None, None]
 
     timestamp = 1_000.0
     for step in range(400):
@@ -190,6 +243,7 @@ def test_randomized_sequences_agree_at_every_step(window_seconds, run):
             orig_packets=rng.choice([0, 1, 7]),
             orig_bytes=rng.choice(byte_values),
             resp_bytes=rng.choice([0, 200, 9_000]),
+            conn_state=rng.choice(conn_states),
         )
         fast.observe(candidate)
         reference.observe(candidate)
@@ -422,6 +476,9 @@ def assert_no_residue(window: ActivityWindow) -> None:
     assert window._orig_bytes_total == 0
     assert window._resp_bytes_total == 0
     assert window._orig_packets_total == 0
+    assert window._conn_state_known == 0
+    assert window._incomplete_total == 0
+    assert window._established_total == 0
 
 
 def test_high_cardinality_history_leaves_nothing_behind():
@@ -435,6 +492,11 @@ def test_high_cardinality_history_leaves_nothing_behind():
                 dst_port=1024 + index % 4000,
                 src_ip=f"192.168.{index // 256 % 256}.{index % 256}",
                 orig_bytes=index,
+                # Cycled so the residue assertions on the responder counters
+                # are answering a real question rather than a window that
+                # never carried a connection state at all.
+                conn_state=["S0", "SF", None][index % 3],
+                resp_bytes=[0, 5_000][index % 2],
             )
         )
         # Only the newest observation is ever resident.

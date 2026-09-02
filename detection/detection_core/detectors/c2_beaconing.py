@@ -23,6 +23,7 @@ machine-timed", which is a lead to investigate, not a verdict.
 
 from __future__ import annotations
 
+import ipaddress
 import math
 import statistics
 from collections import deque
@@ -44,6 +45,26 @@ from ..schemas import (
 from .scoring import normalize_score, severity_for, severity_rank
 
 __all__ = ["BeaconKey", "C2BeaconingConfig", "C2BeaconingDetector"]
+
+
+def _is_multicast_or_broadcast(address: str) -> bool:
+    """Is this an address no single host owns?
+
+    Multicast groups (``224.0.0.0/4``, ``ff00::/8``) and the all-ones IPv4
+    broadcast are destinations you *announce to*, not endpoints you hold a
+    session with. A controller cannot live at one.
+
+    An unparseable address is not treated as multicast: it is unknown, and
+    guessing would silence a relationship on the strength of a typo.
+    """
+    try:
+        parsed = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    return parsed.is_multicast or (parsed.version == 4 and parsed == _IPV4_BROADCAST)
+
+
+_IPV4_BROADCAST = ipaddress.IPv4Address("255.255.255.255")
 
 
 def _population_stddev(values: Sequence[float], mean: float) -> float:
@@ -156,7 +177,45 @@ class C2BeaconingConfig:
     #: beacon than most real C2 - measured here at CV 0.003 against 0.034 for
     #: the genuine channel - so no timing threshold can separate them. The
     #: service is what separates them.
-    ignored_dst_ports: frozenset[int] = frozenset({123})
+    #:
+    #: Widened past NTP after measuring against 529k flows of a real benign
+    #: capture, where 67 of 156 false positives were one of these services:
+    #:
+    #: * ``123`` NTP - a time daemon on a fixed poll.
+    #: * ``1900`` SSDP / UPnP, ``5353`` mDNS, ``5355`` LLMNR - announcement
+    #:   and link-local name protocols, periodic by specification.
+    #: * ``137`` / ``138`` NetBIOS name and datagram service - broadcast name
+    #:   resolution on a timer.
+    #: * ``389`` / ``636`` LDAP(S) and ``3268`` / ``3269`` Global Catalog -
+    #:   workstations polling a directory controller. A single domain
+    #:   controller accounted for 38 false positives - 37 of them on these
+    #:   ports, plus one on ``445``, which is deliberately not excluded.
+    #: * ``67`` / ``68`` DHCP - lease renewal, a timer by definition.
+    #:
+    #: **Deliberately absent**, though they also produced false positives:
+    #: ``53`` (DNS) and ``445`` (SMB). Both are real C2 and lateral-movement
+    #: channels, and the cost of excluding them was measured rather than
+    #: argued: re-scoring the labelled Ares-bot capture with port 53 removed
+    #: drops 36 of the 90 true positives and a whole episode with them
+    #: (recall 0.750 -> 0.625); removing ``445`` costs two more. That is a
+    #: genuine detection traded for a cosmetic false-positive count.
+    ignored_dst_ports: frozenset[int] = frozenset(
+        {67, 68, 123, 137, 138, 389, 636, 1900, 3268, 3269, 5353, 5355}
+    )
+
+    #: Skip multicast and broadcast destinations. A controller is a host you
+    #: hold a session with; a multicast group is an address nobody owns and
+    #: everyone receives. SSDP, mDNS and LLMNR announce on a timer to
+    #: ``239.255.255.250`` and friends forever, which is a textbook beacon
+    #: shape with no controller behind it - 30 false positives on the real
+    #: benign capture were exactly this.
+    #:
+    #: **Measured contribution on that capture: zero.** All 30 were SSDP, so
+    #: ``1900`` had already excluded them. Kept anyway, because it says
+    #: something the port list cannot: a multicast group is not a controller
+    #: whatever port it uses, and the port list is meant to be edited per site
+    #: while that fact is not.
+    ignore_multicast_destinations: bool = True
 
     #: A controller check-in is small: it asks for work and gets a short
     #: answer. Scheduled bulk transfer - a nightly backup, or exfiltration on
@@ -187,6 +246,12 @@ class C2BeaconingConfig:
             raise ValueError("saturation_multiple must be greater than 1")
         if not 0.0 <= self.regularity_weight <= 1.0:
             raise ValueError("regularity_weight must be within [0.0, 1.0]")
+        # Checked because this list is meant to be edited per site: which
+        # services count as periodic-by-design is a property of the network,
+        # not of the detector. A typo'd port should fail at startup rather
+        # than quietly exclude nothing.
+        if any(not 0 <= port <= 65535 for port in self.ignored_dst_ports):
+            raise ValueError("ignored_dst_ports must all be within [0, 65535]")
 
 
 #: Mirrors are only pruned once they exceed twice the live windows plus this
@@ -301,7 +366,10 @@ class C2BeaconingDetector(Detector):
     """
 
     name = "c2_beaconing"
-    version = "0.1.0"
+    # 0.2.0: the periodic-by-design exclusion covers the directory, name and
+    # announcement services as well as NTP, and multicast destinations are
+    # skipped outright. Both from real-capture measurement; see the config.
+    version = "0.2.0"
 
     def __init__(self, config: C2BeaconingConfig | None = None) -> None:
         self.config = config or C2BeaconingConfig()
@@ -315,9 +383,9 @@ class C2BeaconingDetector(Detector):
     def process(self, flow: FlowEvent) -> list[ThreatAlert]:
         """Update this relationship's history and alert if it looks timed."""
         key = BeaconKey.from_flow(flow)
-        if key.dst_port is not None and key.dst_port in self.config.ignored_dst_ports:
-            # Before the window, not after: a service that can never alert
-            # should not cost state either.
+        if self._never_a_controller(key):
+            # Before the window, not after: a relationship that can never
+            # alert should not cost state either.
             return []
         window = self._windows.observe(key, FlowObservation.from_flow(flow))
         # On every flow, not only when alerting: a relationship that alerts
@@ -461,6 +529,40 @@ class C2BeaconingDetector(Detector):
             <= config.max_mean_interval_seconds
             and stats.coefficient_of_variation <= config.max_interval_cv
         )
+
+    def _never_a_controller(self, key: BeaconKey) -> bool:
+        """Can this relationship be a controller check-in at all?
+
+        Two structural exclusions, neither of which looks at timing - because
+        timing cannot settle them. A time daemon and a beacon are both perfect
+        timers, and the benign one is often the *more* regular of the two.
+
+        These suppress rather than rescore: a periodic LDAP poll is not a weak
+        beacon, it is not a beacon.
+
+        **A third exclusion was measured and rejected: destination
+        popularity.** The idea was that a controller is a private endpoint
+        while a benign periodic destination is one many hosts share, so
+        suppressing destinations with a wide internal fan-in would cut the
+        remainder. It does not survive the data. On CIC-IDS2017 the real Ares
+        controller (``205.174.165.73``) was contacted by **5** internal hosts -
+        every infected workstation in the lab - while the benign destinations
+        this detector still fires on span a fan-in of **1 to 25**. The
+        controller sits inside the benign distribution, not beside it, so the
+        only cut that preserves the true positives is "6 or more", and that
+        number is a fact about a ten-host lab rather than about C2. On a real
+        network fan-in scales with the population, and a botnet's does too. The
+        measurement is in ``docs/REAL_DATA_EVAL.md``; it is recorded so the
+        experiment is not repeated blind.
+        """
+        config = self.config
+        if key.dst_port is not None and key.dst_port in config.ignored_dst_ports:
+            return True
+        if config.ignore_multicast_destinations and _is_multicast_or_broadcast(
+            key.dst_ip
+        ):
+            return True
+        return False
 
     def _plausible_check_in_size(self, window, stats: IntervalStats) -> bool:
         """Is the average transfer the size of a check-in rather than a payload?

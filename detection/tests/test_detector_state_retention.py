@@ -84,7 +84,12 @@ def _port_scan_detector() -> PortScanDetector:
 
 
 def _port_scan_alerting(entity: str, start: float) -> list[FlowEvent]:
-    """Five distinct ports on one host - a vertical scan."""
+    """Five distinct ports on one host - a vertical scan.
+
+    ``resp_bytes=0``: a probed port does not answer with a payload, and the
+    detector's responder-engagement check reads exactly that. ``make_flow``'s
+    shared default of 200 describes a served request, not a probe.
+    """
     return [
         make_flow(
             src_ip=entity,
@@ -92,6 +97,8 @@ def _port_scan_alerting(entity: str, start: float) -> list[FlowEvent]:
             dst_port=1000 + i,
             timestamp=start + i * 0.1,
             proto="tcp",
+            resp_bytes=0,
+            resp_pkts=0,
         )
         for i in range(5)
     ]

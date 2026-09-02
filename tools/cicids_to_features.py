@@ -204,7 +204,9 @@ def convert(
             "Not produced by the ingestion pipeline; mapped from CICFlowMeter flows.",
             "No dns/tls/http block: dga_domain, dns_tunnelling and encrypted_malware "
             "cannot fire and must not be scored on this data.",
-            "No conn_state; no detector reads it today.",
+            "No conn_state: CICFlowMeter does not export one. port_scan 0.3.0 "
+            "reads it when present and falls back to responder payload bytes, "
+            "which is the path this data exercises.",
             "Timestamps: 1s resolution on 03/07/2017, 1-minute elsewhere.",
         ],
         "ground_truth": ground_truth,

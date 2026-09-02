@@ -149,7 +149,7 @@ def test_invalid_config_rejected(kwargs):
 def test_detector_identity():
     detector = C2BeaconingDetector()
     assert detector.name == "c2_beaconing"
-    assert detector.version == "0.1.0"
+    assert detector.version == "0.2.0"
 
 
 def test_beacon_key_from_flow():
@@ -490,7 +490,7 @@ def test_alert_conforms_to_v1_1(sample_alert):
     assert sample_alert.score_type is ScoreType.RULE_SCORE
     assert sample_alert.flow_id is None
     assert sample_alert.detector == "c2_beaconing"
-    assert sample_alert.detector_version == "0.1.0"
+    assert sample_alert.detector_version == "0.2.0"
     assert sample_alert.mitre_techniques == ["T1071.001", "T1029"]
     assert sample_alert.incident_id is None
 
@@ -893,7 +893,14 @@ def test_three_detectors_keep_independent_state(config):
     beacon = beacon_flows(6)
     scan = [
         make_flow(
-            src_ip="10.0.0.66", dst_ip="10.0.0.80", dst_port=p, timestamp=2000.0 + i
+            src_ip="10.0.0.66",
+            dst_ip="10.0.0.80",
+            dst_port=p,
+            timestamp=2000.0 + i,
+            # A probed port does not answer with a payload; make_flow's shared
+            # 200-byte default describes a served request, not a probe.
+            resp_bytes=0,
+            resp_pkts=0,
         )
         for i, p in enumerate([22, 23, 25, 80, 443])
     ]
@@ -972,3 +979,80 @@ def test_the_size_ceiling_is_configurable():
         config=C2BeaconingConfig(max_mean_orig_bytes_per_flow=16_000_000.0)
     )
     assert _beacon_run(detector, dst_port=443, orig_bytes=8_000_000)
+
+
+# --- structural exclusions: things that cannot be a controller -------------
+
+
+def test_the_directory_poll_is_not_a_beacon():
+    """Workstations poll LDAP and the Global Catalog on a timer.
+
+    On the real benign capture a single domain controller produced 38 of the
+    156 false positives across ports 389, 3268 and 445. The first two are
+    directory services with no plausible controller behind them.
+    """
+    detector = C2BeaconingDetector()
+    for port in (389, 636, 3268, 3269):
+        assert _beacon_run(detector, dst_port=port, orig_bytes=900) == [], port
+
+
+def test_announcement_protocols_are_not_beacons():
+    """SSDP, mDNS and LLMNR announce on a timer by specification."""
+    detector = C2BeaconingDetector()
+    for port in (1900, 5353, 5355, 137, 138, 67, 68):
+        assert _beacon_run(detector, dst_port=port, orig_bytes=300) == [], port
+
+
+def test_dns_and_smb_are_still_watched():
+    """The exclusion stops at services a controller could not use.
+
+    36 of the 90 true positives on the labelled bot capture were C2 over port
+    53, and SMB is a lateral-movement channel. Excluding either would buy a
+    lower false-positive count with a real detection.
+    """
+    detector = C2BeaconingDetector()
+    assert _beacon_run(detector, dst_port=53, orig_bytes=500)
+    assert C2BeaconingDetector() and _beacon_run(
+        C2BeaconingDetector(), dst_port=445, orig_bytes=500
+    )
+
+
+def _multicast_run(detector, dst_ip: str, *, dst_port: int = 443, count: int = 8):
+    alerts = []
+    for i in range(count):
+        alerts += detector.process(
+            make_flow(
+                timestamp=1_000_000.0 + i * 60.0,
+                src_ip=SRC,
+                dst_ip=dst_ip,
+                dst_port=dst_port,
+                proto="udp",
+                orig_bytes=300,
+            )
+        )
+    return alerts
+
+
+@pytest.mark.parametrize(
+    "address", ["239.255.255.250", "224.0.0.251", "255.255.255.255", "ff02::fb"]
+)
+def test_a_multicast_group_is_not_a_controller(address):
+    """You announce to a group; you do not take orders from one."""
+    assert _multicast_run(C2BeaconingDetector(), address) == []
+
+
+def test_an_ordinary_destination_on_the_same_port_still_alerts():
+    """The exclusion is about the address, not the port it happened to use."""
+    assert _multicast_run(C2BeaconingDetector(), "203.0.113.10")
+
+
+def test_an_unparseable_destination_is_not_treated_as_multicast():
+    """Unknown is not the same as excluded; a typo must not silence a host."""
+    assert _multicast_run(C2BeaconingDetector(), "not-an-ip-address")
+
+
+def test_the_multicast_rule_is_configurable():
+    detector = C2BeaconingDetector(
+        config=C2BeaconingConfig(ignore_multicast_destinations=False)
+    )
+    assert _multicast_run(detector, "239.255.255.250")

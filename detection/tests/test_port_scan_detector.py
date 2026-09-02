@@ -72,8 +72,29 @@ def scan_flow(
     port: int | None = 80,
     ts: float = 1000.0,
     proto: str = "tcp",
+    resp_bytes: int = 0,
+    resp_pkts: int = 0,
+    conn_state: str | None = None,
 ):
-    return make_flow(src_ip=src, dst_ip=dst, dst_port=port, timestamp=ts, proto=proto)
+    """A probe: the target does not answer with a payload.
+
+    ``resp_bytes`` defaults to 0 rather than inheriting ``make_flow``'s 200,
+    because a scanned port returning 200 bytes of payload is not a scanned
+    port - it is a served request. Every test below is about scan *shape*, so
+    the shared helper's browsing-shaped default was quietly describing the
+    wrong traffic. The detector's responder-engagement check reads exactly
+    this, so it is now stated rather than assumed.
+    """
+    return make_flow(
+        src_ip=src,
+        dst_ip=dst,
+        dst_port=port,
+        timestamp=ts,
+        proto=proto,
+        resp_bytes=resp_bytes,
+        resp_pkts=resp_pkts,
+        conn_state=conn_state,
+    )
 
 
 def feed(detector, flows):
@@ -95,6 +116,12 @@ def test_documented_defaults():
     assert config.min_unique_ports == 15
     assert config.min_unique_hosts == 20
     assert config.cooldown_seconds == 300.0
+    assert config.max_service_port == 49151
+    assert config.min_service_ports == 3
+    assert config.established_resp_bytes == 100
+    assert config.max_established_fraction == 0.20
+    assert config.min_incomplete_fraction == 0.05
+    assert config.min_conn_state_coverage == 0.50
 
 
 def test_detector_uses_defaults_when_unconfigured():
@@ -111,6 +138,14 @@ def test_detector_uses_defaults_when_unconfigured():
         {"cooldown_seconds": -1},
         {"saturation_multiple": 1.0},
         {"combined_bonus": 1.5},
+        {"max_service_port": -1},
+        {"max_service_port": 70000},
+        {"min_service_ports": -1},
+        {"established_resp_bytes": -1},
+        {"max_established_fraction": 1.5},
+        {"max_established_fraction": -0.1},
+        {"min_incomplete_fraction": 1.5},
+        {"min_conn_state_coverage": 1.5},
     ],
 )
 def test_invalid_config_rejected(kwargs):
@@ -121,7 +156,7 @@ def test_invalid_config_rejected(kwargs):
 def test_detector_identity():
     detector = PortScanDetector()
     assert detector.name == "port_scan"
-    assert detector.version == "0.2.0"
+    assert detector.version == "0.3.0"
 
 
 # --------------------------------------------------------------------------
@@ -728,7 +763,7 @@ def test_alert_conforms_to_v1_1(sample_alert):
     assert sample_alert.flow_id is None
     assert sample_alert.src_ip == SCANNER
     assert sample_alert.detector == "port_scan"
-    assert sample_alert.detector_version == "0.2.0"
+    assert sample_alert.detector_version == "0.3.0"
     assert sample_alert.mitre_techniques == ["T1046"]
     assert sample_alert.incident_id is None
 
@@ -1000,3 +1035,214 @@ def test_detector_never_mutates_the_flow(detector):
     detector.process(flow)
     with pytest.raises(ValidationError):
         flow.dst_port = 9999
+
+
+# --------------------------------------------------------------------------
+# Ports a service could live on (the ephemeral-range exclusion)
+# --------------------------------------------------------------------------
+
+
+def _sweep(detector, ports, *, dst=VICTIM, **flow_kwargs):
+    """Walk one source across `ports` on one host, one second apart."""
+    return feed(
+        detector,
+        [
+            scan_flow(dst=dst, port=port, ts=1000.0 + i, **flow_kwargs)
+            for i, port in enumerate(ports)
+        ],
+    )
+
+
+def test_a_sweep_of_service_ports_is_a_scan(detector):
+    """The baseline the exclusion must not disturb."""
+    assert _sweep(detector, [21, 22, 23, 25, 80, 110])
+
+
+def test_a_sweep_of_ephemeral_ports_is_not_a_scan(detector):
+    """One host "touching" many high ports on another is the reply side.
+
+    IANA reserves 49152-65535 for outbound allocation, so nothing is listening
+    there to enumerate. On the real benign capture this shape was 94% of the
+    vertical false positives: a CDN or cloud host recorded as the initiator of
+    flows back to a workstation's ephemeral ports.
+    """
+    assert _sweep(detector, [49200 + i for i in range(8)]) == []
+
+
+def test_enough_service_ports_among_ephemeral_ones_still_scans(detector):
+    """The rule needs *some* service ports, not *only* service ports."""
+    ports = [22, 80, 443] + [50000 + i for i in range(5)]
+    assert _sweep(detector, ports)
+
+
+def test_the_service_port_boundary_is_configurable():
+    detector = PortScanDetector(
+        PortScanConfig(
+            window_seconds=60.0,
+            min_unique_ports=5,
+            min_unique_hosts=99,
+            max_service_port=65535,
+        )
+    )
+    assert _sweep(detector, [49200 + i for i in range(8)])
+
+
+def test_the_exclusion_does_not_touch_horizontal_scans():
+    """A sweep across hosts is judged on its own port, whatever its number.
+
+    A backdoor listening on a high port and swept across a subnet is still a
+    subnet sweep; the ephemeral argument is about *enumerating* ports on one
+    host, which horizontal fan-out is not doing.
+    """
+    detector = PortScanDetector(
+        PortScanConfig(window_seconds=60.0, min_unique_ports=99, min_unique_hosts=4)
+    )
+    alerts = feed(
+        detector,
+        [
+            scan_flow(dst=f"10.0.0.{i}", port=51000, ts=1000.0 + i)
+            for i in range(5)
+        ],
+    )
+    assert alerts
+    assert alerts[0].evidence["scan_type"] == "horizontal"
+
+
+def test_evidence_reports_the_service_port_count(detector):
+    alerts = _sweep(detector, [22, 80, 443, 50001, 50002, 50003])
+    evidence = alerts[0].evidence
+    # The alert fires on the flow that crosses min_unique_ports (5 here), so
+    # the sixth port is not in the window yet.
+    assert evidence["unique_dst_ports"] == 5
+    assert evidence["service_ports"] == 3
+    assert evidence["max_service_port"] == 49151
+
+
+# --------------------------------------------------------------------------
+# Responder engagement
+# --------------------------------------------------------------------------
+
+
+def test_a_window_the_far_side_answered_is_not_a_scan(detector):
+    """Ports that reply with real payload were serving, not being probed."""
+    assert _sweep(detector, [21, 22, 23, 25, 80, 110], resp_bytes=5_000) == []
+
+
+def test_a_stub_reply_does_not_count_as_an_answer(detector):
+    """A refused connection is a refusal even when the exporter bills it bytes.
+
+    CICFlowMeter reports 6 bytes for a bare RST, so "greater than zero" would
+    read a wall of refusals as a wall of conversations.
+    """
+    assert _sweep(detector, [21, 22, 23, 25, 80, 110], resp_bytes=6)
+
+
+def test_a_unidirectional_capture_still_detects_scans(detector):
+    """The gate may spend reply evidence; it may never require it.
+
+    A capture that never sees the return path has `resp_bytes == 0` on every
+    flow, benign and hostile alike. That must read as "nothing to go on" and
+    leave the detector exactly as it was - not as "everything is a scan", and
+    not as silence.
+    """
+    assert _sweep(detector, [21, 22, 23, 25, 80, 110], resp_bytes=0, resp_pkts=0)
+
+
+def test_the_answered_ceiling_is_configurable():
+    detector = PortScanDetector(
+        PortScanConfig(
+            window_seconds=60.0,
+            min_unique_ports=5,
+            min_unique_hosts=99,
+            max_established_fraction=1.0,
+        )
+    )
+    assert _sweep(detector, [21, 22, 23, 25, 80, 110], resp_bytes=5_000)
+
+
+def test_conn_state_outranks_the_byte_proxy(detector):
+    """Once the real connection state arrives, it decides.
+
+    S0 is "attempt, no reply" - a scan - and it stays a scan even if the
+    exporter's byte counters suggest otherwise. This is the path that opens up
+    the day ingestion stops flattening S0; see INCOMPLETE_CONN_STATES.
+    """
+    assert _sweep(
+        detector, [21, 22, 23, 25, 80, 110], resp_bytes=5_000, conn_state="S0"
+    )
+
+
+def test_completed_connections_are_not_a_scan_even_with_no_bytes(detector):
+    """The mirror of the previous test: SF is a completed exchange."""
+    assert (
+        _sweep(detector, [21, 22, 23, 25, 80, 110], resp_bytes=0, conn_state="SF")
+        == []
+    )
+
+
+def test_partial_conn_state_coverage_falls_back_to_bytes(detector):
+    """A handful of labelled records cannot speak for the window.
+
+    Below `min_conn_state_coverage` the byte proxy decides, so a mostly
+    unlabelled window of answered conversations is still suppressed.
+    """
+    flows = [
+        scan_flow(port=20 + i, ts=1000.0 + i, resp_bytes=5_000, conn_state="S0")
+        for i in range(2)
+    ] + [
+        scan_flow(port=30 + i, ts=1010.0 + i, resp_bytes=5_000) for i in range(6)
+    ]
+    assert feed(detector, flows) == []
+
+
+def test_a_horizontal_sweep_the_far_side_answered_is_not_a_scan():
+    """The responder gate covers both scan types, not only the vertical one.
+
+    A source reaching many hosts on one port and being answered by all of them
+    is a client with a lot of servers - the CDN-heavy browsing shape that
+    produced 936 of the 1 636 benign false positives.
+    """
+    detector = PortScanDetector(
+        PortScanConfig(window_seconds=60.0, min_unique_ports=99, min_unique_hosts=4)
+    )
+    flows = [
+        scan_flow(dst=f"10.0.0.{i}", port=443, ts=1000.0 + i, resp_bytes=5_000)
+        for i in range(5)
+    ]
+    assert feed(detector, flows) == []
+
+
+def test_dropping_the_vertical_half_leaves_the_horizontal_alert():
+    """Combined minus its vertical half is a horizontal scan, not silence.
+
+    The window sweeps ephemeral ports (so the vertical signal is withdrawn)
+    while still fanning out across hosts on each of them, which is the shape
+    the fan-out rule is there to catch.
+    """
+    detector = PortScanDetector(
+        PortScanConfig(window_seconds=60.0, min_unique_ports=5, min_unique_hosts=4)
+    )
+    flows = [
+        scan_flow(dst=f"10.0.0.{host}", port=50_000 + port, ts=1000.0 + i)
+        for i, (port, host) in enumerate(
+            (p, h) for p in range(5) for h in range(4)
+        )
+    ]
+    alerts = feed(detector, flows)
+    assert alerts
+    assert {a.evidence["scan_type"] for a in alerts} == {"horizontal"}
+    assert alerts[0].evidence["service_ports"] == 0
+
+
+def test_evidence_names_which_responder_evidence_decided(detector):
+    alerts = _sweep(detector, [21, 22, 23, 25, 80, 110])
+    assert alerts[0].evidence["responder_evidence"] == "resp_bytes"
+    assert alerts[0].evidence["established_fraction"] == 0.0
+
+    with_state = PortScanDetector(
+        PortScanConfig(window_seconds=60.0, min_unique_ports=5, min_unique_hosts=99)
+    )
+    alerts = _sweep(with_state, [21, 22, 23, 25, 80, 110], conn_state="S0")
+    assert alerts[0].evidence["responder_evidence"] == "conn_state"
+    assert alerts[0].evidence["conn_state_coverage"] == 1.0
+    assert alerts[0].evidence["incomplete_fraction"] == 1.0

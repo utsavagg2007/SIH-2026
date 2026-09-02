@@ -521,9 +521,10 @@ periodic), a cloud backup (99% outbound), CDN hostnames (long and
 high-entropy), and an authorised inventory sweep — the four things that look
 exactly like beaconing, exfiltration, DGA and recon:
 
-- The **beacon** detector fires on the NTP daemon at score 0.79 — *higher* than
-  the real C2 channel at 0.76. It has no benign-periodicity discrimination.
-  **Still open.**
+- The **beacon** detector fired on the NTP daemon at score 0.79 — *higher* than
+  the real C2 channel at 0.76 — because it had no benign-periodicity
+  discrimination. **Partly fixed**; the remainder is quantified on real traffic
+  rather than on one confounder. See below.
 - The **DGA** model flagged legitimate CDN hostnames as `critical` at 0.97,
   because its training corpus contained no content-delivery or cloud-storage
   names. **Fixed** — see below.
@@ -551,6 +552,44 @@ CDN hostnames are all three-or-more.
 Full evidence, the sweeps behind every parameter, and what is flagged for the
 detector owner: **[docs/DGA_PRECISION.md](docs/DGA_PRECISION.md)**.
 
+### Real-traffic false positives: measured, then cut 85 %
+
+Synthetic confounders can only test the failures somebody thought to plant. The
+detectors were therefore run over **1.9 M real flows** — CIC-IDS2017 and
+UNSW-NB15 — and the result on a *purely benign* 12-hour capture, where every
+alert is a false positive by construction, was **1 797 alerts, 1 636 of them
+`port_scan`, 184 of those `critical`**. That is an unusable queue, and no
+synthetic run could see it.
+
+Two detectors were changed and re-measured on the identical captures:
+
+| on 529 450 real benign flows | before | after |
+|---|---|---|
+| `port_scan` | 1 636 (184 critical) | **173** (6 critical) |
+| `c2_beaconing` | 156 | **89** |
+| everything else | 5 | 5 |
+| **total** | **1 797** | **267** — **−85 %** |
+
+**Recall did not move**: `port_scan` still finds 1/1 labelled scan episodes on
+CIC-IDS2017 and `c2_beaconing` still finds 6/8 real Ares-botnet C2 sources.
+`port_scan` precision on labelled data goes 0.018 → 0.131, and on UNSW-NB15
+with a connection state it reaches **1.000 precision at 1.000 recall**.
+
+`port_scan` 0.3.0 asks two questions the old version did not: could a service
+even *be* on the ports being swept (the dynamic/private range above 49151
+cannot hold one), and did the far side *answer*. `c2_beaconing` 0.2.0 excludes
+the services that are periodic by specification — directory, name and
+announcement protocols — while deliberately keeping DNS and SMB, because
+dropping port 53 costs 36 of 90 real true positives.
+
+**One honest cost**: without Zeek's `conn_state`, which ingestion currently
+flattens away, `port_scan` recall on banner-grabbing reconnaissance halves
+(1.000 → 0.500). The number is measured, and it is the concrete ask on the
+ingestion layer.
+
+Everything above, including what was measured and *rejected*:
+**[docs/REAL_DATA_EVAL.md](docs/REAL_DATA_EVAL.md)** §10.
+
 The DGA model itself, measured family-disjoint (no DGA family in both train and
 test): precision 0.895, recall 0.569 at 0.75 and 0.711 at the recommended 0.65
 — on a test fold whose composition changed with the corpus, so compare it to
@@ -568,6 +607,17 @@ the old 0.944/0.711 only via the identical-population table in that doc.
   the older `features.jsonl` shape, now repaired to carry the raw fields.
 - **JA4 is parsed by nothing.** `--ja4` selects a Zeek image that produces the
   column; `SslRecord` has no field for it. Absent rather than faked.
+- **`conn_state` loses `S0` on the way through ingestion.** `encode_conn_state`
+  (`ingestion/src/features/flow.rs`) has no `S0` arm, so a connection attempt
+  nobody answered — the defining state of a scan — arrives as `0`, the same
+  code as "unknown". `port_scan` 0.3.0 reads the raw `conn_state` string when
+  `pipeline.py` emits one and falls back to a responder-payload proxy when it
+  does not; the measured cost of the fallback is **recall 0.500 against 1.000**
+  on banner-grabbing recon (`docs/REAL_DATA_EVAL.md` §10.5).
+- **`c2_beaconing` precision on real traffic is still poor** — 0.056 on the
+  labelled bot capture after the fix above. What remains is periodic HTTPS to
+  ordinary internet hosts; a destination-popularity rule was measured against
+  it and rejected, with the numbers, in `docs/REAL_DATA_EVAL.md` §10.7.
 - **Incidents are not persisted.** They live in process memory and are lost on
   restart or after the correlation window; the `incidents` tables exist but are
   never written.

@@ -211,6 +211,11 @@ def _build_section(path: Path, section: str, values: dict[str, Any]):
         raise ConfigError(f"{path}: [{section}] {exc}") from exc
 
 
+def _is_port(value: Any) -> bool:
+    """An integer that is not a boolean, which in Python has to be asked."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def _coerce_scalar(path: Path, section: str, key: str, spec, value: Any) -> Any:
     """Type-check one scalar against the field's default.
 
@@ -220,8 +225,19 @@ def _coerce_scalar(path: Path, section: str, key: str, spec, value: Any) -> Any:
     """
     expected = type(spec.default)
 
+    if expected is bool:
+        # A switch, not a threshold: c2_beaconing.ignore_multicast_destinations.
+        # Only a real TOML boolean is taken - `1` in a switch is a reader
+        # guessing, and the guard below exists precisely to stop that guess.
+        if isinstance(value, bool):
+            return value
+        raise ConfigError(
+            f"{path}: [{section}] {key} must be true or false, got "
+            f"{type(value).__name__} ({value!r})"
+        )
+
     # bool is a subclass of int in Python, so `true` would otherwise sail
-    # into an integer threshold as 1. Nothing here takes a boolean.
+    # into an integer threshold as 1. No numeric setting here takes a boolean.
     if isinstance(value, bool):
         raise ConfigError(
             f"{path}: [{section}] {key} must be {expected.__name__}, got a boolean"
@@ -253,7 +269,18 @@ def _coerce_scalar(path: Path, section: str, key: str, spec, value: Any) -> Any:
             f"{type(value).__name__} ({value!r})"
         )
     if expected is frozenset:
-        # obsolete_tls_versions and anything else set-shaped.
+        # obsolete_tls_versions and anything else set-shaped. The element type
+        # comes from the default, the same source of truth the scalar branches
+        # use: c2_beaconing.ignored_dst_ports holds port numbers, everything
+        # else holds strings. An empty default reads as strings, which is the
+        # behaviour that shipped - and the only empty ones are the fingerprint
+        # sets, which never reach here (see _FINGERPRINT_FIELDS).
+        if spec.default and all(_is_port(v) for v in spec.default):
+            if not isinstance(value, list) or not all(_is_port(v) for v in value):
+                raise ConfigError(
+                    f"{path}: [{section}] {key} must be an array of port numbers"
+                )
+            return frozenset(value)
         if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
             raise ConfigError(
                 f"{path}: [{section}] {key} must be an array of strings"

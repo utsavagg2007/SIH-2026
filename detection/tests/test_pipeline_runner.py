@@ -71,10 +71,17 @@ def record(ts, src, dst, **over):
 
 
 def scan_records():
-    """One source sweeping many ports on one host."""
+    """One source sweeping many ports on one host.
+
+    ``conn_state_encoded=0`` is what real ingestion emits for a scan today:
+    its ``encode_conn_state`` has no arm for Zeek's ``S0``, so a connection
+    attempt with no reply falls through to the same code as "unknown". The
+    base record's ``4`` (``SF``) would claim every probe completed normally,
+    which is the one thing a scan does not do.
+    """
     return [
         record(1000.0 + i * 0.1, "10.0.0.5", "10.0.0.9", dst_port=1000 + i,
-               orig_bytes=60, resp_bytes=0)
+               orig_bytes=60, resp_bytes=0, conn_state_encoded=0)
         for i in range(40)
     ]
 

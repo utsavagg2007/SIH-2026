@@ -821,6 +821,9 @@ def test_port_scan_traffic_does_not_become_exfiltration():
             dst_ip="10.0.0.9",
             dst_port=1000 + i,
             proto="tcp",
+            # Probes are unanswered as well as tiny.
+            resp_bytes=0,
+            resp_pkts=0,
         )
         for i in range(40)
     ]

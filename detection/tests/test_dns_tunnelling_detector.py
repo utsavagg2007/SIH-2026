@@ -757,6 +757,9 @@ def test_port_scan_scenario_does_not_trigger_dns_tunnelling():
             dst_ip="10.0.0.9",
             dst_port=1000 + i,
             proto="tcp",
+            # A probed port does not answer with a payload.
+            resp_bytes=0,
+            resp_pkts=0,
         )
         for i in range(40)
     ]

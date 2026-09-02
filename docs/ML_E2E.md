@@ -313,14 +313,25 @@ inside `dns` / `tls` vanish without a warning:
 | `tls.ssl_version_encoded` | harmless — used as the fallback for `tls.version`, just not stored |
 | `tls.cipher` | genuinely discarded; ingestion computes it, no detector reads it |
 
-**5. `conn_state_encoded` still cannot express `S0`.**
-`src/features/flow.rs:50-65` has no `"S0"` arm, so S0 falls to `_ => 0` and
-`decode_conn_state(0)` returns `None` — the `encodings.py:25-28` TODO is still
-accurate about the *encoded* field. Current `pipeline.py` works around it by
-emitting the raw `conn_state` string as well, and no detector reads `conn_state`
-at all today, so nothing is broken. But the encoded field remains lossy for the
-single state that defines a SYN scan and a SYN flood, and the stale
-`ingestion/features.jsonl` sample carries only the encoded form.
+**5. `conn_state_encoded` still cannot express `S0` — and this now costs
+recall.** `src/features/flow.rs:50-65` has no `"S0"` arm, so S0 falls to
+`_ => 0` and `decode_conn_state(0)` returns `None` — the `encodings.py:25-28`
+TODO is still accurate about the *encoded* field. Current `pipeline.py` works
+around it by emitting the raw `conn_state` string as well.
+
+**This item was "nothing is broken" when it was written, and it is not any
+more.** `port_scan` 0.3.0 reads `conn_state` (`detectors/port_scan.py`,
+`_responder_refused`) and falls back to a responder-payload proxy when a
+window does not carry one. On UNSW-NB15, the one real dataset with a usable
+connection state, the difference is measured: **recall 1.000 with `conn_state`
+against 0.500 without**, at precision 1.000 either way
+(`docs/REAL_DATA_EVAL.md` §10). The proxy is safe — it never suppresses a
+window on evidence it does not have — but it cannot see banner-grabbing recon,
+which completes its connections and is invisible without the state.
+
+So the raw string is now load-bearing for a detector, and any path that keeps
+only the encoded form loses the signal. The stale `ingestion/features.jsonl`
+sample carries only the encoded form.
 
 **6. HTTP is untested end to end.** No detector reads `http.*`, and the
 synthetic capture emits no HTTP block, so `HttpInfo` is exercised only by the

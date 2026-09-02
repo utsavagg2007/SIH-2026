@@ -64,6 +64,31 @@ OUT_OF_SCOPE = {
     "Generic", "Exploits", "Fuzzers", "Analysis", "Shellcode", "Worms",
 }
 
+#: UNSW's ``state`` column -> the Zeek ``conn_state`` spelling with the same
+#: meaning. **This mapping is mine, not Zeek's**: UNSW-NB15 was produced by
+#: Argus/Bro-era tooling with its own state vocabulary, and only the states
+#: whose semantics genuinely correspond are translated. It exists so the
+#: detection layer can be measured against a real, labelled approximation of
+#: the field ingestion does not yet emit (see ``encode_conn_state`` in
+#: ``ingestion/src/features/flow.rs``, which has no ``S0`` arm at all).
+#:
+#: The one that matters is ``INT`` -> ``S0``: a connection was initiated and
+#: nothing came back. In this capture that state covers 1.4% of benign flows
+#: against 41.7% of Reconnaissance and 90.6% of Backdoors, which is the whole
+#: argument for asking ingestion to preserve it.
+UNSW_STATE_TO_ZEEK = {
+    "INT": "S0",      # initiated, no reply seen - Zeek's S0
+    "REQ": "S0",      # request sent, no response - same shape
+    "FIN": "SF",      # normal establishment and teardown
+    "CLO": "SF",      # closed
+    "CON": "S1",      # established, never terminated in the capture
+    "RST": "RSTO",    # reset by the originator
+    "ACC": "S2",      # responder SYN-ACK only
+    "CLS": "SF",
+    "ECO": "OTH", "ECR": "OTH", "MAS": "OTH", "PAR": "OTH",
+    "TST": "OTH", "TXD": "OTH", "URH": "OTH", "URN": "OTH", "no": "OTH",
+}
+
 
 def norm_cat(raw: str) -> str:
     """attack_cat is inconsistently spelled/padded in the published CSVs."""
@@ -103,6 +128,7 @@ def convert(path: Path, *, limit: int | None, keep: set[str] | None):
                 skipped["bad_port"] += 1
                 continue
 
+            state = (row[STATE] or "").strip()
             proto = (row[PROTO] or "tcp").strip().lower()
             service = (row[SERVICE] or "").strip()
             service = None if service in ("", "-") else service
@@ -124,7 +150,12 @@ def convert(path: Path, *, limit: int | None, keep: set[str] | None):
                 "resp_pkts": dpkts,
                 "byte_ratio": (dbytes / sbytes) if sbytes else 0.0,
                 "pkt_ratio": (dpkts / spkts) if spkts else 0.0,
-                "conn_state_encoded": 0,
+                # Carried as the RAW Zeek spelling, not ingestion's integer
+                # encoding: that encoding has no code for S0, so round-tripping
+                # through it would destroy the one state this measurement is
+                # about. The adapter reads a raw `conn_state` in preference to
+                # `conn_state_encoded`, so this is the honest field to fill.
+                "conn_state": UNSW_STATE_TO_ZEEK.get(state, "OTH") if state else None,
             })
             truth.append({
                 "uid": uid, "timestamp": ts,
@@ -134,6 +165,8 @@ def convert(path: Path, *, limit: int | None, keep: set[str] | None):
                 "in_scope": name in CATEGORY_TO_CLASS,
                 "out_of_scope": name in OUT_OF_SCOPE,
                 "benign": not label_is_attack,
+                "unsw_state": state,
+                "conn_state": UNSW_STATE_TO_ZEEK.get(state, "OTH") if state else None,
             })
             cats[name] += 1
             if limit and len(records) >= limit:
@@ -158,7 +191,11 @@ def convert(path: Path, *, limit: int | None, keep: set[str] | None):
             "Timestamps are epoch SECONDS (Stime) - full second resolution throughout.",
             "Attack traffic is tool-generated (IXIA PerfectStorm) on a real network, "
             "not malware captured in the wild.",
+            "conn_state is UNSW's own 'state' column translated to Zeek spellings "
+            "by UNSW_STATE_TO_ZEEK - a stand-in for the field ingestion does not "
+            "emit, not Zeek output.",
         ],
+        "unsw_state_to_zeek": UNSW_STATE_TO_ZEEK,
         "ground_truth": truth,
     }
     return records, manifest
