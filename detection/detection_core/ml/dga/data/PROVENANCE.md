@@ -1,7 +1,7 @@
 # DGA dataset — provenance
 
-`dga_dataset.sample.csv` in this directory is a **sampled** `domain,label,family`
-dataset for the offline DGA classifier. It is built by `build_dataset.py` from
+`dga_dataset.sample.csv` in this directory is a **sampled**
+`domain,label,family,source` dataset for the offline DGA classifier. It is built by `build_dataset.py` from
 three public sources. Nothing here is scraped from private data, and the malware
 **family** label is taken from the source, never inferred from the domain
 string.
@@ -45,16 +45,20 @@ They are not arbitrary; each was chosen from a measured sweep recorded in
   of them. Introduced in *"Tranco: A Research-Oriented Top Sites Ranking
   Hardened Against Manipulation"* (Le Pochat et al., NDSS 2019).
 * **Use here:** the top `--tranco-n` names that pass `normalize_domain`, label
-  `0`, family `benign`. Then trimmed to roughly the DGA row count so the
-  classes are balanced.
+  `0`, family `benign`, `source` `tranco`. With `--balance` they would then be
+  trimmed to the DGA row count; the committed build uses `--no-balance`, for
+  the reason given at the top of this file.
 * **Licence / terms:** the Tranco list is published for free use in research;
   the list files are freely downloadable and redistributable, and the project
   asks that work using it cite the paper above. We redistribute only a few
   thousand of the ranked domain strings; no ranking data or list metadata is
   included.
-* **Build date:** 2026-08-30
+* **Build date:** 2026-09-01
 * **Tranco list id used:** latest as of the build date (no `--tranco-id`
-  pinned). Pin one for a byte-reproducible benign side.
+  pinned). **The unpinned `latest` list is regenerated daily** — rebuilding on
+  another date fetches a different set of domains, which was observed here:
+  a rebuild one day later changed the domain set and moved every metric. Pin
+  `--tranco-id` for a byte-reproducible benign side.
 
 ### Benign / CDN — Cisco Umbrella top 1M
 
@@ -81,7 +85,8 @@ They are not arbitrary; each was chosen from a measured sweep recorded in
   suffix", so the bare registrable name is never taken — Tranco already
   supplies those and they are not what the model gets wrong. Shuffled with
   `--seed` and capped at `--cdn-per-suffix-cap` per provider. Label `0`,
-  family `cdn`.
+  family `benign`, `source` `cdn` (see "Why CDN rows say `family = benign`"
+  below).
 * **Nothing is fabricated.** Every row is a hostname that a public resolver
   actually observed and that Cisco published. No CDN hostname is synthesized
   from a pattern, and none is invented to fit the feature space.
@@ -142,13 +147,13 @@ out of training and evaluates only on those. The reported `pr_auc` / `roc_auc`
 would show, and honest. Benign domains carry no family and are split normally,
 so both classes appear in both folds.
 
-### The `cdn` family is NOT group-split, and that matters
+### CDN rows are benign rows, and they are NOT group-split
 
 `split_dataset` runs `GroupShuffleSplit` on the **DGA** rows only; benign rows
 — whatever family string they carry — are split by ordinary shuffle, because
-grouping them would push every benign row into one fold. So the `cdn` family
-name makes the composition of the negative class visible in
-`family_breakdown`; it does **not** hold providers out.
+grouping them would push every benign row into one fold. The CDN rows are
+benign rows, so they are shuffle-split like the Tranco ones. **Nothing here
+holds a provider out.**
 
 The consequence is that every CDN provider in the test fold was also in
 training, so the in-run CDN numbers are *in-distribution*. To measure
@@ -158,18 +163,52 @@ and evaluate against those providers' hostnames. `docs/DGA_PRECISION.md`
 reports both, and they differ by more than an order of magnitude — quoting only
 the in-distribution one would badly overstate the fix.
 
-One cosmetic consequence, unfixed because it is in frozen training code: the
-training summary's `dga families : N total` line computes
-`family_count - 1 if "benign" in breakdown`, so the `cdn` family inflates it by
-one (28 rather than 27). The split itself is unaffected — `20 in train, 7 held
-out` sums to the true DGA family count.
+### Why CDN rows say `family = benign`, and where the marker went
+
+It reads better to write `cdn` in the `family` column, and this dataset did at
+first. It is wrong. `training.py` derives its headline as
+`family_count - 1 if "benign" in breakdown` — it subtracts the *one* benign
+family it knows by name — so a second benign family name is counted as a
+malware family and the run summary reports **28 families for a dataset with
+27**. The split is unaffected (`20 in train, 7 held out` still sums correctly),
+but a wrong number in a headline metric is not worth the convenience.
+
+So both benign sources write `benign`, and the provenance moved to a fourth
+column:
+
+```
+domain,label,family,source
+0123tt.ru,0,benign,tranco
+0.1.cn.akamaitech.net,0,benign,cdn
+aaqzdxhtnnq.com,1,tinba,dga
+```
+
+`load_dataset` requires only `domain` and `label`, reads `family` when it is
+present, and **ignores every other column**, so `source` travels with the data
+for auditing without reaching the model, the split, or any metric. The
+composition also stays visible in the build report (`of which tranco` /
+`of which cdn`).
+
+Row order matters and is preserved: `split_dataset` shuffles benign *indices*,
+so the order rows are written in decides the benign train/test split. The CSV
+is sorted by `(label, family, source-rank, domain)` with the rank pinned to
+`tranco < cdn < dga`, which reproduces the order the earlier two-family sort
+produced. Adding the column changed the file's shape and not the model —
+verified by retraining and getting the same metrics to four decimals.
 
 ## Sample vs full
 
-`dga_dataset.sample.csv` is intentionally small (a per-family cap of ~90) so it
-can live in the repository. For the model you actually ship, rebuild with a
-higher `--per-family-cap` and/or `--families all`, and record the parameters
-and resulting metrics in `docs/dga_model.md`.
+`dga_dataset.sample.csv` was originally a small sample (a per-family cap of
+~90, ~4 000 rows). The committed file is now the **shipped** build: 16 939
+rows at `--per-family-cap 400`, ~460 KB, still small enough to live in the
+repository. Its parameters and metrics are recorded in `docs/dga_model.md` §5.
+For a larger corpus, raise `--per-family-cap` and/or use `--families all` —
+and raise `--tranco-n` with it, per the note at the top of this file.
+
+**Because neither popularity list is pinnable, the committed CSV is the
+artifact of record, not the build command.** Rebuilding on a later date is a
+*new dataset*, not a reproduction of this one; retrain and re-measure if you
+do it.
 
 ## What is committed
 

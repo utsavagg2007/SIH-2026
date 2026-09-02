@@ -9,8 +9,9 @@ dependency):
   Ranked, aggregated from several public popularity rankings. The top
   ``--tranco-n`` names are taken, label ``0``, family ``benign``.
 * **Benign / CDN** - CDN, edge and object-storage hostnames from the Cisco
-  Umbrella top 1M (see :data:`UMBRELLA_URL`).
-  Label ``0``, family ``cdn``. **Why this source and not Tranco:** Tranco
+  Umbrella top 1M (see :data:`UMBRELLA_URL`). Label ``0``, family ``benign``,
+  ``source`` column ``cdn`` (see :data:`BENIGN_FAMILY` for why the marker is
+  not in the ``family`` column). **Why this source and not Tranco:** Tranco
   ranks *registrable* domains, so it contributes ``cloudfront.net`` but never
   ``d9ojso6xukdhq.cloudfront.net``. The Umbrella list is built from resolver
   traffic and carries full FQDNs, so it is the only one of the two that
@@ -45,6 +46,10 @@ that "two labels" means DGA and it starts flagging ordinary domains. See
 ``PROVENANCE.md`` for the measured sweep and the parameters that follow from
 it.
 
+The CSV has four columns: ``domain,label,family,source``. Only the first
+three mean anything to ``dataset.load_dataset`` - ``source`` is provenance for
+whoever audits the file, and is ignored on load.
+
 ``--cdn-holdout-suffixes`` excludes whole providers from the build. Benign
 rows are split by ordinary shuffle (see ``dataset.split_dataset``), so a
 provider present in training is also present in test and the in-run CDN
@@ -74,7 +79,8 @@ __all__ = [
     "TRANCO_URL",
     "UMBRELLA_URL",
     "BADERJ_RAW",
-    "CDN_FAMILY",
+    "BENIGN_FAMILY",
+    "SOURCE_COLUMN",
     "CDN_SUFFIXES",
     "DEFAULT_FAMILIES",
     "fetch_benign",
@@ -104,12 +110,31 @@ BADERJ_RAW = (
     "domain_generation_algorithms/master/{family}/example_domains.txt"
 )
 
-#: ``family`` value for a CDN/object-storage benign row. A separate name from
-#: ``benign`` so the composition of the negative class is visible in the
-#: dataset report and in ``family_breakdown`` - not because it changes the
-#: split. ``split_dataset`` groups only the DGA rows; every benign row,
-#: whatever its family string, is split by ordinary shuffle.
-CDN_FAMILY = "cdn"
+#: ``family`` value written for EVERY benign row, CDN ones included.
+#:
+#: It would read better to write ``cdn`` here so the negative class's
+#: composition were visible in ``family_breakdown``, and that is what this
+#: built at first. It is wrong: ``training.py`` derives its "dga families"
+#: headline as ``family_count - 1 if "benign" in breakdown``, subtracting the
+#: one benign family it knows by name, so a second benign family name is
+#: counted as a malware family and the summary reports 28 families for a
+#: dataset with 27. The split is unaffected - ``split_dataset`` groups only
+#: the DGA rows - but a wrong number in the headline metric is not worth the
+#: convenience.
+#:
+#: So both benign sources write ``benign`` here, and provenance moves to the
+#: :data:`SOURCE_COLUMN` below, which the loader ignores.
+BENIGN_FAMILY = "benign"
+
+#: Fourth CSV column: which source each row came from (``tranco`` / ``cdn`` /
+#: ``dga``). Purely for auditing the dataset - ``dataset.load_dataset``
+#: requires only ``domain`` and ``label``, reads ``family`` when present, and
+#: ignores every other column, so this travels with the data without reaching
+#: the model or the split. It is what ``family`` cannot carry, per above.
+SOURCE_COLUMN = "source"
+SOURCE_TRANCO = "tranco"
+SOURCE_CDN = "cdn"
+SOURCE_DGA = "dga"
 
 #: Public suffixes operated by CDN, edge-delivery and object-storage providers.
 #: Every one is documented by its vendor and appears in the Public Suffix List
@@ -335,8 +360,8 @@ def build(
     balance: bool,
     cdn_per_suffix_cap: int = 0,
     cdn_holdout_suffixes: frozenset[str] = frozenset(),
-) -> tuple[list[tuple[str, int, str]], dict[str, object]]:
-    """Return ``(rows, report)`` where ``rows`` is ``(domain, label, family)``."""
+) -> tuple[list[tuple[str, int, str, str]], dict[str, object]]:
+    """Return ``(rows, report)``, rows being ``(domain, label, family, source)``."""
     rng = random.Random(seed)
 
     # --- DGA side -----------------------------------------------------------
@@ -359,7 +384,7 @@ def build(
             kept += 1
         per_family_kept[family] = kept
 
-    dga_rows = [(d, 1, f) for d, f in dga_by_domain.items()]
+    dga_rows = [(d, 1, f, SOURCE_DGA) for d, f in dga_by_domain.items()]
 
     # --- CDN side (benign) -----------------------------------------------
     # Fetched before Tranco is trimmed, because balancing must divide the
@@ -391,10 +416,25 @@ def build(
         if len(benign) > budget:
             rng.shuffle(benign)
             benign = benign[:budget]
-    benign_rows = [(d, 0, "benign") for d in benign]
-    cdn_rows = [(d, 0, CDN_FAMILY) for d in cdn_domains]
+    benign_rows = [(d, 0, BENIGN_FAMILY, SOURCE_TRANCO) for d in benign]
+    cdn_rows = [(d, 0, BENIGN_FAMILY, SOURCE_CDN) for d in cdn_domains]
 
-    rows = sorted(benign_rows + cdn_rows + dga_rows, key=lambda r: (r[1], r[2], r[0]))
+    # Sorted by (label, family, source-rank, domain). The source key keeps the
+    # two benign sources in contiguous blocks now that they share a family
+    # name, so the CSV stays as readable as it was when they did not.
+    #
+    # It is a RANK and not the source string on purpose. Row order decides the
+    # benign train/test split - `split_dataset` shuffles indices, not names -
+    # so sorting benign rows by the literal source would put `cdn` before
+    # `tranco` and silently retrain a different model than the one this
+    # dataset's published metrics describe. The rank reproduces the order the
+    # old two-family sort produced (tranco, then cdn, then DGA by family), so
+    # adding the column changed the CSV's shape and nothing else.
+    source_rank = {SOURCE_TRANCO: 0, SOURCE_CDN: 1, SOURCE_DGA: 2}
+    rows = sorted(
+        benign_rows + cdn_rows + dga_rows,
+        key=lambda r: (r[1], r[2], source_rank[r[3]], r[0]),
+    )
 
     report = {
         "tranco_source": TRANCO_ID_URL.format(id=tranco_id) if tranco_id else TRANCO_URL,
@@ -418,23 +458,23 @@ def build(
     return rows, report
 
 
-def _verify(rows: list[tuple[str, int, str]], *, sample: int, seed: int) -> None:
+def _verify(rows: list[tuple[str, int, str, str]], *, sample: int, seed: int) -> None:
     """Assert a random sample round-trips through the real feature extractor."""
     from ..features import extract_features
 
     rng = random.Random(seed + 1)
     probe = rng.sample(rows, min(sample, len(rows)))
-    for domain, _label, _family in probe:
+    for domain, _label, _family, _source in probe:
         vector = extract_features(domain)
         if len(vector) != 19 or not all(isinstance(v, float) for v in vector):
             raise AssertionError(f"feature extraction misbehaved on {domain!r}")
 
 
-def _write_csv(rows: list[tuple[str, int, str]], path: Path) -> None:
+def _write_csv(rows: list[tuple[str, int, str, str]], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
-        writer.writerow(("domain", "label", "family"))
+        writer.writerow(("domain", "label", "family", SOURCE_COLUMN))
         writer.writerows(rows)
 
 

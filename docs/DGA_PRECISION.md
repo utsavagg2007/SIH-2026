@@ -61,7 +61,10 @@ before and after:
   the only place the machine-assigned CDN label appears.
 * Matched against **53 documented vendor suffixes** (`CDN_SUFFIXES`), each
   required to have at least one label beyond the suffix, capped at 40 per
-  provider so none dominates. **1 824 rows**, label `0`, family `cdn`.
+  provider so none dominates. **1 824 rows**, label `0`, family `benign`,
+  `source` `cdn` — the CSV gained a fourth `source` column so the marker does
+  not sit in `family`, where `training.py` would miscount it as a 28th
+  malware family. `load_dataset` ignores the column.
 * Every row is a hostname a public resolver actually observed. Nothing is
   synthesized from a pattern.
 
@@ -245,12 +248,14 @@ python -m detection_core.runner <capture.jsonl> \
 
 `detection/detectors.dga-precision.toml` ships that override and nothing else.
 
-**`tools/run_demo.py` does not pass `--config`**, so the demo currently runs at
-the 0.75 default. On the synthetic capture that changes nothing — the matrix in
-§7 is 1.000/1.000 at both thresholds — but it does mean the recommended value
-is not active in the demo. Adding `--config` to the demo's runner invocation is
-a two-line change in `tools/run_demo.py`; it is **not made here** because it
-changes demo behaviour and belongs with whoever owns that script.
+**`tools/run_demo.py` passes it** (added after the first version of this
+report), so the demo runs at 0.65. On the synthetic capture that changes
+nothing — the matrix in §7 is 1.000/1.000 at both thresholds — so the override
+was verified separately, on traffic where the two thresholds *do* differ: 277
+real domains from the held-out DGA families score in [0.65, 0.75), and a
+capture built from six of them yields **0** `dga_domain` alerts at the shipped
+default and **1** with `--config`. That is the override doing work, not a
+config file that happens to parse.
 **Optional, for the owner of `detectors/dga.py`:** changing the shipped default
 from 0.75 to 0.65 would make it apply without the flag. That is a one-line edit
 to frozen code and has deliberately **not** been made here.
