@@ -82,6 +82,7 @@ __all__ = [
     "BENIGN_FAMILY",
     "SOURCE_COLUMN",
     "CDN_SUFFIXES",
+    "fetch_benign_tail",
     "DEFAULT_FAMILIES",
     "fetch_benign",
     "fetch_cdn",
@@ -134,6 +135,7 @@ BENIGN_FAMILY = "benign"
 SOURCE_COLUMN = "source"
 SOURCE_TRANCO = "tranco"
 SOURCE_CDN = "cdn"
+SOURCE_TRANCO_TAIL = "tranco_tail"
 SOURCE_DGA = "dga"
 
 #: Public suffixes operated by CDN, edge-delivery and object-storage providers.
@@ -251,6 +253,73 @@ def fetch_benign(count: int, *, tranco_id: str | None, timeout: float) -> list[s
     return domains
 
 
+def fetch_benign_tail(
+    count: int,
+    *,
+    skip_first: int,
+    tranco_id: str | None,
+    timeout: float,
+    seed: int = 42,
+) -> list[str]:
+    """Ordinary registered domains sampled from *below* the head of the list.
+
+    **Off by default, because it was measured and it does not work.** Kept so
+    the experiment is not repeated blind; see the numbers below before turning
+    it on.
+
+    The idea was sound. :func:`fetch_benign` takes the top ``n``, which is a
+    specific and unrepresentative population - short, dictionary-word,
+    heavily-trafficked names - and the domains the model actually gets wrong
+    look nothing like them. Scoring 40 000 held-out Umbrella hostnames against
+    the CDN-augmented model left 1 384 false positives at threshold 0.65, and
+    they were overwhelmingly long-tail business names: ``logisticsmngmt.com``,
+    ``pacificcandywhsle.com``, ``lambertvetsupply.com``, ``swymregistry.com`` -
+    real companies whose domains are long, compound and full of abbreviations,
+    which is exactly the surface a character model reads as algorithmic.
+
+    Feeding that population back in as benign was tried at two doses, and both
+    cost more recall than they bought precision. On 783 real DGA domains from
+    nine families never trained on, against 39.6k held-out Umbrella hostnames,
+    at the shipped threshold of 0.65::
+
+        corpus                     PR-AUC   precision   recall   FP/1k benign
+        CDN only (shipped)         0.2983      0.3353   0.8072          31.65
+        + 1 500 tail               0.2357      0.3279   0.6909          28.01
+        + 6 000 tail               0.1995      0.2241   0.3487          23.81
+
+    The mechanism is not a tuning accident. A top-sites list is *what resolvers
+    saw*, not *what is safe*: part of that tail genuinely is algorithmic, and
+    the rest overlaps the DGA distribution honestly. Labelling it benign
+    teaches the model that random-looking strings are fine, which is the one
+    discrimination it exists to make. ROC-AUC barely moves (0.9230 -> 0.9276 at
+    1 500) precisely because it is insensitive to a rare positive class; PR-AUC,
+    which is not, falls in both directions.
+
+    Samples uniformly from rank ``skip_first`` onward; ``seed`` makes the
+    sample reproducible. Domains that also appear as DGA examples are dropped
+    by the caller, as for every other benign source.
+    """
+    url = TRANCO_ID_URL.format(id=tranco_id) if tranco_id else TRANCO_URL
+    payload = _get(url, timeout)
+    if payload[:2] == b"PK":
+        with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+            text = archive.read(archive.namelist()[0]).decode("utf-8", "replace")
+    else:
+        text = payload.decode("utf-8", "replace")
+
+    tail: list[str] = []
+    seen: set[str] = set()
+    for index, row in enumerate(csv.reader(io.StringIO(text))):
+        if index < skip_first or not row:
+            continue
+        normalized = _normalized(row[-1].strip())
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            tail.append(normalized)
+    random.Random(seed).shuffle(tail)
+    return tail[:count]
+
+
 def fetch_cdn(
     *,
     per_suffix_cap: int,
@@ -360,6 +429,7 @@ def build(
     balance: bool,
     cdn_per_suffix_cap: int = 0,
     cdn_holdout_suffixes: frozenset[str] = frozenset(),
+    tranco_tail_n: int = 0,
 ) -> tuple[list[tuple[str, int, str, str]], dict[str, object]]:
     """Return ``(rows, report)``, rows being ``(domain, label, family, source)``."""
     rng = random.Random(seed)
@@ -404,20 +474,41 @@ def build(
 
     cdn_seen = set(cdn_domains)
 
+    # --- long-tail benign side -------------------------------------------
+    # Fetched before the head slice for the same reason the CDN side is: with
+    # `--balance` the benign budget is shared, and a source fetched after the
+    # trim would be trimmed away instead of sharing it.
+    tail_domains: list[str] = []
+    if tranco_tail_n > 0:
+        tail_domains = fetch_benign_tail(
+            tranco_tail_n,
+            skip_first=tranco_n,
+            tranco_id=tranco_id,
+            timeout=timeout,
+            seed=seed,
+        )
+        tail_domains = [
+            d for d in tail_domains if d not in dga_by_domain and d not in cdn_seen
+        ]
+    tail_seen = set(tail_domains)
+
     # --- benign side -----------------------------------------------------
     benign = fetch_benign(tranco_n, tranco_id=tranco_id, timeout=timeout)
     benign = [d for d in benign if d not in dga_by_domain]  # no label conflict
     benign = [d for d in benign if d not in cdn_seen]  # no duplicate benign row
+    benign = [d for d in benign if d not in tail_seen]
     if balance:
-        # The CDN rows are benign too, so the Tranco side is trimmed to the
-        # *remaining* budget. Trimming to len(dga_rows) as before would leave
-        # the negative class oversized by exactly the CDN count.
-        budget = max(len(dga_rows) - len(cdn_domains), 0)
+        # The CDN and long-tail rows are benign too, so the head slice is
+        # trimmed to the *remaining* budget. Trimming to len(dga_rows) as
+        # before would leave the negative class oversized by exactly the
+        # count of the other benign sources.
+        budget = max(len(dga_rows) - len(cdn_domains) - len(tail_domains), 0)
         if len(benign) > budget:
             rng.shuffle(benign)
             benign = benign[:budget]
     benign_rows = [(d, 0, BENIGN_FAMILY, SOURCE_TRANCO) for d in benign]
     cdn_rows = [(d, 0, BENIGN_FAMILY, SOURCE_CDN) for d in cdn_domains]
+    tail_rows = [(d, 0, BENIGN_FAMILY, SOURCE_TRANCO_TAIL) for d in tail_domains]
 
     # Sorted by (label, family, source-rank, domain). The source key keeps the
     # two benign sources in contiguous blocks now that they share a family
@@ -430,9 +521,17 @@ def build(
     # dataset's published metrics describe. The rank reproduces the order the
     # old two-family sort produced (tranco, then cdn, then DGA by family), so
     # adding the column changed the CSV's shape and nothing else.
-    source_rank = {SOURCE_TRANCO: 0, SOURCE_CDN: 1, SOURCE_DGA: 2}
+    # `tranco_tail` sorts after `cdn` so the ranks of the sources that already
+    # existed are untouched: adding a source must not silently reshuffle the
+    # rows the published metrics were measured on.
+    source_rank = {
+        SOURCE_TRANCO: 0,
+        SOURCE_CDN: 1,
+        SOURCE_TRANCO_TAIL: 2,
+        SOURCE_DGA: 3,
+    }
     rows = sorted(
-        benign_rows + cdn_rows + dga_rows,
+        benign_rows + cdn_rows + tail_rows + dga_rows,
         key=lambda r: (r[1], r[2], source_rank[r[3]], r[0]),
     )
 
@@ -449,7 +548,9 @@ def build(
         "cdn_per_suffix_kept": cdn_per_suffix,
         "cdn_suffixes_held_out": sorted(cdn_holdout_suffixes),
         "cdn_count": len(cdn_rows),
-        "benign_count": len(benign_rows) + len(cdn_rows),
+        "tranco_tail_count": len(tail_rows),
+        "tranco_tail_requested": tranco_tail_n,
+        "benign_count": len(benign_rows) + len(cdn_rows) + len(tail_rows),
         "benign_tranco_count": len(benign_rows),
         "dga_count": len(dga_rows),
         "total_rows": len(rows),
@@ -488,6 +589,8 @@ def _print_report(report: dict[str, object], out: Path | None) -> None:
     print(f"  benign / dga       : {report['benign_count']} / {report['dga_count']}")
     if report.get("cdn_count"):
         print(f"    of which tranco  : {report['benign_tranco_count']}")
+        if report.get("tranco_tail_count"):
+            print(f"    of which tail    : {report['tranco_tail_count']}")
         print(f"    of which cdn     : {report['cdn_count']} "
               f"(cap {report['cdn_per_suffix_cap']}/suffix, "
               f"{len(report['cdn_per_suffix_kept'])} suffixes)")
@@ -536,6 +639,15 @@ def main(argv: list[str] | None = None) -> int:
         help="max rows kept per DGA family (default: 200)",
     )
     parser.add_argument(
+        "--tranco-tail-n", type=int, default=0,
+        help=(
+            "benign domains sampled uniformly from BELOW the head slice (the "
+            "long tail of ordinary registered names). DEFAULT 0 - measured at "
+            "1 500 and 6 000 and it cost more recall than it bought precision; "
+            "see fetch_benign_tail for the table before enabling it"
+        ),
+    )
+    parser.add_argument(
         "--cdn-per-suffix-cap", type=int, default=40,
         help="max CDN/object-storage hostnames kept per provider suffix from the "
              "Umbrella list (default: 40; 0 disables the CDN source entirely)",
@@ -573,6 +685,7 @@ def main(argv: list[str] | None = None) -> int:
             timeout=args.timeout,
             balance=not args.no_balance,
             cdn_per_suffix_cap=args.cdn_per_suffix_cap,
+            tranco_tail_n=args.tranco_tail_n,
             cdn_holdout_suffixes=frozenset(
                 s.strip().lower()
                 for s in args.cdn_holdout_suffixes.split(",")
