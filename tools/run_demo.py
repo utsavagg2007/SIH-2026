@@ -206,6 +206,14 @@ def _run() -> int:
     print("=" * 66)
 
     ja3_feed = ROOT / "tools" / "ja3_feed.example.txt"
+    # The re-derived DGA decision threshold (0.65). DGAConfig ships 0.75, which
+    # was chosen for the pre-CDN corpus and is documented there as untuned; the
+    # shipped default is frozen detection code and is deliberately not edited,
+    # so the demo passes the override the same way an operator would. Without
+    # this the demo runs the tuned model at the untuned threshold.
+    # See docs/DGA_PRECISION.md and detection/detectors.dga-precision.toml.
+    detector_config = ROOT / "detection" / "detectors.dga-precision.toml"
+
     command = [
         str(PY), "-m", "detection_core.runner", str(features),
         "--output", str(DATA / "alerts.jsonl"),
@@ -214,6 +222,12 @@ def _run() -> int:
     ]
     if ja3_feed.is_file():
         command += ["--ja3-feed", str(ja3_feed)]
+    if detector_config.is_file():
+        command += ["--config", str(detector_config)]
+    else:
+        # Same degradation as a missing JA3 feed: say so rather than silently
+        # running at a threshold the report does not describe.
+        print(f"  no {detector_config.name}; dga_domain runs at its shipped 0.75 default")
     if args.api_batch:
         command += ["--api-batch", str(args.api_batch)]
 

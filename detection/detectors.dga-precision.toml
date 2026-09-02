@@ -1,0 +1,44 @@
+# Detector settings: the re-derived DGA decision threshold.
+#
+#     python -m detection_core.runner <capture.jsonl> \
+#         --dga-model ../artifacts/dga_model.joblib \
+#         --config detectors.dga-precision.toml
+#
+# This file exists so the threshold change needs NO edit to detection_core.
+# `DGAConfig.score_threshold` ships as 0.75 and that default is frozen code
+# owned by the detection layer; `--config` overrides it per run, and only the
+# values named here are touched - every other detector keeps its own default.
+#
+# WHY 0.65 AND NOT 0.75
+# ---------------------
+# 0.75 was chosen for the model trained on Tranco + malware families only, and
+# it is documented in DGAConfig as untuned. The corpus now also carries 1 824
+# real CDN / object-storage hostnames from the Cisco Umbrella top 1M, so the
+# score distribution moved: names the old model pushed into the 0.75-1.00 band
+# now sit near zero, and the same recall is reached lower down the curve.
+#
+# Measured on populations neither model was trained on
+# (tools/dga_threshold_sweep.py; see docs/DGA_PRECISION.md):
+#
+#   threshold   DGA recall   CDN same-provider   CDN unseen-provider   ordinary
+#   0.60            0.723              0.0022                0.1083     0.1017
+#   0.65            0.711              0.0019                0.0917     0.0937   <- here
+#   0.70            0.667              0.0007                0.0861     0.0757
+#   0.75            0.569              0.0005                0.0639     0.0657
+#
+# 0.65 holds recall at parity with the OLD model's operating point (0.711 vs
+# 0.727) while cutting CDN false positives 169x (same-provider) and 9.6x
+# (a provider never seen in training). Past 0.70 recall falls off a cliff -
+# 0.711 -> 0.667 -> 0.569 - while the false-positive rates barely move, so the
+# knee of the curve is here.
+#
+# Raise to 0.70 if the deployment weights ordinary-domain false positives above
+# recall: that is the one axis where 0.65 is slightly behind the old model
+# (0.0937 vs 0.0770), and 0.70 puts it back in front (0.0757).
+#
+# These are measurements on real public lists (Tranco, Umbrella) and generated
+# tunnel names - NOT a capture from the deployment network. Re-derive against a
+# real benign capture before treating any of it as a production error rate.
+
+[dga_domain]
+score_threshold = 0.65
