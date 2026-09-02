@@ -245,19 +245,21 @@ the 529 450-flow CIC-IDS2017 Monday.
 | detector | synth precision | **real precision** | synth FP/1k benign | **real FP/1k benign** | verdict |
 |---|---|---|---|---|---|
 | **`port_scan`** | **1.000** | **0.012 – 0.018** | **0.0000** | **3.0900** | **collapses — 0 → 1 636 alerts** |
-| `c2_beaconing` | 0.241 – 0.489 | 0.004 – 0.054 | 0.4563 | 0.2965 | FP rate comparable; **precision far worse** |
+| `c2_beaconing` | 0.241 – 0.489 | 0.004 – 0.054 | 0.6318 | 0.2965 | FP rate same order; **precision far worse** |
 | `ddos` | 1.000 | — (no matching shape) | 0.0000 | 0.0094 | clean, but **coverage gap exposed** |
 | `data_exfiltration` | 1.000 | — (no labelled exfil) | 0.0000 | **0.0000** | **holds up** |
-| `dga_domain` | 1.000 (after fix) | PR-AUC 0.281 | 1.8602 | **24.8 per 1k domains** | **synthetic wildly optimistic** |
+| `dga_domain` | 1.000 (after fix) | PR-AUC 0.281 | 2.6324 | **24.8 per 1k domains** | **synthetic wildly optimistic** |
 | `dns_tunnelling` | 0.741 | not measurable | 0.0000 | not measurable | **unknown on real data** |
 | `encrypted_malware` | 1.000 | not measurable | 0.0000 | not measurable | **unknown on real data** |
 
 `c2_beaconing` is the interesting non-divergence: its *false-positive rate per
-flow* is the same order on both (0.46 synthetic vs 0.30 real), because the NTP
-confounder was doing its job. What synthetic could not show is that real
-precision is an order of magnitude worse — there are only a handful of real
-attacks to be right about, and hundreds of benign periodic sources to be wrong
-about, so the same FP rate buys a far worse ratio.
+flow* is the same order on both — 0.63 synthetic vs 0.30 real, i.e. synthetic
+was actually the *noisier* of the two — because the NTP confounder was doing
+its job. What synthetic could not show is that real precision is an order of
+magnitude worse: there are only a handful of real attacks to be right about and
+hundreds of benign periodic sources to be wrong about, so the same FP rate buys
+a far worse ratio. This is the one detector where the synthetic harness was not
+flattering the result.
 
 ### `port_scan`: the finding that matters
 
