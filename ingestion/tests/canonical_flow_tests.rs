@@ -300,7 +300,9 @@ fn flow_maps_raw_facts_counters_quality_and_provenance() {
     assert_eq!(observation.provenance.parser_name, ZEEK_PARSER_NAME);
     assert_eq!(observation.provenance.parser_version, ZEEK_PARSER_VERSION);
 
-    let CanonicalData::Flow(flow) = &observation.data;
+    let CanonicalData::Flow(flow) = &observation.data else {
+        panic!("expected flow data");
+    };
     assert_eq!(flow.start_time, "1970-01-01T00:00:00.123456789Z");
     assert_eq!(flow.end_time.as_deref(), Some("1970-01-01T00:00:01Z"));
     assert_eq!(flow.src_ip, "192.0.2.1");
@@ -342,7 +344,9 @@ fn ipv6_udp_icmp_missing_values_and_loss_are_mapped_without_fabrication() {
     let produced = produce_flow_observations_from_parse(&parsed, &config(OBSERVED_AT));
     assert_eq!(produced.observations.len(), 4);
 
-    let CanonicalData::Flow(ipv6) = &produced.observations[0].data;
+    let CanonicalData::Flow(ipv6) = &produced.observations[0].data else {
+        panic!("expected flow data");
+    };
     assert_eq!(ipv6.src_ip, "2001:db8::1");
     assert_eq!(ipv6.end_time, None);
     assert_eq!(ipv6.service, None);
@@ -351,19 +355,25 @@ fn ipv6_udp_icmp_missing_values_and_loss_are_mapped_without_fabrication() {
     let udp_observation = &produced.observations[1];
     assert!(udp_observation.quality.loss_detected);
     assert_eq!(udp_observation.quality.missed_content_bytes, Some(12));
-    let CanonicalData::Flow(udp) = &udp_observation.data;
+    let CanonicalData::Flow(udp) = &udp_observation.data else {
+        panic!("expected flow data");
+    };
     assert_eq!(udp.ip_protocol, 17);
     assert_eq!(udp.src_port, Some(0));
     assert_eq!(udp.counters.src_to_dst.packets, Some(0));
 
-    let CanonicalData::Flow(icmp) = &produced.observations[2].data;
+    let CanonicalData::Flow(icmp) = &produced.observations[2].data else {
+        panic!("expected flow data");
+    };
     assert_eq!(icmp.ip_protocol, 1);
     assert_eq!(icmp.src_port, None);
     assert_eq!(icmp.dst_port, None);
     assert_eq!(icmp.icmp_type, None);
     assert_eq!(icmp.icmp_code, None);
 
-    let CanonicalData::Flow(partial) = &produced.observations[3].data;
+    let CanonicalData::Flow(partial) = &produced.observations[3].data else {
+        panic!("expected flow data");
+    };
     assert_eq!(partial.src_port, None);
     assert_eq!(partial.counters.src_to_dst.packets, None);
     assert_eq!(partial.counters.src_to_dst.payload_bytes, None);
@@ -418,9 +428,15 @@ fn end_time_diagnostics_and_duplicate_uid_identity_are_correct() {
         .collect();
     assert_eq!(ids.len(), 3);
 
-    let CanonicalData::Flow(negative) = &produced.observations[0].data;
-    let CanonicalData::Flow(malformed) = &produced.observations[1].data;
-    let CanonicalData::Flow(zero) = &produced.observations[2].data;
+    let CanonicalData::Flow(negative) = &produced.observations[0].data else {
+        panic!("expected flow data");
+    };
+    let CanonicalData::Flow(malformed) = &produced.observations[1].data else {
+        panic!("expected flow data");
+    };
+    let CanonicalData::Flow(zero) = &produced.observations[2].data else {
+        panic!("expected flow data");
+    };
     assert_eq!(negative.end_time, None);
     assert_eq!(malformed.end_time, None);
     assert_eq!(zero.end_time.as_deref(), Some("1970-01-01T00:00:10Z"));
@@ -466,7 +482,9 @@ fn canonical_rejects_legacy_scientific_notation_timestamp() {
         produced.observations[0].source_record_id.as_deref(),
         Some("C-EXP-DURATION")
     );
-    let CanonicalData::Flow(duration) = &produced.observations[0].data;
+    let CanonicalData::Flow(duration) = &produced.observations[0].data else {
+        panic!("expected flow data");
+    };
     assert_eq!(duration.end_time, None);
     let diagnostic = produced
         .diagnostics
@@ -493,9 +511,15 @@ fn protocol_conflicts_and_invalid_numeric_values_use_approved_resolution() {
     let produced = produce_flow_observations_from_parse(&parsed, &config(OBSERVED_AT));
     assert_eq!(produced.observations.len(), 3);
 
-    let CanonicalData::Flow(conflict) = &produced.observations[0].data;
-    let CanonicalData::Flow(out_of_range) = &produced.observations[1].data;
-    let CanonicalData::Flow(malformed) = &produced.observations[2].data;
+    let CanonicalData::Flow(conflict) = &produced.observations[0].data else {
+        panic!("expected flow data");
+    };
+    let CanonicalData::Flow(out_of_range) = &produced.observations[1].data else {
+        panic!("expected flow data");
+    };
+    let CanonicalData::Flow(malformed) = &produced.observations[2].data else {
+        panic!("expected flow data");
+    };
     assert_eq!(conflict.ip_protocol, 17, "valid numeric source wins");
     assert_eq!(out_of_range.ip_protocol, 6, "known tcp fallback is used");
     assert_eq!(malformed.ip_protocol, 17, "known udp fallback is used");
@@ -536,7 +560,9 @@ fn one_originator_counter_and_malformed_optional_values_do_not_fabricate_zero() 
     let one_counter_observation = &produced.observations[0];
     assert!(!one_counter_observation.quality.loss_detected);
     assert_eq!(one_counter_observation.quality.missed_content_bytes, None);
-    let CanonicalData::Flow(one_counter) = &one_counter_observation.data;
+    let CanonicalData::Flow(one_counter) = &one_counter_observation.data else {
+        panic!("expected flow data");
+    };
     assert_eq!(one_counter.counters.src_to_dst.packets, Some(7));
     assert_eq!(one_counter.counters.src_to_dst.payload_bytes, None);
     assert_eq!(one_counter.counters.src_to_dst.ip_bytes, None);
@@ -549,7 +575,9 @@ fn one_originator_counter_and_malformed_optional_values_do_not_fabricate_zero() 
         .get("ip_bytes")
         .is_none());
 
-    let CanonicalData::Flow(bad_port) = &produced.observations[1].data;
+    let CanonicalData::Flow(bad_port) = &produced.observations[1].data else {
+        panic!("expected flow data");
+    };
     assert_eq!(bad_port.dst_port, None);
     assert!(produced.diagnostics.iter().any(|diagnostic| {
         diagnostic.kind == DiagnosticKind::MalformedInteger

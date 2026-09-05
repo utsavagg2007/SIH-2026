@@ -81,7 +81,7 @@ fn dns_entropy_detects_random_query() {
     let df = dns_features::DnsFeatures::from_dns_record(&dga);
     let nf = dns_features::DnsFeatures::from_dns_record(&normal);
     assert!(df.query_entropy > nf.query_entropy);
-    assert!(df.is_txt == false);
+    assert!(!df.is_txt);
 }
 
 #[test]

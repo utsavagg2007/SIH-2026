@@ -1,0 +1,8 @@
+#separator \x09
+#set_separator	,
+#empty_field	(empty)
+#unset_field	-
+#path	ssl
+#fields	ts	uid	id.orig_h	id.orig_p	id.resp_h	id.resp_p	proto	ip_proto	version	cipher	server_name	ja3	ja3s	ja4
+1000.100000	C1	192.0.2.10	50000	198.51.100.20	80	tcp	6	TLSv13	TLS_AES_128_GCM_SHA256	example.test	client-ja3	server-ja3	-
+#close	1970-01-01-00-16-42

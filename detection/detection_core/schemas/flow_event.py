@@ -35,6 +35,8 @@ _NUMERIC_CORE_FIELDS = (
     "resp_bytes",
     "orig_pkts",
     "resp_pkts",
+    "orig_ip_bytes",
+    "resp_ip_bytes",
     "src_port",
     "dst_port",
 )
@@ -72,10 +74,13 @@ class DnsInfo(BaseModel):
 
     uid: str | None = None
 
-    # Raw values - not supplied by current ingestion.
+    # Raw values supplied by the explicit detector-v2 ingestion profile.
     query: str | None = None
     qtype: str | None = None
     rcode: str | None = None
+    qtype_num: str | None = None
+    rcode_num: str | None = None
+    transaction_count: int | None = Field(default=None, ge=1)
 
     # Derived features - supplied by current ingestion.
     query_length: int | None = Field(default=None, ge=0)
@@ -88,11 +93,10 @@ class DnsInfo(BaseModel):
 class TlsInfo(BaseModel):
     """TLS data attached to a flow.
 
-    ``ja3`` / ``ja3s`` / ``ja4`` / ``server_name`` are integration TODOs:
-    current ingestion emits only the ``has_ja3`` / ``has_ja3s`` booleans and
-    an encoded SSL version. ``sni_length`` / ``sni_entropy`` are the same
-    kind of TODO - slots for derived SNI features an ingestion release could
-    supply, mirroring what ``DnsInfo`` already gets for query names.
+    The explicit detector-v2 ingestion profile supplies raw JA3/JA3S/JA4/SNI
+    when its source telemetry contains them. The standard runtime may omit
+    fingerprints, while the separately qualified JA4 runtime can provide JA4.
+    SNI length and entropy are supplied only when a real server name exists.
 
     Everything optional here defaults to ``None`` meaning *not available*.
     Nothing is ever invented, and no absent value is defaulted to 0.
@@ -102,11 +106,13 @@ class TlsInfo(BaseModel):
 
     uid: str | None = None
 
-    # Raw values - not supplied by current ingestion.
+    # Raw values supplied by the explicit detector-v2 ingestion profile.
     ja3: str | None = None
     ja3s: str | None = None
     ja4: str | None = None
     server_name: str | None = None
+    cipher: str | None = None
+    transaction_count: int | None = Field(default=None, ge=1)
 
     # Decoded from ssl_version_encoded by the adapter.
     version: str | None = None
@@ -115,7 +121,7 @@ class TlsInfo(BaseModel):
     has_ja3: bool | None = None
     has_ja3s: bool | None = None
 
-    # Derived SNI features - NOT supplied by current ingestion. Present so
+    # Derived SNI features supplied only for an observed server name.
     # the adapter can carry them the day it is emitted; detection_core can
     # also compute the same two numbers itself from a raw ``server_name``.
     sni_length: int | None = Field(default=None, ge=0)
@@ -133,7 +139,7 @@ class HttpInfo(BaseModel):
 
     uid: str | None = None
 
-    # Raw values - not supplied by current ingestion.
+    # Raw values supplied by the explicit detector-v2 ingestion profile.
     host: str | None = None
     uri: str | None = None
     user_agent: str | None = None
@@ -150,6 +156,7 @@ class HttpInfo(BaseModel):
     request_body_len: int | None = Field(default=None, ge=0)
     response_body_len: int | None = Field(default=None, ge=0)
     status_code: int | None = Field(default=None, ge=0)
+    transaction_count: int | None = Field(default=None, ge=1)
 
 
 class FlowEvent(BaseModel):
@@ -174,6 +181,8 @@ class FlowEvent(BaseModel):
     resp_bytes: int = Field(ge=0)
     orig_pkts: int = Field(ge=0)
     resp_pkts: int = Field(ge=0)
+    orig_ip_bytes: int | None = Field(default=None, ge=0)
+    resp_ip_bytes: int | None = Field(default=None, ge=0)
     conn_state: str | None = None
 
     # --- optional protocol blocks ---------------------------------------

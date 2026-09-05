@@ -4,7 +4,7 @@ This module is ingestion-format knowledge and MUST NOT be imported outside
 ``detection_core.adapters``. Detectors depend on FlowEvent, not on how
 ingestion happens to encode a conn_state today.
 
-Tables transcribed (read-only) from injestion_core/README.md.
+Tables transcribed (read-only) from ingestion/README.md.
 """
 
 from __future__ import annotations
@@ -78,6 +78,8 @@ KNOWN_TOP_LEVEL_FIELDS: frozenset[str] = frozenset(
         "byte_ratio",
         "orig_pkts",
         "resp_pkts",
+        "orig_ip_bytes",
+        "resp_ip_bytes",
         "pkt_ratio",
         "conn_state_encoded",
         "dns",

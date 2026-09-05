@@ -33,8 +33,8 @@ impl TlsFeatures {
         };
         TlsFeatures {
             uid: s.uid.clone(),
-            has_ja3: s.ja3.as_ref().map_or(false, |x| !x.is_empty()),
-            has_ja3s: s.ja3s.as_ref().map_or(false, |x| !x.is_empty()),
+            has_ja3: s.ja3.as_ref().is_some_and(|x| !x.is_empty()),
+            has_ja3s: s.ja3s.as_ref().is_some_and(|x| !x.is_empty()),
             ssl_version_encoded: encode_ssl_version(&s.version),
             cipher_encoded,
         }
