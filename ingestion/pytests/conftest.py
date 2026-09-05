@@ -165,6 +165,17 @@ def _http_features(http_json: str) -> str:
 
 @pytest.fixture
 def pipeline(monkeypatch):
+    # `detector_profile` imports the five extractors from the compiled crate
+    # at module scope, so this fixture cannot substitute the doubles until
+    # that import has already succeeded. Without the crate the suite reported
+    # 17 ERRORs with a bare ModuleNotFoundError, which reads as a broken merge
+    # rather than as an unbuilt toolchain. Skip with the build command instead.
+    pytest.importorskip(
+        "ingestion_core",
+        reason="ingestion_core (PyO3) is not built - run `maturin develop "
+        "--manifest-path ingestion/Cargo.toml` (needs a Rust toolchain; "
+        "see README, 'Ingestion needs a Rust toolchain')",
+    )
     import detector_profile as module
 
     monkeypatch.setattr(module, "extract_flow_features", _flow_features)

@@ -19,7 +19,7 @@
  */
 import { T, MONO, labelStyle } from "../../lib/tokens";
 import type { ClassVisual } from "../../lib/types";
-import { SourceBadge, type VisualChrome } from "./chrome";
+import { type VisualChrome } from "./chrome";
 
 type Props = Extract<ClassVisual, { kind: "string_inspector" }> & VisualChrome;
 
@@ -31,7 +31,6 @@ export function StringInspector({ domain, heat, nxdomain, score, source, sevColo
 
   return (
     <div>
-      <SourceBadge source={source} />
       <div style={{ ...labelStyle, marginBottom: 6 }}>queried domain</div>
       <svg width="100%" viewBox={`0 0 ${width} ${h}`} style={{ display: "block", marginBottom: 8 }}>
         {chars.map((_, i) => (

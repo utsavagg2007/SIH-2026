@@ -25,7 +25,7 @@ import { useMemo } from "react";
 import { T, MONO, SANS } from "../../lib/tokens";
 import type { ClassVisual } from "../../lib/types";
 import { fanoutModel, tickIndices } from "../../lib/fanout";
-import { SourceBadge, type VisualChrome } from "./chrome";
+import { type VisualChrome } from "./chrome";
 
 type Fanout = Extract<ClassVisual, { kind: "fanout_matrix" }>;
 
@@ -69,7 +69,6 @@ export function FanoutMatrix({ sevColor, ...v }: Fanout & VisualChrome) {
 
   return (
     <div>
-      <SourceBadge source={v.source} />
       <svg width="100%" viewBox={`0 0 ${width} ${height}`} style={{ display: "block" }} role="img"
         aria-label={`Fan-out matrix: ${distinct.length} distinct destination ports contacted over ${ROWS} time buckets`}>
         <rect x="0" y="0" width={width} height={height} fill="none" stroke={T.rule} strokeWidth="1" />

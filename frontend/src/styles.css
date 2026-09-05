@@ -1,28 +1,57 @@
 /*
- * Design tokens from the Frontend Design Specification section 2.2.
+ * Design tokens and state-dependent styling.
  *
- * The governing rule (spec 2.1): colour is reserved entirely for severity and
- * threat class. Nothing else on screen is saturated - not headers, not borders,
- * not buttons, not charts of benign traffic. When an alert appears, its colour
- * is the only vivid thing on the display.
+ * DESIGN.md §12.1: these custom properties are the single source of truth.
+ * `lib/tokens.ts` reads them as `var(--x)` rather than restating literals, and
+ * everything that depends on element state - hover, :focus-visible,
+ * aria-selected, aria-pressed, keyframes, prefers-reduced-motion - lives here
+ * rather than in an inline style, because an inline style cannot express
+ * `:hover`. That is precisely why alert rows used to have no hover state at
+ * all: this stylesheet existed and no component used it.
+ *
+ * The governing rule (§2.1): colour is reserved entirely for severity and
+ * threat state. Nothing else on screen is saturated - not headers, not borders,
+ * not buttons, not icons, not charts of benign traffic. When an alert appears,
+ * its colour is the only vivid thing on the display.
  */
 
 :root {
-  /* Surface and structure - the entire non-alert interface */
+  /* Surface and structure - the entire non-alert interface (§2.2) */
+  --bg-deep: #07090a;
   --bg: #0b0d0f;
   --panel: #14181b;
   --panel-2: #1b2024;
+  --panel-3: #222930;
   --rule: #252c31;
   --rule-bright: #38424a;
   --text: #e9eced;
-  --text-2: #8b959c;
-  --text-3: #5a646b;
+  /* Measured against the three surfaces this text actually sits on (--panel,
+     --bg, --panel-2). The previous --text-3 (#5a646b) came in at 2.7-3.2:1,
+     below AA on every one of them, and it is the colour of `microStyle` and
+     `labelStyle` - which is to say of every field label in the product, at
+     9-10px. The whole interface was labelled in text that does not pass.
+     These three now measure 12.4-16.4 / 6.8-9.0 / 4.0-5.3:1 and still read as
+     three distinct tiers (1.8x and 1.7x apart in luminance). */
+  --text-2: #a8b2b9;
+  --text-3: #7d878e;
 
-  /* Severity ramp - the only saturated colours in the product */
+  /* Severity ramp - the only saturated colours in the product (§2.3).
+     `--sev-crit` is raised from #C8453D: at that value critical had a LOWER
+     perceived luminance than high, so on a projector in a lit room the most
+     severe class was the least visible and the ramp inverted at the top. */
   --sev-low: #4e9c7f;
   --sev-med: #d2a03e;
   --sev-high: #db7038;
-  --sev-crit: #c8453d;
+  --sev-crit: #e04b3f;
+
+  /* Washes: the same hues at 12%. Two uses only - a ledger bar fill and the
+     tint on a selected row's first 64px. Never a full-panel background; a wall
+     of red destroys the discipline that makes the ramp work. */
+  --sev-low-wash: rgba(78, 156, 127, 0.12);
+  --sev-med-wash: rgba(210, 160, 62, 0.12);
+  --sev-high-wash: rgba(219, 112, 56, 0.12);
+  --sev-crit-wash: rgba(224, 75, 63, 0.12);
+
   /* Learned-normal bands and reference traces only. Never an alert colour. */
   --baseline: #41718f;
 
@@ -42,52 +71,34 @@ body,
 }
 
 body {
-  background: var(--bg);
+  background: var(--bg-deep);
   color: var(--text);
   font-family: var(--sans);
   font-size: 13px;
   line-height: 1.5;
-  /* Mandatory (spec 2.3): without it, digits change width as values change and
-     the whole display shivers - which on a projector looks catastrophic. */
+  /* Mandatory (§3.1): without it, digits change width as values change and the
+     whole display shivers - which on a projector looks catastrophic. */
   font-variant-numeric: tabular-nums;
   -webkit-font-smoothing: antialiased;
 }
 
-/* Type scale (spec 2.3). Mono for anything a machine produced; sans for
-   anything a human wrote. The split is a rule, not a suggestion. */
-.mono {
-  font-family: var(--mono);
-  font-variant-numeric: tabular-nums;
+/* Instrument scrollbars: part of the chrome, so neutral like the rest of it. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
 }
-.readout-lg {
-  font: 500 28px/1 var(--mono);
-  font-variant-numeric: tabular-nums;
+::-webkit-scrollbar-track {
+  background: var(--bg);
 }
-.readout {
-  font: 500 18px/1.1 var(--mono);
-  font-variant-numeric: tabular-nums;
+::-webkit-scrollbar-thumb {
+  background: var(--rule);
 }
-.data {
-  font: 400 13px/1.4 var(--mono);
-  font-variant-numeric: tabular-nums;
-}
-.data-sm {
-  font: 400 11px/1.35 var(--mono);
-  font-variant-numeric: tabular-nums;
-}
-.heading {
-  font: 600 15px/1.3 var(--sans);
-}
-.label {
-  font: 600 10px/1.2 var(--sans);
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  color: var(--text-2);
+::-webkit-scrollbar-thumb:hover {
+  background: var(--rule-bright);
 }
 
-/* Geometry (spec 2.4): near-zero radius. Instruments have square bezels;
-   rounded cards read as consumer software. 2px on interactive elements only,
-   so they are distinguishable from readouts by shape alone. */
+/* Geometry (§3.2): near-zero radius. Instruments have square bezels; rounded
+   cards read as consumer software. 2px on interactive elements only. */
 button,
 select,
 input {
@@ -100,200 +111,20 @@ input {
   padding: 5px 10px;
   cursor: pointer;
 }
-button:hover:not(:disabled),
-select:hover {
-  border-color: var(--rule-bright);
-}
 button:disabled {
   color: var(--text-3);
   cursor: not-allowed;
 }
+
+/* Focus rings are `--baseline` - the one desaturated hue reserved for
+   non-alert reference marks - and are never removed (§12.3). */
 :focus-visible {
-  outline: 1px solid var(--rule-bright);
+  outline: 1px solid var(--baseline);
   outline-offset: 1px;
 }
 
-/* ---- layout shell ---- */
+/* ---- motion (§3.3): five animations, every one carrying information ---- */
 
-.app {
-  display: grid;
-  grid-template-rows: 88px 1fr 48px;
-  grid-template-columns: 56px 1fr;
-  grid-template-areas:
-    "nav wire"
-    "nav main"
-    "nav bar";
-  height: 100%;
-  min-width: 1280px;
-}
-
-.nav {
-  grid-area: nav;
-  border-right: 1px solid var(--rule);
-  background: var(--panel);
-  display: flex;
-  flex-direction: column;
-  align-items: stretch;
-}
-.nav button {
-  background: none;
-  border: none;
-  border-left: 2px solid transparent;
-  border-radius: 0;
-  padding: 12px 4px;
-  color: var(--text-3);
-  font: 600 9px/1.2 var(--sans);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-.nav button:hover {
-  background: var(--panel-2);
-  color: var(--text-2);
-}
-.nav button[aria-current="true"] {
-  color: var(--text);
-  border-left-color: var(--rule-bright);
-  background: var(--panel-2);
-}
-
-.wire-slot {
-  grid-area: wire;
-  border-bottom: 1px solid var(--rule);
-  background: var(--panel);
-  position: relative;
-}
-.wire-slot canvas {
-  display: block;
-  width: 100%;
-  height: 88px;
-}
-.wire-status {
-  position: absolute;
-  top: 6px;
-  right: 10px;
-  color: var(--text-3);
-}
-
-.main {
-  grid-area: main;
-  overflow: hidden;
-  min-height: 0;
-}
-
-.bar {
-  grid-area: bar;
-  border-top: 1px solid var(--rule);
-  background: var(--panel);
-  display: flex;
-  align-items: center;
-  gap: 0;
-  padding: 0 16px;
-}
-.bar .cell {
-  padding: 0 16px;
-  border-right: 1px solid var(--rule);
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  white-space: nowrap;
-}
-.bar .cell:first-child {
-  padding-left: 0;
-}
-.bar .cell:last-child {
-  border-right: none;
-}
-.bar .v {
-  font: 500 14px/1 var(--mono);
-  font-variant-numeric: tabular-nums;
-}
-.bar .u {
-  color: var(--text-3);
-  font-size: 10px;
-}
-/* The only element in the bar permitted colour, and only when disconnected. */
-.bar .disconnected {
-  color: var(--sev-crit);
-}
-
-/* ---- panels ---- */
-
-.split {
-  display: grid;
-  grid-template-columns: 38% 62%;
-  height: 100%;
-  min-height: 0;
-}
-.panel {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  border-right: 1px solid var(--rule);
-  overflow: hidden;
-}
-.panel:last-child {
-  border-right: none;
-}
-.panel-head {
-  padding: 10px 16px;
-  border-bottom: 1px solid var(--rule);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex: 0 0 auto;
-}
-.panel-body {
-  overflow-y: auto;
-  flex: 1 1 auto;
-  min-height: 0;
-}
-.panel-body.pad {
-  padding: 16px;
-}
-
-.chips {
-  display: flex;
-  gap: 4px;
-  flex-wrap: wrap;
-}
-.chip {
-  font: 600 10px/1 var(--sans);
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  padding: 5px 8px;
-  border: 1px solid var(--rule);
-  border-radius: 2px;
-  background: none;
-  color: var(--text-3);
-}
-.chip[aria-pressed="true"] {
-  color: var(--text);
-  border-color: var(--rule-bright);
-  background: var(--panel-2);
-}
-
-/* ---- alert rows ---- */
-
-.rows {
-  display: flex;
-  flex-direction: column;
-}
-.row {
-  display: block;
-  width: 100%;
-  text-align: left;
-  background: none;
-  border: none;
-  border-radius: 0;
-  border-bottom: 1px solid var(--rule);
-  /* Severity as a 2px left border (spec 2.2). Never a full-panel background -
-     a wall of red destroys the discipline that makes the ramp work. */
-  border-left: 2px solid var(--sev);
-  padding: 7px 12px;
-  cursor: pointer;
-  animation: rowin 140ms ease-out;
-}
 @keyframes rowin {
   from {
     opacity: 0;
@@ -302,163 +133,220 @@ button:disabled {
     opacity: 1;
   }
 }
-.row:hover {
-  background: var(--panel-2);
-}
-.row[aria-selected="true"] {
-  background: var(--panel-2);
-}
-.row-top {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.row-sub {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--text-2);
-  margin-top: 2px;
-}
-.row .grow {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+/* The severity rail draws top to bottom as the row arrives. */
+@keyframes raildraw {
+  from {
+    transform: scaleY(0);
+  }
+  to {
+    transform: scaleY(1);
+  }
 }
 
-/* Two-letter threat code in a bordered box (spec 2.2). Not coloured - eight
-   hues would break the severity discipline and is beyond what anyone learns. */
-.code {
-  font: 500 10px/1 var(--mono);
-  color: var(--text-2);
-  border: 1px solid var(--rule-bright);
-  padding: 3px 4px;
-  letter-spacing: 0.04em;
-}
-/* Severity is never colour alone (spec 8.3) - every severity carries a text
-   label too, so the display survives projection and colour-vision differences. */
-.sev-label {
-  font: 600 9px/1 var(--sans);
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
-  color: var(--sev);
-}
-.badge {
-  font: 600 9px/1 var(--sans);
-  letter-spacing: 0.07em;
-  text-transform: uppercase;
+/* ---- interactive elements: hover / selected / pressed ---- */
+
+/* Nav rail */
+.nav-item {
+  border: 0;
+  border-left: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
   color: var(--text-3);
-  border: 1px solid var(--rule);
-  padding: 3px 4px;
-}
-
-.conf-track {
-  width: 56px;
-  height: 3px;
-  background: var(--rule);
-  position: relative;
-  flex: 0 0 auto;
-}
-.conf-fill {
-  position: absolute;
-  inset: 0 auto 0 0;
-  background: var(--text-2);
-}
-
-/* ---- evidence ---- */
-
-.ev {
-  margin-bottom: 14px;
-}
-.ev-head {
+  padding: 10px 2px 9px;
+  width: 100%;
   display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  gap: 12px;
-  margin-bottom: 4px;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  font-family: var(--sans);
 }
-.ev-track {
+.nav-item:hover {
+  background: var(--panel-3);
+  color: var(--text-2);
+}
+/* The active view was marked by a 2px rule in --rule-bright (#38424a) - 1.4:1
+   against the rail. On a projector there was no way to tell which view you
+   were in. The marker is now the brightest thing on the rail, which is what a
+   "you are here" is for. */
+.nav-item[aria-current="true"] {
+  background: var(--panel-2);
+  color: var(--text);
+  border-left-color: var(--text-2);
+}
+.nav-item:focus-visible {
+  outline: 1px solid var(--baseline);
+  outline-offset: -2px;
+}
+
+/* Threat ledger cell */
+.ledger-cell {
+  flex: 1;
   position: relative;
-  height: 6px;
-  background: var(--rule);
+  border: 0;
+  border-right: 1px solid var(--rule);
+  border-radius: 0;
+  text-align: left;
+  cursor: pointer;
+  padding: 2px 16px 0;
+  background: transparent;
+  min-width: 0;
 }
-.ev-fill {
+.ledger-cell:hover {
+  background: var(--panel-3);
+}
+.ledger-cell[aria-pressed="true"] {
+  background: var(--panel-2);
+}
+.ledger-cell:focus-visible {
+  outline: 1px solid var(--baseline);
+  outline-offset: -1px;
+}
+
+/* Alert row. Height is fixed at 40px: virtualization is fixed-pitch arithmetic
+   and a variable row height means a dependency and a rewrite (§12.2). */
+.alert-row {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 40px;
+  padding: 4px 12px 3px 14px;
+  text-align: left;
+  border: 0;
+  border-bottom: 1px solid var(--rule);
+  border-radius: 0;
+  cursor: pointer;
+  overflow: hidden;
+  background: transparent;
+  animation: rowin 140ms cubic-bezier(0.2, 0, 0, 1);
+}
+.alert-row:hover {
+  background: var(--panel-3);
+}
+.alert-row[aria-selected="true"] {
+  background: var(--panel-2);
+}
+.alert-row:focus-visible {
+  outline: 1px solid var(--baseline);
+  outline-offset: -1px;
+}
+.alert-row .rail {
   position: absolute;
+  left: 0;
   top: 0;
   bottom: 0;
-  left: 0;
-  background: var(--text-2);
+  transform-origin: top;
+  animation: raildraw 140ms cubic-bezier(0.2, 0, 0, 1);
 }
-.ev-thresh {
-  position: absolute;
-  top: -3px;
-  bottom: -3px;
-  width: 1px;
-  background: var(--rule-bright);
-}
-/* The observed marker takes the severity colour only when the value is on the
-   wrong side of the threshold (spec 5.1). */
-.ev-mark {
-  position: absolute;
-  top: -2px;
-  width: 2px;
-  height: 10px;
-  background: var(--text);
-}
-.ev-mark.exceeded {
-  background: var(--sev);
-}
-.ev-scale {
-  display: flex;
-  justify-content: space-between;
-  color: var(--text-3);
-  margin-top: 3px;
-}
-.ev-plain {
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 4px 0;
+
+/* Incident header. Same 40px pitch as an alert row - the windowing is
+   fixed-pitch arithmetic and both kinds of row live in one flat array - but a
+   heavier ground, so a collapsed list reads as a list of situations rather than
+   as more alerts. */
+.group-row {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: 40px;
+  padding: 4px 12px 3px 14px;
+  text-align: left;
+  border: 0;
   border-bottom: 1px solid var(--rule);
+  border-radius: 0;
+  cursor: pointer;
+  overflow: hidden;
+  background: var(--panel);
+}
+.group-row:hover {
+  background: var(--panel-3);
+}
+.group-row:focus-visible {
+  outline: 1px solid var(--baseline);
+  outline-offset: -1px;
+}
+.group-row .rail {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
 }
 
-.section {
-  border-top: 1px solid var(--rule);
-  padding: 14px 16px;
-}
-.section:first-child {
-  border-top: none;
-}
-
-.kv {
-  display: grid;
-  grid-template-columns: minmax(120px, auto) 1fr;
-  gap: 4px 16px;
-}
-.kv dt {
+/* Filter chips - severity, class, and the small controls that behave like them */
+/* 9px uppercase at 0.08em was below the size at which letterforms separate
+   at a normal viewing distance, and these are the severity filters - the most
+   used control on the screen. */
+.chip {
+  font-family: var(--sans);
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  padding: 4px 7px;
+  border-radius: 2px;
+  border: 1px solid var(--rule);
+  background: transparent;
   color: var(--text-2);
+  cursor: pointer;
 }
-.kv dd {
-  margin: 0;
+.chip.mono {
   font-family: var(--mono);
-  font-variant-numeric: tabular-nums;
-}
-
-.note {
-  color: var(--text-3);
   font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: none;
+  padding: 3px 5px;
 }
-.empty {
-  padding: 32px 16px;
-  color: var(--text-3);
-  text-align: center;
+.chip:hover {
+  border-color: var(--rule-bright);
+}
+.chip[aria-pressed="true"] {
+  border-color: var(--rule-bright);
+  background: var(--panel-2);
 }
 
-.ip {
+/* Small labelled action, e.g. expand / copy json / Explain */
+.ctl {
+  font-family: var(--sans);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-2);
+  background: var(--panel-2);
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  padding: 3px 7px;
+  cursor: pointer;
+}
+.ctl:hover {
+  border-color: var(--rule-bright);
   color: var(--text);
+}
+
+/* Text input in the instrument register: mono, square, no chrome of its own. */
+.field {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  padding: 3px 6px;
+}
+.field::placeholder {
+  color: var(--text-3);
+}
+.field:focus-visible {
+  outline: 1px solid var(--baseline);
+  outline-offset: 0;
+}
+
+/* Every IP in the product is a link to its host view. That single interaction
+   rule is what makes the whole thing feel navigable (§7.1). */
+.ip {
+  color: inherit;
   background: none;
-  border: none;
+  border: 0;
   border-bottom: 1px dotted var(--rule-bright);
   padding: 0;
   font-family: var(--mono);
@@ -467,6 +355,48 @@ button:disabled {
 }
 .ip:hover {
   border-bottom-color: var(--text-2);
+  color: var(--text);
+}
+
+/* A row that selects something: incident member, host timeline entry, capture */
+.pick-row {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  cursor: pointer;
+  padding: 0;
+  color: inherit;
+  font: inherit;
+}
+.pick-row:hover {
+  background: var(--panel-3);
+}
+.pick-row[aria-selected="true"] {
+  background: var(--panel-2);
+}
+
+/* ---- shared panel chrome ---- */
+
+.panel-head {
+  flex-shrink: 0;
+  height: 33px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--rule);
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  gap: 12px;
+}
+.panel-title {
+  font-family: var(--sans);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-2);
 }
 
 table.grid {
@@ -475,47 +405,32 @@ table.grid {
 }
 table.grid th {
   text-align: left;
-  font: 600 10px/1.2 var(--sans);
+  font: 600 11px/1.2 var(--sans);
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--text-2);
+  color: var(--text-3);
   padding: 6px 10px;
   border-bottom: 1px solid var(--rule);
+  white-space: nowrap;
 }
 table.grid td {
-  padding: 6px 10px;
+  padding: 7px 10px;
   border-bottom: 1px solid var(--rule);
   font-family: var(--mono);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
+  color: var(--text-2);
 }
 
-.ok {
-  color: var(--sev-low);
-}
-.warn {
-  color: var(--sev-med);
-}
-.bad {
-  color: var(--sev-crit);
-}
-
-.cols {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 1px;
-  background: var(--rule);
-}
-.cols > * {
-  background: var(--bg);
-  padding: 16px;
-}
-
-/* Spec 2.5: under prefers-reduced-motion, alert rows appear without fade and
-   the Wire redraws in steps instead of continuously. Everything stays
-   functional. */
+/* §3.3: under prefers-reduced-motion the rail draw and the row fade are
+   dropped, recency decay becomes a static marker, and transitions snap.
+   Everything stays fully functional. */
 @media (prefers-reduced-motion: reduce) {
-  .row {
-    animation: none;
+  .alert-row,
+  .alert-row .rail {
+    animation: none !important;
+  }
+  * {
+    transition: none !important;
   }
 }

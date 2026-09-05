@@ -1,6 +1,6 @@
 import { T, MONO, labelStyle } from "../../lib/tokens";
 import type { ClassVisual } from "../../lib/types";
-import { SourceBadge, type VisualChrome } from "./chrome";
+import { type VisualChrome } from "./chrome";
 
 type Props = Extract<ClassVisual, { kind: "ja3_rarity" }> & VisualChrome;
 
@@ -11,7 +11,6 @@ export function Ja3Rarity({ bins, tailIndex, history, source, sevColor }: Props)
 
   return (
     <div>
-      <SourceBadge source={source} />
       <div style={{ ...labelStyle, marginBottom: 6 }}>baseline JA3 frequency (log)</div>
       <svg width="100%" viewBox={`0 0 ${width} ${height + 14}`} style={{ display: "block" }}>
         {bins.map((v, i) => {

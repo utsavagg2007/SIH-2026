@@ -12,9 +12,13 @@
  */
 export type Severity = "low" | "medium" | "high" | "critical";
 
+/** The frozen v1.1 vocabulary, mirrored from `backend/app/schemas/enums.py`.
+ *  These are the exact strings the backend serves; the previous list used four
+ *  names no detector emits, so every consumer that keyed off them silently
+ *  missed. */
 export type ThreatClass =
-  | "ddos_flood" | "amplification" | "port_scan" | "c2_beaconing"
-  | "dga_domain" | "dns_tunnel" | "encrypted_c2" | "exfiltration";
+  | "ddos" | "dga_domain" | "dns_tunnelling" | "port_scan"
+  | "encrypted_malware" | "c2_beaconing" | "data_exfiltration";
 
 /** `ScoreType` in the backend enums. Spec 2.2: severity is not confidence, and
  *  a rule score must not be presented as a probability. */

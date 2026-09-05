@@ -1,6 +1,6 @@
 import { T, labelStyle } from "../../lib/tokens";
 import type { ClassVisual } from "../../lib/types";
-import { SourceBadge, type VisualChrome } from "./chrome";
+import { type VisualChrome } from "./chrome";
 
 type Props = Extract<ClassVisual, { kind: "baseline_departure" }> & VisualChrome;
 
@@ -14,7 +14,6 @@ export function BaselineDeparture({ series, baselineBand, source, sevColor }: Pr
 
   return (
     <div>
-      <SourceBadge source={source} />
       <div style={{ ...labelStyle, marginBottom: 6 }}>outbound bytes / hour, last 72h</div>
       <svg width="100%" viewBox={`0 0 ${width} ${height}`} style={{ display: "block" }}>
         <rect x="0" y={bandY1} width={width} height={bandY2 - bandY1} fill={T.baseline} opacity="0.18" />

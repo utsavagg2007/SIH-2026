@@ -250,6 +250,11 @@ def main() -> int:
 
         # -- Layers 4-5 -> 6: detection posting into the backend --------------
         print("\nLAYER 4-5  detection -> backend (over HTTP, with telemetry)")
+        # The dedup claim is about what THIS run adds to the store, not about
+        # how much the store already holds. Comparing this run's emissions to
+        # the absolute total failed against any backend that had already served
+        # a run - which is every backend up for more than one demo.
+        stored_before = _get(f"{BACKEND}/api/v1/alerts?limit=1")["total"]
         frames_task = asyncio.new_event_loop().run_until_complete  # noqa: F841
         loop = asyncio.new_event_loop()
         listener = loop.create_task(collect_frames(seconds=25.0))
@@ -333,8 +338,8 @@ def main() -> int:
         stored = _get(f"{BACKEND}/api/v1/alerts?limit=200")
         check(
             "deduplication collapsed repeats",
-            stored["total"] <= len(alerts),
-            f"{len(alerts)} emitted -> {stored['total']} stored",
+            stored["total"] - stored_before <= len(alerts),
+            f"{len(alerts)} emitted -> {stored['total'] - stored_before} added",
         )
         check(
             "stored alert ids are unique",

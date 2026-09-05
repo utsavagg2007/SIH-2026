@@ -51,6 +51,15 @@ def test_invalid_registry_identity_and_path_fail_closed(tmp_path):
 
 
 def test_ingest_is_idempotent_and_writes_valid_bindings(tmp_path, monkeypatch):
+    # `pipeline` is faked below, but the SHA-256 provenance hash still comes
+    # from the compiled crate. Without it this failed with a SystemExit that
+    # named the hash rather than the missing toolchain.
+    pytest.importorskip(
+        "ingestion_core",
+        reason="ingestion_core (PyO3) is not built - run `maturin develop "
+        "--manifest-path ingestion/Cargo.toml` (needs a Rust toolchain; "
+        "see README, 'Ingestion needs a Rust toolchain')",
+    )
     dataset_root = tmp_path / "dataset"
     dataset_root.mkdir()
     (dataset_root / "metadata.json").write_text('{"replays": {}}\n', encoding="utf-8")
