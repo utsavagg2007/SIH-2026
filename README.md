@@ -34,15 +34,15 @@ python tools/verify_e2e.py           # prove all seven layers connect
 
 | Needed | Version | For |
 |---|---|---|
-| **Python** | 3.11 or newer | every backend layer (`detection` uses `tomllib`, which is 3.11+) |
-| **Node.js** | 20 or newer | the dashboard |
+| **Python** | 3.11–3.13 (3.12 recommended) | every backend layer; the committed asyncpg/pydantic-core pins do not install on 3.14 |
+| **Node.js** | 22.22.2+, 24.15.0+, or 26+ | the dashboard; this is the effective jsdom 30 lockfile requirement |
 
 That is the whole list for the default path. Rust and Docker are needed **only**
 to run the real Zeek ingestion over a PCAP — see [Step 7](#step-7--optional-the-real-ingestion-path).
 
 ```bash
-python --version     # 3.11+
-node --version       # 20+
+python --version     # 3.11-3.13
+node --version       # 22.22.2+, 24.15.0+, or 26+
 ```
 
 ## Step 1 — create the Python environment
@@ -83,7 +83,7 @@ it the six rule detectors still run and DGA stays unregistered.
 
 ```bash
 cd frontend
-npm install
+npm ci
 npm run build
 cd ..
 ```
@@ -252,7 +252,7 @@ On the dashboard, in the order worth showing:
 python tools/verify_e2e.py
 ```
 
-29 checks: that raw `dns.query` and `tls.ja3` survive ingestion, that all seven
+30 checks: that raw `dns.query` and `tls.ja3` survive ingestion, that all seven
 threat classes fire, that the frames reaching the dashboard are the shape it
 expects, that deduplication collapses repeats, that incidents span the kill
 chain, and that every analyst sentence is traceable to a stored field. It starts
@@ -298,17 +298,30 @@ Python alone. To drive a real PCAP through Zeek and the Rust core you also need
 **Rust** (`rustup`), **maturin**, and **Docker** (for Zeek):
 
 ```bash
-pip install maturin
+.venv/bin/python -m pip install "maturin>=1.0,<2.0"
 cd ingestion
-maturin develop --release          # builds and installs ingestion_core
+../.venv/bin/maturin develop --release          # builds and installs ingestion_core
 cd ..
 python tools/run_demo.py --pcap path/to/capture.pcap --ui
+```
+
+To produce both integration artifacts from the same pinned-Zeek run, use the
+explicit detector profile and the independent canonical sidecar (the canonical
+target must not already exist):
+
+```bash
+python ingestion/pipeline.py capture.pcap \
+  -o data/features.jsonl \
+  --feature-profile detector-v2 \
+  --canonical-output data/canonical_observations.jsonl \
+  --sensor-id sensor/site-a \
+  --stats
 ```
 
 Or run the two halves as a genuine stream, which is what requirement (c) asks for:
 
 ```bash
-python ingestion/pipeline.py capture.pcap -o - --stats | \
+python ingestion/pipeline.py capture.pcap -o - --feature-profile detector-v2 --stats | \
   python -m detection_core.runner - \
     --api-url http://127.0.0.1:8000/api/v1/alerts \
     --telemetry-url http://127.0.0.1:8000/api/v1/telemetry
@@ -377,7 +390,7 @@ Every command, from the repository root, with `PY` standing for
 | Score against ground truth | `$PY tools/evaluate.py` |
 | Train the DGA model | `cd detection && $PY -m detection_core.ml.dga.training -i detection_core/ml/dga/data/dga_dataset.sample.csv -o ../artifacts/dga_model.joblib` |
 | Apply database migrations | `$PY backend/tools/migrate.py --status` then without `--status` |
-| Ingestion over a PCAP | `cd ingestion && $PY pipeline.py capture.pcap -o ../data/features.jsonl --stats` |
+| Ingestion over a PCAP | `cd ingestion && $PY pipeline.py capture.pcap -o ../data/features.jsonl --feature-profile detector-v2 --stats` |
 | Benchmark the alert bus | `cd backend && $PY tools/benchmark.py --ramp` |
 
 Replaying a committed fixture through the backend's own engine, which is the
@@ -440,20 +453,28 @@ Use the venv interpreter (`.venv\Scripts\python.exe` on Windows,
 `.venv/bin/python` elsewhere); `python` below is shorthand for it.
 
 ```bash
-cd detection && python -m pytest -q            # 1638
-cd backend   && python -m pytest -q            #  135
+cd detection && python -m pytest -q            # 1645 passed, 1 optional-artifact skip
+cd backend   && python -m pytest -q            #  148
 cd analyst   && python -m pytest -q            #   24
-cd ingestion && python -m pytest pytests -q    #   16
+cd ingestion && python -m pytest pytests -q     #   17
+python -m pytest tests/test_pipeline_m1d.py tests/test_pipeline_cli_m1d.py tests/test_pipeline_detector_profile.py -q  # 41 passed, 2 Windows symlink skips
+cargo test --locked                             #   99
+cd ..
 cd frontend  && npm test                       #   59
 python -m pytest tools/tests -q                #   17   (from the repo root)
+python -m pytest pcap_dataset/test_ingest.py -q #    5   (from the repo root)
+pwsh -NoProfile -File contracts/tests/test_contract.ps1 # 49
 ```
 
-**1,889 tests.** Plus `tools/verify_e2e.py` — 29 checks across the seams
-between them, which is where the defects actually were.
+**2,104 passing checks, one optional DGA-artifact skip, and two intentional
+Windows symlink-privilege skips.**
+Plus `tools/verify_e2e.py` — 30 checks across the seams between them, which is
+where the defects actually were.
 
-`ingestion` uses `pytests/`, not `tests/`: that directory holds the Rust crate's
-integration tests, and its Python suite fakes the compiled extension so the join
-logic can be tested without a Rust toolchain.
+`ingestion/pytests/` holds the compiled-branch compatibility suite;
+`ingestion/tests/` holds Rust integration tests plus the authoritative M1D Python
+and Docker seam tests. The Python compatibility tests isolate their extension
+doubles per test, while M1D qualification uses the built PyO3 module.
 
 ## How the problem statement's constraints are met
 
@@ -468,14 +489,14 @@ model API key is configured.
 only — JA3/JA3S, SNI, negotiated version, packet and byte counts. No component
 holds a key or parses ciphertext.
 
-**(c) Streaming, not batch.** `ingestion/pipeline.py -o -` writes and flushes
+**(c) Streaming, not batch.** `ingestion/pipeline.py -o - --feature-profile detector-v2` writes and flushes
 each record as it is produced; `detection_core.runner -` reads stdin and scores
 incrementally; `AlertBus.publish` is synchronous and does no I/O, so alerts
 reach connected dashboards before they reach storage. The live path never waits
 on the durable one.
 
 ```bash
-python ingestion/pipeline.py capture.pcap -o - | \
+python ingestion/pipeline.py capture.pcap -o - --feature-profile detector-v2 | \
   python -m detection_core.runner - --api-url http://localhost:8000/api/v1/alerts
 ```
 
@@ -540,13 +561,16 @@ test): precision 0.944, recall 0.711, F1 0.811 at its live threshold of 0.75.
 - **Ingestion needs a Rust toolchain.** `ingestion_core` is a PyO3 extension;
   `cargo` and `maturin` are required to build it. `tools/synth_flows.py` exists
   so every layer above can be run and demonstrated without one.
-- **The canonical observation contract has no producer wired in.**
-  `ingestion/src/canonical/` implements a genuinely lossless
-  `CanonicalObservation` producer for `conn.log`, but it is not exported through
-  PyO3 and has no DNS/TLS/HTTP producer, so nothing calls it. The live path is
-  the older `features.jsonl` shape, now repaired to carry the raw fields.
-- **JA4 is parsed by nothing.** `--ja4` selects a Zeek image that produces the
-  column; `SslRecord` has no field for it. Absent rather than faked.
+- **Canonical output is an explicit sidecar, not the detector input.**
+  `ingestion/src/canonical/` produces the frozen `CanonicalObservation v1`
+  flow/DNS/TLS/HTTP stream and is wired through PyO3 to
+  `--canonical-output`. Detectors intentionally consume the separate opt-in
+  `detector-v2` feature profile while the default legacy projection remains
+  byte-compatible.
+- **JA4 is opt-in telemetry.** `--ja4` selects the separately pinned,
+  repository-vendored JA4 runtime. Real source JA4 reaches canonical TLS and
+  `detector-v2`; the frozen default runtime and legacy bytes remain unchanged,
+  and missing values are never fabricated.
 - **Incidents are not persisted.** They live in process memory and are lost on
   restart or after the correlation window; the `incidents` tables exist but are
   never written.
