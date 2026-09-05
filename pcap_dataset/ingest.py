@@ -52,6 +52,12 @@ ALLOWED_LABELS = {
     "dga_domain",
 }
 
+# pcap_dataset defaults to detector-v2 so raw fields (query, ja3/s, server_name, S0)
+# survive to Detection. The frozen legacy M1D default remains available via
+# --feature-profile legacy for byte-for-byte comparison.
+DATASET_FEATURE_PROFILE = "detector-v2"
+JA4_RUNTIME_LOCK = INGESTION_ROOT / "runtime" / "ja4-runtime.lock"
+
 # ---------------------------------------------------------------------------
 # Helpers: metadata.json
 # ---------------------------------------------------------------------------
@@ -125,12 +131,35 @@ def replay_id_for(sha256: str, label: str) -> str:
 # Core: single PCAP ingestion
 # ---------------------------------------------------------------------------
 
+def _ja4_image_for_meta(use_ja4: bool) -> str:
+    if not use_ja4:
+        return "zeek/zeek:8.0.10@sha256:73e80e9cd23ff71fd28d158e9a9af5c7b2b0ef5d4036af61521827531347c0e3"
+    # When JA4 is requested, record the actually qualified local image, not the base.
+    # Fallback to the lock's digest if the lock is unreadable (should not happen on a built checkout).
+    try:
+        lock = JA4_RUNTIME_LOCK.read_text(encoding="utf-8")
+        for line in lock.splitlines():
+            if line.startswith("JA4_IMAGE_DIGEST="):
+                return line.split("=", 1)[1].strip()
+            if line.startswith("JA4_IMAGE_TAG=") and "sih-zeek-ja4" in line:
+                # Tag is human-readable but digest is canonical; prefer digest.
+                pass
+        for line in lock.splitlines():
+            if line.startswith("JA4_IMAGE_TAG="):
+                return line.split("=", 1)[1].strip()
+    except OSError:
+        pass
+    return "sih-zeek-ja4:8.0.10-d03721fc (unresolved lock)"
+
+
 def ingest_one(
     pcap_path: Path,
     label: str,
     dataset_root: Path,
     window_secs: float = 60.0,
     force: bool = False,
+    feature_profile: str = DATASET_FEATURE_PROFILE,
+    use_ja4: bool = False,
 ) -> dict:
     if label not in ALLOWED_LABELS:
         sys.exit(f"ERROR: label must be one of {sorted(ALLOWED_LABELS)} (got {label!r})")
@@ -174,6 +203,17 @@ def ingest_one(
     # Load central registry
     meta = _load_metadata(dataset_root)
 
+    # F4: warn when the same bytes are ingested under a new label (label noise)
+    for existing_id, entry in meta["replays"].items():
+        if entry.get("sha256") == sha256 and entry.get("label") != label and existing_id != replay_id:
+            print(
+                f"[warn] same PCAP bytes already registered as {entry.get('label')} "
+                f"({existing_id[:8]}...); new label {label} will create a second replay "
+                f"with identical features but contradictory training signal.",
+                file=sys.stderr,
+            )
+            break
+
     # Idempotency: same pcap+label → same replay_id
     if replay_id in meta["replays"] and not force:
         existing = meta["replays"][replay_id]
@@ -195,15 +235,15 @@ def ingest_one(
         import pipeline  # type: ignore
 
         # pipeline.run_pipeline(pcap, out_dir, output_path, window, use_ja4, skip_zeek, canonical...)
-        # For dataset we use normal mode (skip_zeek=False, no canonical)
-        # out_dir is the temp Zeek workspace; output_path is our features path
+        # For dataset we use detector-v2 so raw fields survive; pass through feature_profile + ja4.
         pipeline.run_pipeline(
             str(pcap_path),
             tmp_zeek,
             str(features_path),
             window_secs=window_secs,
-            use_ja4=False,
+            use_ja4=use_ja4,
             skip_zeek=False,
+            feature_profile=feature_profile,
         )
     except SystemExit as exc:
         # pipeline calls sys.exit on failure — clean up partial output then re-raise
@@ -242,7 +282,9 @@ def ingest_one(
         "pipeline": {
             "window_secs": window_secs,
             "sensor_id": "sensor/pcap-dataset",
-            "zeek_image": "zeek/zeek:8.0.10@sha256:73e80e9cd23ff71fd28d158e9a9af5c7b2b0ef5d4036af61521827531347c0e3",
+            "zeek_image": _ja4_image_for_meta(use_ja4),
+            "feature_profile": feature_profile,
+            "use_ja4": use_ja4,
         },
         "artifacts": {
             "features": "features.jsonl",
@@ -276,10 +318,17 @@ def ingest_one(
 def main() -> None:
     ap = argparse.ArgumentParser(description="Dataset manager: PCAP → features (deterministic replay_id)")
     ap.add_argument("--pcap", type=str, help="Path to a single .pcap file")
-    ap.add_argument("--label", type=str, choices=sorted(ALLOWED_LABELS), help="Threat class label (one of the 7 detection classes)")
+    ap.add_argument("--label", type=str, choices=sorted(ALLOWED_LABELS), help="Threat class label (7 detection classes plus benign)")
     ap.add_argument("--batch", type=str, help="Directory of .pcap files to ingest with the same --label")
     ap.add_argument("--dataset-root", type=str, default=str(DEFAULT_DATASET_ROOT), help="Dataset root (default: pcap_dataset/)")
     ap.add_argument("--window", type=float, default=60.0, help="Sliding window seconds for pipeline (default 60)")
+    ap.add_argument(
+        "--feature-profile",
+        choices=("legacy", "detector-v2"),
+        default=DATASET_FEATURE_PROFILE,
+        help="Feature contract: detector-v2 (default, carries raw query/ja3/sni) or legacy M1D frozen",
+    )
+    ap.add_argument("--ja4", action="store_true", help="Use the pinned, locally qualified JA4 Zeek runtime (requires built sih-zeek-ja4 image)")
     ap.add_argument("--force", action="store_true", help="Re-run even if replay_id already exists")
     args = ap.parse_args()
 
@@ -306,14 +355,14 @@ def main() -> None:
         if not pcaps:
             sys.exit(f"ERROR: no .pcap files in {batch_dir}")
         for p in pcaps:
-            ingest_one(p, args.label, dataset_root, window_secs=args.window, force=args.force)
+            ingest_one(p, args.label, dataset_root, window_secs=args.window, force=args.force, feature_profile=args.feature_profile, use_ja4=args.ja4)
         print(f"[+] Batch done: {len(pcaps)} files → {dataset_root / 'output'}")
         return
 
     if args.pcap:
         if not args.label:
             ap.error("--pcap requires --label")
-        ingest_one(Path(args.pcap), args.label, dataset_root, window_secs=args.window, force=args.force)
+        ingest_one(Path(args.pcap), args.label, dataset_root, window_secs=args.window, force=args.force, feature_profile=args.feature_profile, use_ja4=args.ja4)
         return
 
     ap.error("provide --pcap or --batch")

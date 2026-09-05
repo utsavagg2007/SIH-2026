@@ -43,6 +43,27 @@ Zeek runs in Docker (no local install). Two options depending on Docker access:
 sudo ./scripts/run_zeek.sh pcaps/capture.pcap zeek_output
 ```
 
+### Docker without sudo (local testing)
+
+The Zeek wrapper and both E2E harnesses shell out to `docker`. If you see
+`permission denied while trying to connect to the docker API at
+unix:///var/run/docker.sock`, your user is not yet on the socket:
+
+```bash
+sudo usermod -aG docker $USER
+# then ONE of: log out and back in, or refresh this shell with:
+newgrp docker
+docker run --rm hello-world        # no password prompt = fixed
+docker images --digests | grep -E "73e80|sih-zeek"   # pinned + JA4 images visible
+```
+
+Notes: group membership is evaluated at login, which is why a fresh shell can
+still fail right after `usermod` (compare `groups` vs `getent group docker`).
+Membership in `docker` is root-equivalent by design — accepted tradeoff for a
+dev box, never for shared/production hosts. The VM walkthrough lives in
+`DEPLOYMENT.md` §5a; the JA4 image additionally needs
+`./scripts/build_ja4_runtime.sh` before `--ja4` runs.
+
 The supported official runtime is frozen to:
 
 ```text

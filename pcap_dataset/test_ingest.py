@@ -70,13 +70,15 @@ def test_ingest_is_idempotent_and_writes_valid_bindings(tmp_path, monkeypatch):
     assert first == second
     assert len(calls) == 1
     assert calls[0][1]["skip_zeek"] is False
-    assert "feature_profile" not in calls[0][1]  # dataset keeps frozen M1D default
+    assert calls[0][1]["feature_profile"] == "detector-v2"
+    assert calls[0][1]["use_ja4"] is False
     replay_dir = dataset_root / first["features_path"]
     assert replay_dir.is_file()
     per_meta = json.loads((replay_dir.parent / "meta.json").read_text(encoding="utf-8"))
     assert per_meta["sha256"] == FIXTURE_SHA
     assert per_meta["label"] == "benign"
     assert per_meta["replay_id"] == first["replay_id"]
+    assert per_meta["pipeline"]["feature_profile"] == "detector-v2"
     assert ingest._load_metadata(dataset_root)["replays"][first["replay_id"]] == first
 
 
