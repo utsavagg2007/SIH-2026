@@ -1,0 +1,9 @@
+#separator \x09
+#set_separator	,
+#empty_field	(empty)
+#unset_field	-
+#path	http
+#fields	ts	uid	id.orig_h	id.orig_p	id.resp_h	id.resp_p	proto	ip_proto	trans_depth	method	host	uri	user_agent	status_code	request_body_len	response_body_len
+1000.200000	C1	192.0.2.10	50000	198.51.100.20	80	tcp	6	1	GET	example.test	/first	FixtureAgent/1	200	0	10
+1000.300000	C1	192.0.2.10	50000	198.51.100.20	80	tcp	6	2	POST	example.test	/second	FixtureAgent/2	201	12	20
+#close	1970-01-01-00-16-42

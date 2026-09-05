@@ -116,6 +116,8 @@ def test_negative_counters_rejected(field, value):
         ("timestamp", "1747147700.5"),
         ("dst_port", "443"),
         ("src_port", "1024"),
+        ("orig_ip_bytes", "123"),
+        ("resp_ip_bytes", "456"),
     ],
 )
 def test_numeric_strings_rejected_not_coerced(field, value):
@@ -188,6 +190,8 @@ def test_optional_fields_default_to_none():
     assert flow.src_port is None
     assert flow.service is None
     assert flow.conn_state is None
+    assert flow.orig_ip_bytes is None
+    assert flow.resp_ip_bytes is None
     assert flow.dns is None
     assert flow.tls is None
     assert flow.http is None

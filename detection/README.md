@@ -12,9 +12,8 @@ ingestion output (features.jsonl)
 ```
 
 This package **never imports `ingestion_core`** and never touches Zeek logs,
-PCAPs, Docker or Rust. Its only contact with the ingestion team is the JSONL
-file format, and that knowledge is confined to `detection_core/adapters/`.
-`injestion_core/` is owned by another team and is read-only.
+PCAPs, Docker or Rust. Its ingestion boundary is the JSONL feature format, and
+that format-specific knowledge is confined to `detection_core/adapters/`.
 
 ## Status
 
@@ -83,7 +82,7 @@ Reading ingestion output:
 ```python
 from detection_core import IngestionJsonlAdapter
 
-source = IngestionJsonlAdapter(path="../injestion_core/features.jsonl")
+source = IngestionJsonlAdapter(path="../ingestion/features.jsonl")
 for flow in source:
     print(flow.src_ip, flow.dst_ip, flow.conn_state)
 
@@ -109,7 +108,7 @@ and alert output:
 
 ```bash
 # Basic: alert JSONL to stdout
-python -m detection_core.runner ../injestion_core/features.jsonl
+python -m detection_core.runner ../ingestion/features.jsonl
 
 # Include the DGA detector (needs a trained model; none ships here)
 python -m detection_core.runner input.jsonl --dga-model artifacts/dga_model.joblib
@@ -216,11 +215,11 @@ ja4:t13d1516h2_8daaf6152771_02713d6af862
   `--config`, so a feed supplements your configured indicators instead of
   silently replacing them.
 
-Two honest limitations. Ingestion does not emit `tls.ja3` / `ja3s` / `ja4`
-yet (see SCHEMA.md), so against today's feed the signature path has nothing to
-match on however good your list is — the adapter already preserves the fields
-for the day it does. And this is metadata matching: **nothing here decrypts
-anything**.
+Two honest limitations. `detector-v2` emits TLS fingerprints only when its Zeek
+source log contains them; JA4 therefore requires the separately qualified JA4
+runtime, and a capture without observed fingerprints gives the signature path
+nothing to match on however good the indicator list is. This remains metadata
+matching: **nothing here decrypts anything**.
 
 ### Startup safety and exit codes
 
@@ -255,27 +254,25 @@ and a missing artifact must not take the rest of the subsystem offline. Pass
 `--dga-model` / `dga_model_path=` to include it. An *invalid* path is a
 different matter and fails loudly at startup — you asked for DGA explicitly.
 
-### What ingestion still needs to supply
+### What the integrated ingestion profiles supply
 
-All seven detectors are built and tested. Five work on today's feed; two wait
-on raw strings the current ingestion build does not emit yet:
+All seven detectors are built and tested. The frozen default `legacy-m1d`
+feature profile intentionally retains the old omissions. The explicit
+`detector-v2` profile supplies the raw strings and event-time fields needed by
+the integrated detector path:
 
 | detector | needs |
 |---|---|
-| `port_scan`, `ddos`, `c2_beaconing`, `data_exfiltration` | — works today |
-| `dns_tunnelling` | works today on derived DNS features; a raw `dns.query` is **not** required to qualify |
-| `dga_domain` | **`dns.query`** (the raw queried name) — nothing derived can stand in |
-| `encrypted_malware` | **`tls.server_name`** (or `tls.sni_length` / `sni_entropy`) for the metadata path; `tls.ja3` / `ja3s` / `ja4` for the signature path |
+| `port_scan`, `ddos`, `c2_beaconing`, `data_exfiltration` | supplied by `detector-v2` |
+| `dns_tunnelling` | supplied; derived DNS features qualify it and raw `dns.query` is retained as evidence |
+| `dga_domain` | `detector-v2` supplies raw `dns.query`; a separately trained, explicitly configured model artifact is still required |
+| `encrypted_malware` | SNI, JA3, JA3S, version, cipher, and qualified-runtime JA4 are supplied when Zeek observed them; none are fabricated |
 
-**The remaining integration work is ingestion's, not detection's.** The
-adapter already accepts and preserves every one of these fields the moment a
-record carries them, and leaves them `None` when it does not — no schema,
-adapter or detector change is pending on this side.
-
-Also useful when ingestion can emit them: `dns.qtype`, `dns.rcode`,
-`tls.version`, top-level `uid`, `src_port`, `service`, the raw `conn_state`
-string and a numeric `timestamp`. Encoded placeholder values are not
-substitutes for the raw strings. See "Integration TODOs" in `SCHEMA.md`.
+The adapter preserves top-level `uid`, `timestamp`, `src_port`, `service`, raw
+`conn_state`, IP-byte counters, decoded and numeric DNS codes, raw DNS/TLS/HTTP
+fields, and protocol-row multiplicity. Missing source observations remain
+`None`; encoded placeholders are never substituted for raw strings. See
+"Profile capabilities" in `SCHEMA.md`.
 
 ## Port scan detector
 
@@ -606,14 +603,14 @@ detector = DnsTunnellingDetector(DnsTunnellingConfig(
 **Working from derived features only.** Qualification reads exactly the five
 normalized features — `query_length`, `query_entropy`, `subdomain_entropy`,
 `label_count`, `is_txt` — and a raw `dns.query` is **not required** for this
-detector to work. Today's ingestion build emits no `dns.query` / `qtype` /
-`rcode`, and nothing here reconstructs a query string.
+detector to work. `detector-v2` carries the observed query, qtype, and rcode;
+the frozen `legacy-m1d` projection does not, and nothing reconstructs a query.
 
 The evidence key `raw_query_available` reports truthfully whether any query in
 the *contributing rolling window* carried a real name, with
-`raw_query_observation_count` giving how many. It reads `false` on today's
-feed and `true` the day ingestion starts emitting names — the verdict is
-identical either way, because the raw name is evidence for the analyst, not an
+`raw_query_observation_count` giving how many. It is true on a `detector-v2`
+record when Zeek supplied a query and false when the source did not — the verdict
+is identical either way, because the raw name is evidence for the analyst, not an
 input to the rule. It follows that this cannot confirm data actually left,
 identify the tunnel domain or tool, or tell one repeated name from fifty
 distinct ones.
@@ -700,22 +697,22 @@ sit near 4.7–5.1.
 
 ### Which TLS fields actually exist
 
-Ingestion emits five today: `uid`, `has_ja3`, `has_ja3s`,
-`ssl_version_encoded`, `cipher_encoded`. So:
+The explicit detector-v2 profile emits raw TLS metadata when Zeek observed it,
+alongside its derived compatibility features. So:
 
 | field | status | used? |
 |---|---|---|
 | `tls.version` | available (decoded from `ssl_version_encoded`) | yes — an obsolete version *strengthens* a finding that already stands on SNI evidence, and can never create one |
-| `ja3` / `ja3s` / `ja4` | **not populated yet** | Path A is ready and matches the moment they arrive |
-| `server_name` | **not populated yet** | when present, SNI length and entropy are computed from it here |
-| `sni_length` / `sni_entropy` | **not populated yet** | optional slots the adapter already carries, for a future release |
+| `ja3` / `ja3s` | populated when the source log contains them | Path A exact signature matching |
+| `ja4` | populated from real source telemetry when the qualified JA4 runtime is used | Path A exact signature matching |
+| `server_name` | populated when Zeek observed SNI | SNI length and entropy evidence |
+| `sni_length` / `sni_entropy` | supplied by detector-v2 when SNI is present | metadata heuristic |
 | `has_ja3` / `has_ja3s` | available | no — presence of *a* fingerprint says nothing about which |
 | `cipher_encoded` | available | **no, deliberately.** Upstream computes it as `(cipher_name_length % 16) + 1` — a function of how long the cipher's *name* is, not of which cipher was negotiated. Their own README marks it a placeholder. It is not mapped onto `TlsInfo` at all |
 
-**Consequence:** against today's real feed this detector correctly produces
-nothing — there are no fingerprints to match and no SNI to measure. It is
-built and tested to work the day those fields arrive, and the adapter already
-reads them.
+**Consequence:** the signature path can match configured JA4 indicators on
+qualified PCAP ingestion. Captures without a real fingerprint or configured
+indicator still produce no signature claim.
 
 ### This does not prove malware
 
@@ -770,14 +767,15 @@ The tell is that generated names look nothing like names humans register:
 
 **Pipeline.** `raw domain → lexical features → Random Forest → dga_score`
 
-> ### ⚠ Waiting on a raw query name from ingestion
+> ### Raw query and model requirements
 > The live `DGADetector` **is** implemented and wired into the factory — see
-> "Phase 2 — the live detector" below. What is missing is upstream:
-> `injestion_core`'s `features.jsonl` does not expose the raw `dns.query`
-> string yet, only derived values — `query_entropy`, `query_length`,
+> "Phase 2 — the live detector" below. Profile selection is explicit:
+> The frozen legacy `ingestion/features.jsonl` profile does not expose the raw
+> `dns.query`; the explicit `detector-v2` profile does. The legacy profile carries
+> only derived values — `query_entropy`, `query_length`,
 > `subdomain_entropy`, `is_txt`, `label_count`. A classifier needs the actual
 > domain text and reconstructing it from an entropy number is impossible, so
-> against today's feed the detector is correctly silent. The adapter already
+> against the legacy profile the detector is correctly silent. The adapter already
 > preserves `dns.query` whenever it appears; nothing further is needed on the
 > detection side.
 
@@ -905,12 +903,11 @@ everything 0.0 looks healthy in a dashboard while detecting nothing. A
 missing path, a non-bundle, a stale `format_version` and a feature-schema
 mismatch each raise a message naming the problem.
 
-**It needs a raw `dns.query`.** Current ingestion does not emit one, so
-against today's feed this detector is correctly silent — no query, nothing
-to classify. The adapter already preserves `query` / `qtype` / `rcode`
-whenever they appear and leaves them `None` when they do not, so **the only
-thing standing between this and live DGA detection is ingestion beginning to
-emit the query name.** Nothing further is needed on the detection side.
+**It needs a raw `dns.query`.** Run ingestion with `--feature-profile
+detector-v2`; the adapter preserves `query` / `qtype` / `rcode` and leaves them
+`None` when Zeek did not observe them. Live DGA classification additionally
+requires an explicitly configured, compatible model bundle; no model artifact
+is committed or silently fetched.
 
 The derived `dns.query_entropy` / `query_length` that *are* available today
 are deliberately not used as a stand-in: the model was trained on ~20 lexical
@@ -974,7 +971,7 @@ class MyDetector(Detector):
 
 Rules:
 
-* depend on `FlowEvent`, never on `features.jsonl` or `injestion_core`;
+* depend on `FlowEvent`, never on `features.jsonl` or `ingestion`;
 * **alert from `process()`, immediately.** This is a near-real-time streaming
   system: emit the moment a sliding window, threshold or statistical test
   crosses its bound. `flush()` is not the normal alerting path — it exists
@@ -991,11 +988,11 @@ first. Pass `reset_first=False` to deliberately accumulate across calls.
 
 ## Design notes
 
-* **Adapter isolation.** When ingestion changes its output, only
+* **Adapter isolation.** When a detector profile changes its output, only
   `adapters/ingestion_jsonl.py` and `adapters/encodings.py` should change.
 * **Strict core, honest optionals.** Required flow fields validate or the
   record is skipped; fields ingestion cannot supply are `None`, never invented.
-  See "Integration TODOs" in `SCHEMA.md`.
+  See "Profile capabilities" in `SCHEMA.md`.
 * **Frozen models.** The engine hands one `FlowEvent` to every detector, so
   immutability prevents cross-detector contamination.
 * **Event time, approximately in order.** Every rolling window, cooldown and

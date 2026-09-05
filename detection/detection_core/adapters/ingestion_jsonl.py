@@ -36,8 +36,9 @@ __all__ = ["AdapterStats", "IngestionJsonlAdapter", "record_to_flow_event", "SOU
 
 logger = logging.getLogger(__name__)
 
-# Named for the actual repository directory, which is spelled "injestion_core"
-# (the Python module it builds is spelled "ingestion_core").
+# Stable serialized provenance tag retained for backward compatibility.  The
+# historical misspelling is not a filesystem path; the repository directory is
+# now ``ingestion/`` and the Python extension remains ``ingestion_core``.
 SOURCE_NAME = "injestion_core.features_jsonl"
 
 
@@ -146,6 +147,9 @@ def _build_dns(record: Mapping[str, Any]) -> DnsInfo | None:
         query=raw.get("query"),
         qtype=raw.get("qtype"),
         rcode=raw.get("rcode"),
+        qtype_num=raw.get("qtype_num"),
+        rcode_num=raw.get("rcode_num"),
+        transaction_count=raw.get("transaction_count"),
         query_length=raw.get("query_length"),
         query_entropy=raw.get("query_entropy"),
         subdomain_entropy=raw.get("subdomain_entropy"),
@@ -160,11 +164,13 @@ def _build_tls(record: Mapping[str, Any]) -> TlsInfo | None:
         return None
     return TlsInfo(
         uid=raw.get("uid"),
-        # ja3 / ja3s / ja4 / server_name: integration TODO, absent upstream today.
+        # Exact raw telemetry from detector-v2 when the source observed it.
         ja3=raw.get("ja3"),
         ja3s=raw.get("ja3s"),
         ja4=raw.get("ja4"),
         server_name=raw.get("server_name"),
+        cipher=raw.get("cipher"),
+        transaction_count=raw.get("transaction_count"),
         version=raw.get("version") or decode_ssl_version(raw.get("ssl_version_encoded")),
         has_ja3=raw.get("has_ja3"),
         has_ja3s=raw.get("has_ja3s"),
@@ -200,6 +206,7 @@ def _build_http(record: Mapping[str, Any]) -> HttpInfo | None:
         request_body_len=raw.get("request_body_len"),
         response_body_len=raw.get("response_body_len"),
         status_code=raw.get("status_code"),
+        transaction_count=raw.get("transaction_count"),
     )
 
 
@@ -254,6 +261,8 @@ def record_to_flow_event(record: Mapping[str, Any]) -> FlowEvent:
         resp_bytes=record.get("resp_bytes"),
         orig_pkts=record.get("orig_pkts"),
         resp_pkts=record.get("resp_pkts"),
+        orig_ip_bytes=record.get("orig_ip_bytes"),
+        resp_ip_bytes=record.get("resp_ip_bytes"),
         conn_state=record.get("conn_state")
         or decode_conn_state(record.get("conn_state_encoded")),
         dns=dns,

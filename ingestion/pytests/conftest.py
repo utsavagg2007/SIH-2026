@@ -1,10 +1,10 @@
 """A stand-in for the compiled Rust module.
 
-``pipeline.py`` imports ``ingestion_core``, which is a PyO3 extension built by
-maturin. Building it needs a Rust toolchain, which a machine reviewing this code
-may not have - and more importantly, the defects these tests cover were all in
-the Python join, not in the Rust mathematics. So the extension is faked here
-with a faithful transcription of the four feature structs.
+The defects these tests cover are in the Python projection, not in the Rust
+mathematics. The imported detector-profile module is therefore patched within
+each test with a faithful transcription of the five feature extractors. The
+patch is fixture-scoped so it cannot contaminate M1D integration tests collected
+in the same pytest process.
 
 The fake is deliberately a transcription rather than a reimplementation: each
 function returns exactly the field set the corresponding Rust struct serialises,
@@ -20,7 +20,6 @@ from __future__ import annotations
 import json
 import math
 import sys
-import types
 from collections import Counter
 from pathlib import Path
 
@@ -164,25 +163,13 @@ def _http_features(http_json: str) -> str:
     return json.dumps(out)
 
 
-def _install_fake_ingestion_core() -> None:
-    module = types.ModuleType("ingestion_core")
-    module.parse_conn_log = lambda path: "[]"
-    module.parse_dns_log = lambda path: "[]"
-    module.parse_ssl_log = lambda path: "[]"
-    module.parse_http_log = lambda path: "[]"
-    module.extract_flow_features = _flow_features
-    module.extract_window_features = _window_features
-    module.extract_dns_features = _dns_features
-    module.extract_tls_features = _tls_features
-    module.extract_http_features = _http_features
-    sys.modules.setdefault("ingestion_core", module)
-
-
-_install_fake_ingestion_core()
-
-
 @pytest.fixture
-def pipeline():
-    import pipeline as module
+def pipeline(monkeypatch):
+    import detector_profile as module
 
+    monkeypatch.setattr(module, "extract_flow_features", _flow_features)
+    monkeypatch.setattr(module, "extract_window_features", _window_features)
+    monkeypatch.setattr(module, "extract_dns_features", _dns_features)
+    monkeypatch.setattr(module, "extract_tls_features", _tls_features)
+    monkeypatch.setattr(module, "extract_http_features", _http_features)
     return module

@@ -143,6 +143,18 @@ def test_raw_http_strings_survive(pipeline):
     assert http["user_agent"] == "curl/8.4.0"
 
 
+def test_protocol_multiplicity_is_explicit_for_every_block(pipeline):
+    parsed = dict(PARSED)
+    parsed["ssl"] = SSL + [dict(SSL[0], timestamp=51.0, cipher="second")]
+    parsed["http"] = HTTP + [dict(HTTP[0], timestamp=11.0, uri="/second")]
+    joined = pipeline.join_by_uid(parsed)
+    records = list(pipeline.build_records(joined, parsed))
+    tls = next(r for r in records if r["uid"] == "Ctls")["tls"]
+    http = next(r for r in records if r["uid"] == "Cearly")["http"]
+    assert tls["transaction_count"] == 2
+    assert http["transaction_count"] == 2
+
+
 # -- defect 3: qtype and rcode were numbers wearing a string's name ---------
 
 

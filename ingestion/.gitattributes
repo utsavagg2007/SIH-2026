@@ -1,0 +1,15 @@
+*.sh text eol=lf
+tests/fixtures/pcap/*.sha256 text eol=lf
+docker/ja4/Dockerfile text eol=lf
+runtime/*.zeek text eol=lf
+runtime/*.lock text eol=lf
+vendor/ja4-zeek/** text eol=lf
+vendor/ja4-zeek/LICENSE-JA4 -whitespace
+vendor/ja4-zeek/LICENSE-JA4PLUS -whitespace
+vendor/ja4-zeek/UPSTREAM-zkg.meta -whitespace
+vendor/ja4-zeek/zeek/config.zeek -whitespace
+vendor/ja4-zeek/zeek/ja4/__load__.zeek -whitespace
+vendor/ja4-zeek/zeek/ja4/helpers.zeek -whitespace
+vendor/ja4-zeek/zeek/ja4/main.zeek -whitespace
+vendor/ja4-zeek/zeek/utils/common.zeek -whitespace
+vendor/ja4-zeek/zeek/utils/ssl-consts.zeek -whitespace

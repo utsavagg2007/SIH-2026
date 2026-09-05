@@ -43,6 +43,18 @@ pub struct SslRecord {
     pub server_name: String,
 }
 
+/// Detector-facing TLS source projection.
+///
+/// The frozen `SslRecord` remains byte-compatible with legacy-m1d.  This
+/// opt-in projection adds only the exact source JA4 value needed by the
+/// detector-v2 interface.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DetectorSslRecord {
+    #[serde(flatten)]
+    pub legacy: SslRecord,
+    pub ja4: Option<String>,
+}
+
 /// An HTTP record parsed from Zeek's http.log.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HttpRecord {

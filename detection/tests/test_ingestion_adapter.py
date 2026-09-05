@@ -65,8 +65,8 @@ def test_decode_rejects_bools():
 # --------------------------------------------------------------------------
 
 
-def test_provenance_names_the_actual_repo_directory():
-    """The directory on disk is spelled 'injestion_core'."""
+def test_historical_provenance_tag_stays_backward_compatible():
+    """The historical serialized provenance tag remains stable after relocation."""
     assert SOURCE_NAME == "injestion_core.features_jsonl"
 
 
@@ -223,6 +223,44 @@ def test_explicit_timestamp_preferred_over_flow_id():
         "resp_pkts": 1,
     }
     assert record_to_flow_event(record).timestamp == pytest.approx(2000.5)
+
+
+def test_detector_v2_optional_facts_reach_flow_event():
+    record = {
+        "flow_id": "10.0.0.1:10.0.0.2:443:tcp:1000.0",
+        "timestamp": 1000.0,
+        "src_ip": "10.0.0.1",
+        "src_port": 50000,
+        "dst_ip": "10.0.0.2",
+        "dst_port": 443,
+        "proto": "tcp",
+        "duration": 0.1,
+        "orig_bytes": 10,
+        "resp_bytes": 20,
+        "orig_pkts": 1,
+        "resp_pkts": 2,
+        "orig_ip_bytes": 50,
+        "resp_ip_bytes": 100,
+        "dns": {
+            "uid": "C1",
+            "query": "example.test",
+            "qtype": "A",
+            "qtype_num": "1",
+            "rcode": "NOERROR",
+            "rcode_num": "0",
+            "transaction_count": 2,
+        },
+        "tls": {"uid": "C1", "cipher": "TLS_AES_128_GCM_SHA256", "transaction_count": 2},
+        "http": {"uid": "C1", "uri": "/one", "transaction_count": 3},
+    }
+    flow = record_to_flow_event(record)
+    assert flow.orig_ip_bytes == 50
+    assert flow.resp_ip_bytes == 100
+    assert flow.dns.qtype_num == "1" and flow.dns.transaction_count == 2
+    assert flow.tls.cipher == "TLS_AES_128_GCM_SHA256"
+    assert flow.tls.transaction_count == 2
+    assert flow.http.transaction_count == 3
+    assert flow.extra == {}
 
 
 # --------------------------------------------------------------------------

@@ -135,12 +135,13 @@ Handled entirely by `adapters/ingestion_jsonl.py` + `adapters/encodings.py`.
 
 | FlowEvent | source in `features.jsonl` |
 |---|---|
-| `src_ip`, `dst_ip`, `dst_port`, `proto`, `duration`, `orig_bytes`, `resp_bytes`, `orig_pkts`, `resp_pkts` | direct |
-| `timestamp` | substring after the **last** colon of `flow_id` (IPv6-safe), or a top-level `timestamp`/`ts` if ingestion adds one |
-| `conn_state` | decoded from `conn_state_encoded` |
-| `uid` | back-filled from `dns`/`tls`/`http` block `uid` |
-| `tls.version` | decoded from `ssl_version_encoded` |
-| `http.method` | decoded from `method_encoded` |
+| `src_ip`, `dst_ip`, `src_port`, `dst_port`, `proto`, `duration`, `orig_bytes`, `resp_bytes`, `orig_pkts`, `resp_pkts`, `orig_ip_bytes`, `resp_ip_bytes` | direct in `detector-v2`; legacy fields remain direct when present |
+| `timestamp` | direct event time in `detector-v2`; otherwise the substring after the **last** colon of `flow_id` (IPv6-safe), or top-level `ts` |
+| `conn_state` | direct raw Zeek state in `detector-v2`; otherwise decoded from `conn_state_encoded` |
+| `uid`, `service` | direct in `detector-v2`; UID may be back-filled from a legacy protocol block |
+| `dns.query`, `qtype`, `qtype_num`, `rcode`, `rcode_num`, `transaction_count` | direct from the earliest event-time DNS row plus per-UID multiplicity in `detector-v2` |
+| `tls.ja3`, `ja3s`, `ja4`, `server_name`, `version`, `cipher`, `transaction_count` | direct when observed; missing fingerprints are absent rather than fabricated; legacy version can be decoded from `ssl_version_encoded` |
+| `http.host`, `uri`, `user_agent`, `method`, `status_code`, `transaction_count` | direct from the earliest event-time HTTP row; legacy method can be decoded from `method_encoded` |
 | dns/tls/http derived features | direct |
 
 ### Deliberately ignored
@@ -169,41 +170,31 @@ beacon timing is computed per relationship here, not globally upstream.
 
 ---
 
-## 4. Integration TODOs
+## 4. Profile capabilities
 
-Fields `FlowEvent` has slots for that current ingestion does not emit. They
-stay `None` — never invented.
-
-**These are ingestion-side TODOs, not detection-side ones.** The adapter
-already reads and preserves every field below the moment a record carries it
-(`adapters/ingestion_jsonl.py` passes `query` / `qtype` / `rcode` and
-`ja3` / `ja3s` / `ja4` / `server_name` / `sni_length` / `sni_entropy`
-straight through), and `FlowEvent` already has the slots. Nothing here needs
-rewriting when they start arriving — the detectors simply gain signal.
+The default `legacy-m1d` profile preserves the frozen historical bytes and
+therefore leaves the raw fields below as `None`. The opt-in `detector-v2`
+profile supplies them when Zeek observed them. Neither the producer nor adapter
+invents missing values.
 
 | field | unlocks |
 |---|---|
-| `uid` (top level) | reliable flow correlation for flows with no dns/tls/http block |
-| `src_port` | source-port based scan/exfil heuristics |
-| `service` | protocol-aware detection |
-| `dns.query` | **DGA classification**, which cannot run without the raw name. DNS tunnelling already works without it, on derived metadata |
-| `dns.qtype`, `dns.rcode` | richer DNS evidence; neither detector requires them |
-| `tls.server_name` (or `sni_length` / `sni_entropy`) | the encrypted-malware **metadata** path — handshake analysis only, nothing is decrypted |
-| `tls.ja3`, `tls.ja3s`, `tls.ja4` | **JA3/JA4 fingerprint matching** for encrypted malware — only the `has_ja3` / `has_ja3s` booleans arrive today |
-| `http.host`, `http.uri`, `http.user_agent` | C2-over-HTTP heuristics on raw strings |
+| `uid` (top level) | reliable flow correlation for flows with no dns/tls/http block; supplied by `detector-v2` |
+| `src_port` | source-port based scan/exfil heuristics; supplied by `detector-v2` |
+| `service` | protocol-aware detection; supplied when Zeek observed it |
+| `dns.query` | **DGA classification** and analyst evidence; supplied when observed. DNS tunnelling still qualifies on derived metadata |
+| `dns.qtype`, `dns.rcode`, numeric code companions | richer DNS evidence; supplied when observed |
+| `tls.server_name` (plus derived `sni_length` / `sni_entropy`) | encrypted-malware metadata path; supplied when observed, without decryption |
+| `tls.ja3`, `tls.ja3s` | fingerprint matching; supplied when the pinned Zeek logs contain them |
+| `tls.ja4` | exact source value from the qualified JA4 runtime through detector-v2; `None` for missing/unset/empty source and never derived |
+| `http.host`, `http.uri`, `http.user_agent`, `http.method` | C2-over-HTTP evidence; supplied when observed |
 
 An encoded placeholder is never a substitute for the raw string: a decoded
 version number or a boolean says nothing a classifier or a fingerprint match
 can use.
 
-Also worth noting: ingestion's `conn_state` encoding has **no entry for Zeek's
-`S0`** (connection attempt, no reply). `S0` therefore encodes to `0` and is
-indistinguishable from "unknown" here. `S0` is a primary port-scan signal, so a
-scan detector cannot rely on `conn_state` alone until this is addressed
-upstream.
-
-None of these require any change from us to `injestion_core/`, which is
-read-only and owned by another team.
+The legacy numeric `conn_state_encoded` still has no distinct `S0` entry, but
+`detector-v2` carries raw `conn_state="S0"`; consumers must prefer the raw value.
 
 ---
 

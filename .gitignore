@@ -30,6 +30,7 @@ frontend/dist/
 artifacts/
 zeek_output/
 *.pcap
+!ingestion/tests/fixtures/pcap/*.pcap
 run/
 benchmark_report.json
 
@@ -40,6 +41,20 @@ benchmark_report.json
 # costs nothing:
 #     python tools/synth_flows.py -o data/features.jsonl
 data/
+
+# --- PCAP dataset binaries -------------------------------------------
+# Keep the deterministic registry and tooling versioned while excluding
+# captures, digests, derived replay output, and transient workspaces.
+pcap_dataset/raw/*.pcap
+pcap_dataset/raw/*.pcapng
+pcap_dataset/raw/*.sha256
+pcap_dataset/output/*
+pcap_dataset/.tmp*/
+!pcap_dataset/metadata.json
+!pcap_dataset/ingest.py
+!pcap_dataset/README.md
+!pcap_dataset/raw/.gitkeep
+!pcap_dataset/output/.gitkeep
 
 # --- Legacy snapshot folders, superseded by the monorepo layout.
 # Their content is fully recoverable from git (see docs/REPO_HISTORY.md).
