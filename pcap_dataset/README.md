@@ -52,7 +52,7 @@ closed before ingestion writes an output.
 
 ## Threat classes (enforced)
 
-`port_scan, ddos, dns_tunnelling, encrypted_malware, data_exfiltration, c2_beaconing, dga_domain` plus `benign` negatives. Dataset defaults to `--feature-profile detector-v2` so raw fields survive: `dns.query`/`qtype`/`rcode`, `tls.ja3`/`ja3s`/`ja4`/`server_name`, `http.host`/`uri`/`user_agent`, top-level `uid`/`timestamp`/`src_port`/`service`/`conn_state`. Add `--feature-profile legacy` only for frozen M1D byte-for-byte comparison. Add `--ja4` when the PCAP contains TLS handshakes and the qualified `sih-zeek-ja4` image is built; otherwise `tls.ja4` stays absent rather than faked.
+`port_scan, ddos, dns_tunnelling, encrypted_malware, data_exfiltration, c2_beaconing, dga_domain` plus `benign` negatives. Dataset defaults to `--feature-profile detector-v2` so raw fields survive: `dns.query`/`qtype`/`rcode`, `tls.server_name`, `http.host`/`uri`/`user_agent`, top-level `uid`/`timestamp`/`src_port`/`service`/`conn_state`. Add `--feature-profile legacy-m1d` only for frozen M1D byte-for-byte comparison. `tls.ja3`/`ja3s`/`ja4` are transported when the runtime emits them, but neither qualified runtime emits JA3/JA3S today (base `8.0.10` installs no fingerprint packages; the JA4 image adds only `ssl.log.ja4`), so real output carries them as `null` — fixtures and tests inject them synthetically. Add `--ja4` when the PCAP contains TLS handshakes and the qualified `sih-zeek-ja4` image is built; otherwise `tls.ja4` stays absent rather than faked. The encrypted-malware signature path needs an emitting runtime plus a local feed before it fires on real captures.
 
 ## Fixtures: why the three demo replays share bytes
 

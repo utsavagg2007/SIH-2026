@@ -85,3 +85,63 @@ def test_ingest_is_idempotent_and_writes_valid_bindings(tmp_path, monkeypatch):
 def test_invalid_label_is_rejected_before_processing(tmp_path):
     with pytest.raises(SystemExit, match="label must be one of"):
         ingest.ingest_one(FIXTURE, "not-a-threat-class", tmp_path)
+
+
+def test_unknown_feature_profile_rejected_before_processing(tmp_path):
+    with pytest.raises(SystemExit, match="unsupported feature profile"):
+        ingest.ingest_one(FIXTURE, "benign", tmp_path, feature_profile="legacy")
+
+
+def _fake_pipeline(monkeypatch):
+    calls = []
+
+    def fake_run_pipeline(*args, **kwargs):
+        calls.append((args, kwargs))
+        Path(args[2]).write_text('{"flow_id":"fixture"}\n', encoding="utf-8")
+        return []
+
+    monkeypatch.setitem(
+        sys.modules, "pipeline", types.SimpleNamespace(run_pipeline=fake_run_pipeline)
+    )
+    return calls
+
+
+def test_legacy_m1d_profile_reaches_pipeline(tmp_path, monkeypatch):
+    dataset_root = tmp_path / "dataset"
+    dataset_root.mkdir()
+    (dataset_root / "metadata.json").write_text('{"replays": {}}\n', encoding="utf-8")
+    calls = _fake_pipeline(monkeypatch)
+
+    entry = ingest.ingest_one(
+        FIXTURE, "benign", dataset_root, feature_profile="legacy-m1d"
+    )
+    assert calls[0][1]["feature_profile"] == "legacy-m1d"
+    assert entry["feature_profile"] == "legacy-m1d"
+    assert entry["use_ja4"] is False
+
+
+def test_replay_reuse_is_configuration_aware(tmp_path, monkeypatch):
+    dataset_root = tmp_path / "dataset"
+    dataset_root.mkdir()
+    (dataset_root / "metadata.json").write_text('{"replays": {}}\n', encoding="utf-8")
+    calls = _fake_pipeline(monkeypatch)
+
+    first = ingest.ingest_one(FIXTURE, "benign", dataset_root)
+    assert first["feature_profile"] == "detector-v2"
+
+    with pytest.raises(SystemExit, match="already exists with"):
+        ingest.ingest_one(
+            FIXTURE, "benign", dataset_root, feature_profile="legacy-m1d"
+        )
+    with pytest.raises(SystemExit, match="already exists with"):
+        ingest.ingest_one(FIXTURE, "benign", dataset_root, use_ja4=True)
+    assert len(calls) == 1  # rejected requests never reached the pipeline
+
+    forced = ingest.ingest_one(
+        FIXTURE, "benign", dataset_root, feature_profile="legacy-m1d", force=True
+    )
+    assert len(calls) == 2
+    assert forced["feature_profile"] == "legacy-m1d"
+    stored = ingest._load_metadata(dataset_root)["replays"][first["replay_id"]]
+    assert stored["feature_profile"] == "legacy-m1d"
+    assert stored["use_ja4"] is False

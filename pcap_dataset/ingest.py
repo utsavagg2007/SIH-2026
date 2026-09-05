@@ -53,9 +53,11 @@ ALLOWED_LABELS = {
 }
 
 # pcap_dataset defaults to detector-v2 so raw fields (query, ja3/s, server_name, S0)
-# survive to Detection. The frozen legacy M1D default remains available via
-# --feature-profile legacy for byte-for-byte comparison.
+# survive to Detection. The frozen legacy M1D projection remains available via
+# --feature-profile legacy-m1d for byte-for-byte comparison.
 DATASET_FEATURE_PROFILE = "detector-v2"
+# Must stay identical to ingestion.pipeline FEATURE_PROFILES vocabulary.
+FEATURE_PROFILES = ("legacy-m1d", "detector-v2")
 JA4_RUNTIME_LOCK = INGESTION_ROOT / "runtime" / "ja4-runtime.lock"
 
 # ---------------------------------------------------------------------------
@@ -106,6 +108,20 @@ def _load_metadata(dataset_root: Path) -> dict:
             sys.exit(
                 f"ERROR: invalid dataset metadata {meta_path}: replay {replay_id!r} features_path must stay under output/"
             )
+        # Configuration the replay was produced with. Entries written before
+        # these fields existed came from the frozen legacy default without JA4.
+        profile = entry.get("feature_profile", "legacy-m1d")
+        if profile not in FEATURE_PROFILES:
+            sys.exit(
+                f"ERROR: invalid dataset metadata {meta_path}: replay {replay_id!r} has invalid feature_profile"
+            )
+        entry["feature_profile"] = profile
+        ja4_flag = entry.get("use_ja4", False)
+        if not isinstance(ja4_flag, bool):
+            sys.exit(
+                f"ERROR: invalid dataset metadata {meta_path}: replay {replay_id!r} has invalid use_ja4"
+            )
+        entry["use_ja4"] = ja4_flag
     return data
 
 
@@ -164,6 +180,12 @@ def ingest_one(
     if label not in ALLOWED_LABELS:
         sys.exit(f"ERROR: label must be one of {sorted(ALLOWED_LABELS)} (got {label!r})")
 
+    if feature_profile not in FEATURE_PROFILES:
+        sys.exit(
+            f"ERROR: unsupported feature profile {feature_profile!r}; "
+            f"expected one of {', '.join(FEATURE_PROFILES)}."
+        )
+
     if not pcap_path.is_file():
         sys.exit(f"ERROR: PCAP not found: {pcap_path}")
 
@@ -214,9 +236,21 @@ def ingest_one(
             )
             break
 
-    # Idempotency: same pcap+label → same replay_id
+    # Idempotency: same pcap+label+configuration → same replay_id.
+    # A stored replay produced under a different feature profile or JA4 runtime
+    # must never be silently reused: its bytes would not honor this request.
     if replay_id in meta["replays"] and not force:
         existing = meta["replays"][replay_id]
+        stored_profile = existing.get("feature_profile", "legacy-m1d")
+        stored_ja4 = existing.get("use_ja4", False)
+        if stored_profile != feature_profile or stored_ja4 != use_ja4:
+            sys.exit(
+                f"ERROR: replay {replay_id} already exists with "
+                f"feature_profile={stored_profile} use_ja4={stored_ja4}, "
+                f"but requested feature_profile={feature_profile} use_ja4={use_ja4}. "
+                "Reusing it would silently mix runtimes; use --force to explicitly "
+                "rebuild this replay with the requested configuration."
+            )
         # If output already exists and matches sha, skip re-processing
         if features_path.exists() and meta_path.exists():
             print(f"[=] Replay {replay_id} already exists for {pcap_path.name} label={label} — idempotent, skipping. Use --force to re-run.")
@@ -226,7 +260,7 @@ def ingest_one(
     replay_dir.mkdir(parents=True, exist_ok=True)
     created_at = _utc_now_iso()
 
-    # Run ingestion pipeline (legacy features) via direct import to avoid extra subprocess
+    # Run ingestion pipeline via direct import to avoid extra subprocess
     # We create a temp Zeek workspace so pcap_dataset/output stays clean (only features+meta)
     tmp_zeek = tempfile.mkdtemp(prefix="pcap_dataset_zeek_", dir=str(dataset_root))
     try:
@@ -304,6 +338,8 @@ def ingest_one(
         "label": label,
         "created_at": created_at,
         "features_path": str(features_path.relative_to(dataset_root)),
+        "feature_profile": feature_profile,
+        "use_ja4": use_ja4,
     }
     _save_metadata_atomic(dataset_root, meta)
 
@@ -324,9 +360,9 @@ def main() -> None:
     ap.add_argument("--window", type=float, default=60.0, help="Sliding window seconds for pipeline (default 60)")
     ap.add_argument(
         "--feature-profile",
-        choices=("legacy", "detector-v2"),
+        choices=FEATURE_PROFILES,
         default=DATASET_FEATURE_PROFILE,
-        help="Feature contract: detector-v2 (default, carries raw query/ja3/sni) or legacy M1D frozen",
+        help="Feature contract: detector-v2 (default, carries raw query/ja3/sni) or legacy-m1d frozen",
     )
     ap.add_argument("--ja4", action="store_true", help="Use the pinned, locally qualified JA4 Zeek runtime (requires built sih-zeek-ja4 image)")
     ap.add_argument("--force", action="store_true", help="Re-run even if replay_id already exists")
