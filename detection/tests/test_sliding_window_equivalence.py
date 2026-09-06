@@ -24,6 +24,7 @@ import pytest
 
 from detection_core.aggregators import (
     CLASSIFIED_CONN_STATES,
+    COMPLETE_CONN_STATES,
     DEFAULT_ESTABLISHED_RESP_BYTES,
     INCOMPLETE_CONN_STATES,
     ActivityWindow,
@@ -129,6 +130,33 @@ class ReferenceWindow:
             return 0.0
         return self.established_endpoint_count() / self.unique_endpoint_count()
 
+    def _classified_endpoints(self) -> set[tuple[str, int | None]]:
+        return {
+            (e.dst_ip, e.dst_port)
+            for e in self._events
+            if e.conn_state in CLASSIFIED_CONN_STATES
+        }
+
+    def _complete_endpoints(self) -> set[tuple[str, int | None]]:
+        return {
+            (e.dst_ip, e.dst_port)
+            for e in self._events
+            if e.conn_state in COMPLETE_CONN_STATES
+        }
+
+    def endpoint_conn_state_coverage(self) -> float:
+        if not self._events:
+            return 0.0
+        return len(self._classified_endpoints()) / self.unique_endpoint_count()
+
+    def endpoint_incomplete_fraction(self) -> float:
+        if not self._events:
+            return 0.0
+        # An endpoint is incomplete when it carried state and none of it
+        # completed - the set difference, spelled out.
+        incomplete = self._classified_endpoints() - self._complete_endpoints()
+        return len(incomplete) / self.unique_endpoint_count()
+
     def incomplete_fraction(self) -> float:
         if not self._events:
             return 0.0
@@ -197,6 +225,12 @@ def assert_equivalent(fast: ActivityWindow, reference: ReferenceWindow, context:
     ), context
     assert fast.endpoint_established_fraction() == (
         reference.endpoint_established_fraction()
+    ), context
+    assert fast.endpoint_conn_state_coverage() == (
+        reference.endpoint_conn_state_coverage()
+    ), context
+    assert fast.endpoint_incomplete_fraction() == (
+        reference.endpoint_incomplete_fraction()
     ), context
     # Every boundary, including whichever one this window pinned: the O(1)
     # counter and the scan must agree, and the scan must still answer the

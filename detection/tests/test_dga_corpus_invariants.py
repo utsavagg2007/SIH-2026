@@ -152,6 +152,189 @@ def test_the_builder_accepts_the_documented_shape(tmp_path):
     out = tmp_path / "out.csv"
     _write_csv(rows, out)
 
-    written = list(csv.DictReader(out.open(encoding="utf-8", newline="")))
+    with out.open(encoding="utf-8", newline="") as handle:
+        written = list(csv.DictReader(handle))
     assert len(written) == 3
     assert {r["family"] for r in written if r["label"] == "0"} == {BENIGN_FAMILY}
+
+
+# --------------------------------------------------------------------------
+# Cross-family ambiguity: a domain under two families belongs to neither
+# --------------------------------------------------------------------------
+#
+# `family` is not a label in this corpus - it is the *grouping key* the
+# family-disjoint split is built on. So an arbitrary attribution is worse than
+# a dropped row: it can place a domain in the train fold under a family it may
+# not belong to while its real family is held out for test, which leaks across
+# the split every published metric rests on.
+#
+# The builder used to award such a domain to whichever family iterated first,
+# so the corpus depended on the order of `--families` - while the module
+# docstring said these rows were dropped. These tests pin the docstring's
+# reading, order-independently.
+
+
+SHARED = "shared-by-two.com"
+
+
+def _build_with_families(monkeypatch, families, per_family=None):
+    """Run `build()` over stubbed family fetches - no network, no other source.
+
+    Only the DGA side is exercised: the benign sources are stubbed empty, so
+    what comes back is exactly the family attribution under test.
+    """
+    from detection_core.ml.dga.data import build_dataset as bd
+
+    per_family = per_family or {}
+
+    monkeypatch.setattr(bd, "fetch_dga_family", lambda f, **kw: list(per_family[f]))
+    monkeypatch.setattr(bd, "fetch_benign", lambda *a, **kw: [])
+    monkeypatch.setattr(bd, "fetch_benign_tail", lambda *a, **kw: [])
+    monkeypatch.setattr(bd, "fetch_cdn", lambda *a, **kw: ([], {}))
+
+    rows, report = bd.build(
+        tranco_n=0,
+        families=list(families),
+        per_family_cap=100,
+        seed=42,
+        tranco_id=None,
+        timeout=5.0,
+        balance=False,
+    )
+    return rows, report
+
+
+CORPORA = {
+    "alpha": [SHARED, "alpha-only-one.com", "alpha-only-two.com"],
+    "beta": [SHARED, "beta-only-one.com"],
+    "gamma": ["gamma-only-one.com"],
+}
+
+
+def test_a_domain_claimed_by_two_families_is_dropped(monkeypatch):
+    """Not awarded to the first claimant - dropped from both."""
+    rows, report = _build_with_families(monkeypatch, ["alpha", "beta", "gamma"], CORPORA)
+
+    domains = {domain for domain, _label, _family, _source in rows}
+    assert SHARED not in domains, (
+        "a domain under two families has no defensible attribution"
+    )
+    # Everything unambiguous survives - the drop is surgical, not a purge.
+    assert domains == {
+        "alpha-only-one.com",
+        "alpha-only-two.com",
+        "beta-only-one.com",
+        "gamma-only-one.com",
+    }
+    assert report["cross_family_dropped"] == 1
+
+
+@pytest.mark.parametrize(
+    "order",
+    [
+        ["alpha", "beta", "gamma"],
+        ["beta", "alpha", "gamma"],
+        ["gamma", "beta", "alpha"],
+        ["beta", "gamma", "alpha"],
+    ],
+)
+def test_the_corpus_does_not_depend_on_family_order(monkeypatch, order):
+    """The load-bearing property: same request, any order, same corpus.
+
+    Under "first family wins" this failed outright - ``alpha`` first put
+    ``SHARED`` in ``alpha``, ``beta`` first put it in ``beta``.
+    """
+    rows, _ = _build_with_families(monkeypatch, order, CORPORA)
+
+    assert {(domain, family) for domain, _label, family, _source in rows} == {
+        ("alpha-only-one.com", "alpha"),
+        ("alpha-only-two.com", "alpha"),
+        ("beta-only-one.com", "beta"),
+        ("gamma-only-one.com", "gamma"),
+    }
+
+
+def test_a_domain_claimed_by_every_family_is_dropped_from_all(monkeypatch):
+    """The degenerate case: no family has a better claim than any other."""
+    corpora = {
+        "alpha": [SHARED, "alpha-only.com"],
+        "beta": [SHARED],
+        "gamma": [SHARED, "gamma-only.com"],
+    }
+    rows, report = _build_with_families(monkeypatch, ["alpha", "beta", "gamma"], corpora)
+
+    assert {d for d, _l, _f, _s in rows} == {"alpha-only.com", "gamma-only.com"}
+    assert report["cross_family_dropped"] == 1
+    # `beta` contributed nothing but is still reported, at zero, rather than
+    # vanishing from the accounting.
+    assert report["per_family_kept"]["beta"] == 0
+
+
+def test_the_per_family_cap_is_measured_after_ambiguous_rows_are_dropped(monkeypatch):
+    """A dropped row must not consume a slot the cap was counting.
+
+    Otherwise an ambiguous domain would still cost the family a row - the
+    attribution bug replaced by a quota bug.
+    """
+    from detection_core.ml.dga.data import build_dataset as bd
+
+    corpora = {
+        "alpha": [SHARED, "a1.com", "a2.com", "a3.com"],
+        "beta": [SHARED],
+    }
+    monkeypatch.setattr(bd, "fetch_dga_family", lambda f, **kw: list(corpora[f]))
+    monkeypatch.setattr(bd, "fetch_benign", lambda *a, **kw: [])
+    monkeypatch.setattr(bd, "fetch_benign_tail", lambda *a, **kw: [])
+    monkeypatch.setattr(bd, "fetch_cdn", lambda *a, **kw: ([], {}))
+
+    rows, report = bd.build(
+        tranco_n=0,
+        families=["alpha", "beta"],
+        per_family_cap=3,
+        seed=42,
+        tranco_id=None,
+        timeout=5.0,
+        balance=False,
+    )
+
+    assert report["per_family_kept"]["alpha"] == 3
+    assert {d for d, _l, _f, _s in rows} == {"a1.com", "a2.com", "a3.com"}
+
+
+def test_a_family_listed_twice_is_fetched_and_counted_once(monkeypatch):
+    """``--families alpha,alpha`` is one family, not two."""
+    calls: list[str] = []
+
+    from detection_core.ml.dga.data import build_dataset as bd
+
+    def counting_fetch(family, **kwargs):
+        calls.append(family)
+        return ["a1.com", "a2.com"]
+
+    monkeypatch.setattr(bd, "fetch_dga_family", counting_fetch)
+    monkeypatch.setattr(bd, "fetch_benign", lambda *a, **kw: [])
+    monkeypatch.setattr(bd, "fetch_benign_tail", lambda *a, **kw: [])
+    monkeypatch.setattr(bd, "fetch_cdn", lambda *a, **kw: ([], {}))
+
+    rows, report = bd.build(
+        tranco_n=0,
+        families=["alpha", "alpha"],
+        per_family_cap=100,
+        seed=42,
+        tranco_id=None,
+        timeout=5.0,
+        balance=False,
+    )
+
+    assert calls == ["alpha"], "a repeated family must not be fetched twice"
+    assert report["cross_family_dropped"] == 0
+    assert {d for d, _l, _f, _s in rows} == {"a1.com", "a2.com"}
+
+
+def test_an_unambiguous_corpus_reports_nothing_dropped(monkeypatch):
+    """The ordinary case stays quiet - and the counter means what it says."""
+    corpora = {"alpha": ["a1.com"], "beta": ["b1.com"]}
+    rows, report = _build_with_families(monkeypatch, ["alpha", "beta"], corpora)
+
+    assert report["cross_family_dropped"] == 0
+    assert len(rows) == 2

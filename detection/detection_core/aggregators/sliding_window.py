@@ -208,6 +208,14 @@ class ActivityWindow:
         # :meth:`endpoint_established_fraction`.
         self._endpoint_counts: dict[tuple[str, int | None], int] = {}
         self._established_endpoints: dict[tuple[str, int | None], int] = {}
+        # The same endpoint scoping applied to ``conn_state``: which endpoints
+        # carry a classified state at all, and which of those the responder
+        # demonstrably completed an exchange with. Per-flow counters answer
+        # the same questions weighted by traffic volume, which lets one
+        # chatty endpoint speak for every other - see
+        # :meth:`endpoint_conn_state_coverage`.
+        self._classified_endpoints: dict[tuple[str, int | None], int] = {}
+        self._complete_endpoints: dict[tuple[str, int | None], int] = {}
         # Distinct ports at or below ``service_port_max``, maintained rather
         # than counted per call. Stays 0 when no boundary was pinned.
         self._service_port_total = 0
@@ -293,6 +301,10 @@ class ActivityWindow:
         self._increment(self._endpoint_counts, endpoint)
         if established:
             self._increment(self._established_endpoints, endpoint)
+        if observation.conn_state in CLASSIFIED_CONN_STATES:
+            self._increment(self._classified_endpoints, endpoint)
+            if observation.conn_state in COMPLETE_CONN_STATES:
+                self._increment(self._complete_endpoints, endpoint)
 
         self._increment(self._dst_ip_counts, observation.dst_ip)
         if observation.dst_port is not None:
@@ -341,6 +353,10 @@ class ActivityWindow:
         self._decrement(self._endpoint_counts, endpoint)
         if established:
             self._decrement(self._established_endpoints, endpoint)
+        if observation.conn_state in CLASSIFIED_CONN_STATES:
+            self._decrement(self._classified_endpoints, endpoint)
+            if observation.conn_state in COMPLETE_CONN_STATES:
+                self._decrement(self._complete_endpoints, endpoint)
 
         self._decrement(self._dst_ip_counts, observation.dst_ip)
         if observation.dst_port is not None:
@@ -510,6 +526,59 @@ class ActivityWindow:
         if not self._endpoint_counts:
             return 0.0
         return len(self._established_endpoints) / len(self._endpoint_counts)
+
+    def endpoint_conn_state_coverage(self) -> float:
+        """Share of distinct **endpoints** carrying a classified state.
+
+        The ``conn_state`` counterpart to
+        :meth:`endpoint_established_fraction`, and what a scan detector should
+        read before trusting :meth:`endpoint_incomplete_fraction` -
+        :meth:`conn_state_coverage` is not, for the same reason
+        :meth:`established_fraction` was not.
+
+        The per-flow reading divides by the whole window, so a couple of
+        answered browsing endpoints carrying many flows each can push it past
+        any coverage floor while the swept endpoints themselves carry no
+        state at all. That is not "this window is labelled"; it is "something
+        unrelated in this window is labelled". Under the frozen ``legacy-m1d``
+        profile - which flattens ``S0`` to ``None`` - it is the *scan* that
+        goes unlabelled and the browsing that does not, so the per-flow
+        reading grew with exactly the traffic that was not being asked about.
+
+        Scoping to endpoints removes the leverage: browsing contributes the
+        two or three endpoints it talks to however many flows it sends them,
+        and a sweep contributes one endpoint per port or per host. Coverage
+        then measures whether the *candidate* traffic is labelled.
+
+        **Fail-open.** 0.0 on an empty window, and 0.0 when nothing carries a
+        classified state - the reading that routes the decision to the byte
+        proxy rather than concluding from evidence that is not there.
+        """
+        if not self._endpoint_counts:
+            return 0.0
+        return len(self._classified_endpoints) / len(self._endpoint_counts)
+
+    def endpoint_incomplete_fraction(self) -> float:
+        """Share of distinct **endpoints** that carried state and never completed.
+
+        An endpoint counts as incomplete when it holds at least one classified
+        state and **no** :data:`COMPLETE_CONN_STATES` observation: if the
+        responder ever completed an exchange there, that endpoint engaged,
+        whatever else was attempted against it. Deliberately the conservative
+        reading - it can only ever lower this fraction, never raise it, so it
+        cannot manufacture a scan out of a served endpoint.
+
+        Endpoints with no classified state contribute to the denominator but
+        never to the numerator, exactly as unlabelled flows do in
+        :meth:`incomplete_fraction`. Pair this with
+        :meth:`endpoint_conn_state_coverage` before drawing a conclusion.
+
+        0.0 on an empty window.
+        """
+        if not self._endpoint_counts:
+            return 0.0
+        incomplete = len(self._classified_endpoints) - len(self._complete_endpoints)
+        return incomplete / len(self._endpoint_counts)
 
     def unique_src_ip_count(self) -> int:
         """Distinct source hosts, as a number - what a flood grows."""

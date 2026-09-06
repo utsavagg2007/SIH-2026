@@ -21,7 +21,10 @@ capture (CIC-IDS2017 Monday), where it produced 1,636 false positives:
   reply side of ordinary browsing, not an enumeration.
 * **The responder has to be refusing.** A scan's connections do not complete;
   a browsing session's do. Measured from ``conn_state`` when ingestion
-  supplies it, and from responder payload bytes when it does not.
+  supplies it for the endpoints being judged, and from responder payload
+  bytes when it does not. Both readings are scoped per ``(host, port)``
+  endpoint rather than per flow, so answered browsing sharing a window with a
+  sweep can neither dilute the sweep's evidence nor stand in for it.
 
 Rolling per-source state is computed here (via ``aggregators``), never taken
 from ingestion's global window features.
@@ -103,7 +106,10 @@ class PortScanConfig:
     max_established_fraction: float = 0.20
 
     #: Used instead of the byte proxy once ``conn_state`` actually arrives:
-    #: the share of the window that failed to establish must reach this.
+    #: the share of the window's **endpoints** that failed to establish must
+    #: reach this. Endpoint-scoped for the same reason
+    #: :attr:`max_established_fraction` is - see
+    #: :meth:`ActivityWindow.endpoint_incomplete_fraction`.
     #:
     #: On UNSW-NB15 - the one real dataset carrying a usable connection state -
     #: the separation is one-sided and wide. Across the **1 171** benign
@@ -117,10 +123,18 @@ class PortScanConfig:
     #: a per-window test feeding a per-episode result, not a per-flow verdict.
     min_incomplete_fraction: float = 0.05
 
-    #: How much of a window must carry a ``conn_state`` before it is trusted
-    #: over the byte proxy. Ingestion's ``detector-v2`` profile carries the
-    #: raw string, so this path runs there; the frozen ``legacy-m1d`` profile
-    #: supplies none and falls to the proxy. See ``CLASSIFIED_CONN_STATES``.
+    #: How many of a window's **endpoints** must carry a classified
+    #: ``conn_state`` before it is trusted over the byte proxy. Ingestion's
+    #: ``detector-v2`` profile carries the raw string, so this path runs
+    #: there; the frozen ``legacy-m1d`` profile supplies none and falls to the
+    #: proxy. See ``CLASSIFIED_CONN_STATES``.
+    #:
+    #: Measured over endpoints rather than flows so that a window can only
+    #: take the ``conn_state`` branch on the strength of states attached to
+    #: the endpoints being judged. A per-flow reading let a couple of chatty
+    #: labelled endpoints carry the whole window over this floor while every
+    #: swept endpoint in it was unlabelled - see
+    #: :meth:`ActivityWindow.endpoint_conn_state_coverage`.
     min_conn_state_coverage: float = 0.50
 
     def __post_init__(self) -> None:
@@ -196,7 +210,14 @@ class PortScanDetector(Detector):
     # instead of concluding "answered"; and the proxy is scoped per endpoint,
     # so answered browsing sharing the window cannot dilute a sweep below the
     # gate. Alerts carry two new evidence keys - see `_build_alert`.
-    version = "0.3.1"
+    # 0.3.2: the third case of the same defect, and the last one left. The
+    # conn_state branch was still selected on a *per-flow* coverage reading,
+    # so under `legacy-m1d` - where a sweep arrives unlabelled and browsing
+    # arrives SF - enough browsing handed the verdict to a branch holding no
+    # evidence about the sweep, which then read 0.0 incomplete as "answered".
+    # Coverage and the incomplete share are now endpoint-scoped, matching the
+    # proxy. Two further evidence keys; see `_build_alert`.
+    version = "0.3.2"
 
     def __init__(self, config: PortScanConfig | None = None) -> None:
         self.config = config or PortScanConfig()
@@ -359,9 +380,9 @@ class PortScanDetector(Detector):
 
         Two ways to read it, best available first:
 
-        * **``conn_state``** - authoritative, used once enough of the window
-          carries a *classified* state. ``S0`` (attempt, no reply) is the
-          classic scan state. Coverage counts only states that actually
+        * **``conn_state``** - authoritative, used once enough of the window's
+          *endpoints* carry a *classified* state. ``S0`` (attempt, no reply)
+          is the classic scan state. Coverage counts only states that actually
           answer "did the responder engage" - ``OTH``, an unrecognised value
           and an empty string are **uncovered**, not answered, so they route
           the decision to the proxy below instead of concluding from nothing.
@@ -371,11 +392,19 @@ class PortScanDetector(Detector):
           ``ingestion/src/features/flow.rs``). Nothing came back means
           nothing was serving.
 
-        The proxy is scoped **per endpoint**, not per flow - see
-        :meth:`ActivityWindow.endpoint_established_fraction`. Divided across
-        the whole window it measured traffic volume rather than scan
-        evidence, and a handful of answered browsing flows could dilute a
-        real sweep below the gate.
+        **Both readings are scoped per endpoint, not per flow** - see
+        :meth:`ActivityWindow.endpoint_established_fraction` and
+        :meth:`ActivityWindow.endpoint_conn_state_coverage`. Divided across
+        the whole window either one measures traffic volume rather than scan
+        evidence, and answered browsing sharing the window could then decide
+        the verdict for a sweep it has nothing to do with. That was true of
+        the byte proxy first, and separately of the ``conn_state`` branch:
+        under the frozen ``legacy-m1d`` profile a real sweep arrives
+        *unlabelled* while ordinary browsing arrives ``SF``, so enough
+        browsing pushed per-flow coverage over the floor, handed the verdict
+        to a branch that had no evidence about the sweep at all, and read the
+        resulting 0.0 incomplete share as "the responder answered". Thirty SF
+        browsing flows were enough to silence a thirty-port sweep outright.
 
         **A capture with no reverse direction is not penalised.** With no
         responder bytes anywhere the measured share is 0.0, which is below
@@ -384,13 +413,25 @@ class PortScanDetector(Detector):
         exists and asks for none when it does not - which is the only reading
         compatible with a genuinely unidirectional deployment.
 
-        **This branch never silences a window the proxy would have passed.**
-        The ``conn_state`` path is taken only on a window that genuinely
-        carries classified states; everything else falls through to the proxy.
+        **The ``conn_state`` branch only ever decides on evidence about the
+        endpoints it is deciding about.** It is taken only when the window's
+        endpoints themselves carry classified states; a window whose swept
+        endpoints are unlabelled falls through to the proxy however much
+        labelled traffic sits beside them. What it may still do - and is
+        meant to do - is suppress a window whose own endpoints are labelled
+        complete: there ingestion is asserting those exchanges finished, and
+        preferring that assertion to the byte proxy is the entire reason the
+        branch exists.
         """
         config = self.config
-        if window.conn_state_coverage() >= config.min_conn_state_coverage:
-            return window.incomplete_fraction() >= config.min_incomplete_fraction
+        if (
+            window.endpoint_conn_state_coverage()
+            >= config.min_conn_state_coverage
+        ):
+            return (
+                window.endpoint_incomplete_fraction()
+                >= config.min_incomplete_fraction
+            )
         return (
             window.endpoint_established_fraction()
             <= config.max_established_fraction
@@ -456,7 +497,10 @@ class PortScanDetector(Detector):
     ) -> ThreatAlert:
         span = window.time_span() or (flow.timestamp, flow.timestamp)
         coverage = window.conn_state_coverage()
-        by_conn_state = coverage >= self.config.min_conn_state_coverage
+        endpoint_coverage = window.endpoint_conn_state_coverage()
+        # The branch `_responder_refused` actually took - endpoint-scoped, so
+        # the reported evidence names the reasoning that ran.
+        by_conn_state = endpoint_coverage >= self.config.min_conn_state_coverage
 
         return ThreatAlert(
             event_start=epoch_to_utc(span[0]),
@@ -492,8 +536,14 @@ class PortScanDetector(Detector):
                 # can see whether it ran on real connection states or on the
                 # byte proxy that stands in for them today.
                 "responder_evidence": "conn_state" if by_conn_state else "resp_bytes",
+                # Per-flow, kept for continuity with earlier alerts.
                 "conn_state_coverage": round(coverage, 4),
                 "incomplete_fraction": round(window.incomplete_fraction(), 4),
+                # Per-endpoint - what the conn_state branch actually gates on.
+                "endpoint_conn_state_coverage": round(endpoint_coverage, 4),
+                "endpoint_incomplete_fraction": round(
+                    window.endpoint_incomplete_fraction(), 4
+                ),
                 # Per-flow, kept for continuity with earlier alerts.
                 "established_fraction": round(window.established_fraction(), 4),
                 # Per-endpoint - what the byte proxy actually gates on.

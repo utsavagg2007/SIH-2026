@@ -1,7 +1,7 @@
-"""Responder-engagement gate: the two ways it used to silence a real scan.
+"""Responder-engagement gate: the three ways it used to silence a real scan.
 
 The existing port_scan tests exercise ``S0`` and ``SF`` and a scan-only
-window, so both of these passed straight through them:
+window, so all three of these passed straight through them:
 
 * a window whose states are all ``OTH`` (or unrecognised, or empty) reported
   full ``conn_state`` coverage and a zero incomplete share - "the responder
@@ -9,10 +9,20 @@ window, so both of these passed straight through them:
   would have caught outright;
 * the byte proxy divided by the whole per-source window, so ordinary answered
   browsing sharing that window diluted the reading until a real scan fell
-  below the gate.
+  below the gate;
+* **and the choice of branch was itself a per-flow reading.** Under the frozen
+  ``legacy-m1d`` profile a sweep arrives unlabelled (``S0`` flattens to
+  ``None``) while ordinary browsing arrives ``SF``, so enough browsing pushed
+  per-flow coverage over ``min_conn_state_coverage`` and handed the verdict to
+  a branch holding no evidence about the sweep at all - which then read its
+  0.0 incomplete share as "the responder answered". Fixing the first two left
+  this one: the gate had stopped mismeasuring, but was still asking the wrong
+  half of the window.
 
-The invariant both halves defend: **the conn_state branch must never silence a
-scan the byte proxy would catch.**
+The invariant all three halves defend: **evidence may only suppress a scan
+when it is evidence about the endpoints being scanned.** Traffic to unrelated
+endpoints has no vote, whether it votes with bytes, with states, or by
+deciding which of the two gets read.
 """
 
 from __future__ import annotations
@@ -271,3 +281,246 @@ def test_the_state_sets_partition_cleanly():
     assert "OTH" not in CLASSIFIED_CONN_STATES
     assert "S0" in INCOMPLETE_CONN_STATES
     assert "SF" in COMPLETE_CONN_STATES
+
+
+# --------------------------------------------------------------------------
+# 4. A classified state on unrelated endpoints must not decide the verdict
+# --------------------------------------------------------------------------
+#
+# The residual case, and the reason `min_conn_state_coverage` is now read per
+# endpoint. Every scan below is *unlabelled* - the frozen `legacy-m1d` shape,
+# where `encode_conn_state` has no `S0` arm - while the browsing beside it is
+# `SF`. The browsing is the only thing in the window carrying a state, so on a
+# per-flow reading it alone chose the branch, and the branch it chose could
+# only ever see its own completed exchanges.
+
+
+def sf_browsing(count: int, *, start: float = 1_000.0, step: float = 0.05):
+    """``count`` ordinary answered flows, labelled the way Zeek labels them.
+
+    Two endpoints (the CDN on 80 and on 443) carrying however many flows -
+    which is the shape of real browsing, and the shape that used to be able
+    to outvote a sweep purely by being numerous.
+    """
+    return [
+        answered(start + i * step, 443 if i % 2 else 80, conn_state="SF")
+        for i in range(count)
+    ]
+
+
+def unlabelled_sweep(count: int = 30, *, start: float = 1_010.0):
+    """A vertical sweep as ``legacy-m1d`` delivers it: no state at all."""
+    return [probe(start + i * 0.1, 20 + i) for i in range(count)]
+
+
+@pytest.mark.parametrize("browsing_flows", [30, 40, 60, 100, 200, 500])
+def test_sf_browsing_cannot_route_an_unlabelled_scan_to_the_conn_state_branch(
+    config, browsing_flows
+):
+    """The reproduction, at every volume that used to silence it.
+
+    Browsing first, then the sweep - the ordinary sequence, and the one where
+    the browsing has fully accumulated before the sweep crosses its threshold.
+    Below 30 browsing flows this alerted anyway; at and above it the detector
+    went completely silent, and stayed silent however large the scan grew.
+    """
+    detector = PortScanDetector(config)
+    flows = sf_browsing(browsing_flows) + unlabelled_sweep()
+    alerts = run(detector, flows)
+
+    assert alerts, f"{browsing_flows} SF browsing flows silenced a 30-port sweep"
+
+
+def test_the_reproduced_window_is_exactly_the_one_that_used_to_go_silent(config):
+    """Pin the diagnosis, not just the symptom.
+
+    Every number that drove the old suppression is asserted here, so if a
+    future change restores the per-flow reading this fails with the reason
+    rather than with a bare "no alerts".
+    """
+    detector = PortScanDetector(config)
+    alerts = run(detector, sf_browsing(40) + unlabelled_sweep())
+    window = detector._windows.get(SCANNER)
+
+    # The per-flow reading: over the floor, and reporting a fully answered
+    # window - which is what used to take the branch and then suppress.
+    assert window.conn_state_coverage() >= config.min_conn_state_coverage
+    assert window.conn_state_coverage() == pytest.approx(40 / 70, abs=1e-4)
+    assert window.incomplete_fraction() == 0.0
+
+    # The endpoint reading: two labelled endpoints out of thirty-two, which is
+    # nowhere near the floor, so the proxy decides.
+    assert window.endpoint_conn_state_coverage() == pytest.approx(2 / 32)
+    assert window.endpoint_conn_state_coverage() < config.min_conn_state_coverage
+
+    # And the proxy passes it - which it always would have, had it been asked.
+    assert window.endpoint_established_fraction() == pytest.approx(2 / 32)
+    assert window.endpoint_established_fraction() <= config.max_established_fraction
+
+    assert alerts
+    assert alerts[0].evidence["responder_evidence"] == "resp_bytes"
+
+
+@pytest.mark.parametrize("browsing_flows", [40, 100])
+@pytest.mark.parametrize("ordering", ["browse-first", "interleaved", "scan-first"])
+def test_every_ordering_of_the_mixed_window_still_alerts(
+    config, browsing_flows, ordering
+):
+    """Order must not be what saves us.
+
+    Interleaved and scan-first used to alert, but only by luck: the sweep
+    crossed its port threshold before enough browsing had accumulated to flip
+    the branch. That is a race with traffic volume, not a property - and
+    browse-first, the ordinary sequence, lost it outright.
+    """
+    if ordering == "browse-first":
+        flows = sf_browsing(browsing_flows) + unlabelled_sweep()
+    elif ordering == "interleaved":
+        flows = sf_browsing(browsing_flows, start=1_000.05, step=0.1)
+        flows += unlabelled_sweep(start=1_000.0)
+    else:
+        flows = unlabelled_sweep(start=1_000.0)
+        flows += sf_browsing(browsing_flows, start=1_010.0)
+
+    alerts = run(PortScanDetector(config), flows)
+    assert alerts, f"{ordering} with {browsing_flows} browsing flows went silent"
+
+
+def test_an_s0_scan_beside_sf_browsing_takes_the_conn_state_branch(config):
+    """When the sweep *is* labelled, the branch runs and still catches it.
+
+    This is the case endpoint scoping must not cost us: the states are real,
+    they cover the window, and they say the swept endpoints refused. Thirty
+    refusing endpoints against two that served is 0.9375 - so the same
+    browsing that used to suppress the scan now cannot even dent it.
+    """
+    detector = PortScanDetector(config)
+    flows = sf_browsing(40) + [
+        probe(1_010.0 + i * 0.1, 20 + i, conn_state="S0") for i in range(30)
+    ]
+    alerts = run(detector, flows)
+    window = detector._windows.get(SCANNER)
+
+    assert window.endpoint_conn_state_coverage() == 1.0
+    assert window.endpoint_incomplete_fraction() == pytest.approx(30 / 32)
+    assert alerts
+    assert alerts[0].evidence["responder_evidence"] == "conn_state"
+
+
+def test_a_stateless_scan_beside_stateless_answered_browsing_still_alerts(config):
+    """Neither side labelled: nothing can reach the branch, proxy decides."""
+    detector = PortScanDetector(config)
+    browse = [answered(1_000.0 + i * 0.05, 443 if i % 2 else 80) for i in range(40)]
+    alerts = run(detector, browse + unlabelled_sweep())
+    window = detector._windows.get(SCANNER)
+
+    assert window.endpoint_conn_state_coverage() == 0.0
+    assert alerts
+
+
+def test_an_oth_sweep_beside_sf_browsing_still_alerts(config):
+    """The two defects composed: unclassified sweep, labelled browsing.
+
+    ``OTH`` is not a verdict, so those thirty endpoints stay uncovered and the
+    two ``SF`` ones cannot carry the window to the branch on their own.
+    """
+    detector = PortScanDetector(config)
+    flows = sf_browsing(40) + [
+        probe(1_010.0 + i * 0.1, 20 + i, conn_state="OTH") for i in range(30)
+    ]
+    alerts = run(detector, flows)
+    window = detector._windows.get(SCANNER)
+
+    assert window.endpoint_conn_state_coverage() == pytest.approx(2 / 32)
+    assert alerts
+
+
+def test_a_horizontal_sweep_survives_sf_browsing_in_the_same_window(config):
+    """The same defect on the horizontal signal, which shares the gate.
+
+    Thirty hosts on 445, unlabelled, beside browsing on 80 and 443. The swept
+    port is not one the browsing touches, so the fan-out is the sweep's alone -
+    and the browsing's states must not decide its fate either.
+    """
+    detector = PortScanDetector(config)
+    sweep = [probe(1_010.0 + i * 0.1, 445, dst=f"10.0.5.{i}") for i in range(30)]
+    alerts = run(detector, sf_browsing(40) + sweep)
+
+    assert alerts
+    assert alerts[0].evidence["scan_type"] == "horizontal"
+    assert alerts[0].evidence["horizontal_dst_port"] == 445
+
+
+# --------------------------------------------------------------------------
+# 5. Endpoint scoping must not weaken responder suppression
+# --------------------------------------------------------------------------
+
+
+def test_an_answered_labelled_vertical_fan_out_is_still_suppressed(config):
+    """The control that matters most: a *labelled, answered* vertical shape.
+
+    Thirty service ports on one host, every one of them ``SF``. This is the
+    branch doing its job - ingestion is asserting these exchanges completed,
+    the endpoints carrying that assertion are the endpoints being judged, and
+    suppressing on it is the entire reason the branch is preferred to the
+    proxy. Endpoint scoping must not reopen it.
+    """
+    detector = PortScanDetector(config)
+    flows = [
+        answered(1_000.0 + i * 0.1, 20 + i, dst=VICTIM, conn_state="SF")
+        for i in range(30)
+    ]
+    alerts = run(detector, flows)
+    window = detector._windows.get(SCANNER)
+
+    assert window.endpoint_conn_state_coverage() == 1.0
+    assert window.endpoint_incomplete_fraction() == 0.0
+    assert not alerts, "a fully answered labelled window must stay suppressed"
+
+
+def test_an_answered_labelled_horizontal_fan_out_is_still_suppressed(config):
+    """The same control on the horizontal signal: forty hosts on 443, all SF."""
+    detector = PortScanDetector(config)
+    flows = [
+        answered(1_000.0 + i * 0.1, 443, dst=f"93.184.216.{i}", conn_state="SF")
+        for i in range(40)
+    ]
+    alerts = run(detector, flows)
+    window = detector._windows.get(SCANNER)
+
+    assert window.endpoint_conn_state_coverage() == 1.0
+    assert window.endpoint_incomplete_fraction() == 0.0
+    assert not alerts
+
+
+def test_answered_ephemeral_fan_out_is_still_suppressed(config):
+    """Benign ephemeral fan-out - the reply side of ordinary client traffic."""
+    detector = PortScanDetector(config)
+    flows = [
+        answered(1_000.0 + i * 0.1, 50_000 + i, dst=VICTIM, conn_state="SF")
+        for i in range(40)
+    ]
+    assert not run(detector, flows)
+
+
+def test_an_endpoint_that_ever_completed_is_not_counted_incomplete(config):
+    """A refused attempt then a served one is an endpoint that engaged.
+
+    The conservative reading, spelled out: ``endpoint_incomplete_fraction``
+    can only ever be lowered by a completed exchange, never raised by a
+    refused one, so it cannot manufacture a scan out of a served endpoint.
+    """
+    detector = PortScanDetector(config)
+    flows = []
+    for i in range(30):
+        port = 20 + i
+        flows.append(probe(1_000.0 + i * 0.1, port, dst=VICTIM, conn_state="REJ"))
+        flows.append(answered(1_000.05 + i * 0.1, port, dst=VICTIM, conn_state="SF"))
+    run(detector, flows)
+    window = detector._windows.get(SCANNER)
+
+    assert window.endpoint_conn_state_coverage() == 1.0
+    assert window.endpoint_incomplete_fraction() == 0.0
+    # The per-flow reading disagrees - half those flows were refused - which
+    # is exactly the difference endpoint scoping is making.
+    assert window.incomplete_fraction() == 0.5
