@@ -131,6 +131,34 @@ def test_dns_flow_without_raw_query_is_ignored(detector):
     assert feed(detector, flows) == []
 
 
+def test_later_dns_transaction_reaches_dga_detector(detector):
+    flow = make_flow(
+        timestamp=1000.0,
+        src_ip=SRC,
+        dst_ip=RESOLVER,
+        dst_port=53,
+        proto="udp",
+        dns=DnsInfo(query=BENIGN_QUERY, transaction_count=2),
+        dns_transactions=[
+            DnsInfo(query=BENIGN_QUERY, event_time=1000.1, source_ordinal=0),
+            DnsInfo(
+                query=DGA_QUERY,
+                event_time=1000.2,
+                source_ordinal=1,
+                src_ip="10.0.0.222",
+                dst_ip="10.0.0.53",
+                dst_port=5353,
+                proto="udp",
+            ),
+        ],
+    )
+    alerts = detector.process(flow)
+    assert len(alerts) == 1
+    assert alerts[0].evidence["domain"] == DGA_QUERY
+    assert alerts[0].event_start.timestamp() == pytest.approx(1000.2)
+    assert alerts[0].src_ip == "10.0.0.222"
+
+
 @pytest.mark.parametrize("query", ["", "   ", "a b.com", "http://evil.com/x", "a..b.com"])
 def test_unusable_queries_are_skipped_safely(detector, query):
     """Phase-1 normalization rejects these; one bad record must not crash."""

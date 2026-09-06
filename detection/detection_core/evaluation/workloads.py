@@ -354,8 +354,22 @@ def write_jsonl(flows: list[FlowEvent], path) -> int:
             }
             if flow.dns is not None:
                 record["dns"] = flow.dns.model_dump(exclude_none=True)
+            if flow.dns_transactions:
+                record["dns_transactions"] = [
+                    item.model_dump(exclude_none=True) for item in flow.dns_transactions
+                ]
             if flow.tls is not None:
                 record["tls"] = flow.tls.model_dump(exclude_none=True)
+            if flow.tls_transactions:
+                record["tls_transactions"] = [
+                    item.model_dump(exclude_none=True) for item in flow.tls_transactions
+                ]
+            if flow.http is not None:
+                record["http"] = flow.http.model_dump(exclude_none=True)
+            if flow.http_transactions:
+                record["http_transactions"] = [
+                    item.model_dump(exclude_none=True) for item in flow.http_transactions
+                ]
             handle.write(json.dumps(record))
             handle.write("\n")
     return len(flows)

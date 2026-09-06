@@ -22,10 +22,10 @@ __all__ = [
     "decode_http_method",
 ]
 
-# NOTE (integration TODO): ingestion's mapping has no entry for Zeek's "S0"
-# (connection attempt, no reply). S0 therefore encodes to 0 and is
-# indistinguishable from "unknown" here. S0 is a primary port-scan signal,
-# so a scan detector cannot rely on conn_state alone until ingestion adds it.
+# The legacy numeric mapping has no entry for Zeek's "S0" (connection attempt,
+# no reply), so code 0 remains indistinguishable from unknown. The detector-v2
+# profile carries the raw top-level ``conn_state`` and the adapter prefers it;
+# this table exists only for legacy records that lack the raw field.
 CONN_STATE_BY_CODE: dict[int, str] = {
     1: "S1",
     2: "S2",
@@ -61,10 +61,9 @@ HTTP_METHOD_BY_CODE: dict[int, str] = {
     9: "PATCH",
 }
 
-# Top-level keys the adapter recognizes. Includes forward-compatible names
-# (uid, src_port, service, conn_state, ts/timestamp) that current ingestion
-# does not emit yet: if they appear, the adapter uses them and no drift
-# warning fires.
+# Top-level keys the adapter recognizes across legacy-m1d, detector-v2, and
+# transaction-array detector-v2 records. Recognized optional fields do not
+# trigger a schema-drift warning when absent or present.
 KNOWN_TOP_LEVEL_FIELDS: frozenset[str] = frozenset(
     {
         "flow_id",
@@ -83,8 +82,11 @@ KNOWN_TOP_LEVEL_FIELDS: frozenset[str] = frozenset(
         "pkt_ratio",
         "conn_state_encoded",
         "dns",
+        "dns_transactions",
         "tls",
+        "tls_transactions",
         "http",
+        "http_transactions",
         # Forward-compatible, currently absent upstream.
         "uid",
         "src_port",
