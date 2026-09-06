@@ -126,11 +126,17 @@ held-out families : banjori, necurs, newgoz, nymaim, pitou, qadars, simda
 
 | metric @ 0.75, unseen families | before | after |
 |---|---|---|
-| PR-AUC | 0.9116 | 0.8437 |
-| ROC-AUC | 0.8995 | 0.8914 |
-| precision | 0.9444 | 0.8953 |
-| recall | 0.7109 | 0.5691 |
-| tp/fp/tn/fn | 391/23/478/159 | 1103/129/2577/835 |
+| PR-AUC | 0.9119 | 0.8478 |
+| ROC-AUC | 0.8986 | 0.8931 |
+| precision | 0.9424 | 0.8981 |
+| recall | 0.7145 | 0.4732 |
+| tp/fp/tn/fn | 393/24/477/157 | 917/104/2602/1021 |
+
+Both columns re-measured together on scikit-learn 1.5.1 / numpy 1.26.4 from the
+corpus as it ships, so they are comparable to each other. `pyproject.toml` pins
+only `scikit-learn>=1.4`, and these are RandomForest vote fractions rather than
+calibrated probabilities, so the exact figures move a little with the library
+version — see the note under the sweep below.
 
 **The split is still honest** — `group_disjoint`, `group_aware_split=True`,
 zero train/test family overlap, and the *same seven* held-out families as
@@ -142,6 +148,27 @@ side grew. The two numbers are computed on differently-composed test folds and
 are not comparable. The same applies to precision and recall at a *fixed*
 threshold when the score distribution has shifted — which it has, deliberately.
 The comparison that means something is §4: both models, identical populations.
+
+### Threshold sweep on the shipped corpus (analysis only, selects nothing)
+
+Regenerated from `dga_dataset.sample.csv` as it ships, on the same
+family-disjoint test fold as the table above:
+
+| thr | precision | recall | f1 | fp | fn |
+|---|---|---|---|---|---|
+| 0.50 | 0.8515 | 0.7281 | 0.7850 | 246 | 527 |
+| 0.60 | 0.8787 | 0.6956 | 0.7765 | 186 | 590 |
+| 0.70 | 0.8979 | 0.5583 | 0.6885 | 123 | 856 |
+| 0.75 | 0.8981 | 0.4732 | 0.6198 | 104 | 1 021 |
+| 0.80 | 0.8743 | 0.3050 | 0.4522 | 85 | 1 347 |
+| 0.90 | 0.9030 | 0.2307 | 0.3674 | 48 | 1 491 |
+
+**Recall is steep between 0.70 and 0.75** — 8.5 points across five hundredths
+of threshold — because the score distribution is dense there. That is why the
+`after` recall figure moves noticeably with the scikit-learn version while
+`before`, measured on the smaller balanced corpus, reproduces to within two
+samples; and it is the same density that §5 exploits to buy recall back by
+moving the operating point rather than retraining.
 
 ---
 
@@ -217,6 +244,18 @@ either case; the 0.8 pt gap is sampling, not a discrepancy.)*
 (0.711 vs 0.727) while cutting CDN false positives 169× same-provider and 9.6×
 unseen-provider. Past 0.70 recall falls off a cliff — 0.711 → 0.667 → 0.569 —
 while the false-positive rates barely move, so the knee is here.
+
+> **Re-run note.** This table was re-derived from the corpus as it ships
+> (16 939 rows), which is the corpus it was originally measured on — the 300
+> stray `benign_cdn` rows that had drifted in were removed, not added, so no
+> figure here was ever measured on them. The two columns that need no external
+> corpus reproduce the shape exactly: **tunnel FP stays 0.0000 at every
+> threshold**, and the recall knee is still between 0.65 and 0.70. Absolute
+> recall reads lower on scikit-learn 1.5.1 (0.642 at 0.65, 0.473 at 0.75) for
+> the same version reason recorded in §3. The `CDN same` / `CDN unseen` /
+> `ordinary` columns need the Umbrella and Tranco evaluation lists, which are
+> not in the repo, so they are carried forward unchanged rather than restated
+> from a run that could not produce them.
 
 ### Alert volume on a realistic name mix
 

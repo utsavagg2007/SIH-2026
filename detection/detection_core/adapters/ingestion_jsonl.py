@@ -142,7 +142,8 @@ def _build_dns(record: Mapping[str, Any]) -> DnsInfo | None:
         return None
     return DnsInfo(
         uid=raw.get("uid"),
-        # query / qtype / rcode: integration TODO, absent upstream today.
+        # query / qtype / rcode: supplied by ingestion's `detector-v2` feature profile; absent under
+        # the frozen `legacy-m1d` one, so still Optional.
         query=raw.get("query"),
         qtype=raw.get("qtype"),
         rcode=raw.get("rcode"),
@@ -160,7 +161,10 @@ def _build_tls(record: Mapping[str, Any]) -> TlsInfo | None:
         return None
     return TlsInfo(
         uid=raw.get("uid"),
-        # ja3 / ja3s / ja4 / server_name: integration TODO, absent upstream today.
+        # ja3 / ja3s / ja4 / server_name: supplied by ingestion's `detector-v2` feature profile; absent under
+        # the frozen `legacy-m1d` one, so still Optional.
+        # NOTE: neither qualified Zeek runtime emits JA3/JA3S today, so
+        # these arrive null on real captures even under detector-v2.
         ja3=raw.get("ja3"),
         ja3s=raw.get("ja3s"),
         ja4=raw.get("ja4"),
@@ -168,7 +172,8 @@ def _build_tls(record: Mapping[str, Any]) -> TlsInfo | None:
         version=raw.get("version") or decode_ssl_version(raw.get("ssl_version_encoded")),
         has_ja3=raw.get("has_ja3"),
         has_ja3s=raw.get("has_ja3s"),
-        # sni_length / sni_entropy: integration TODO, absent upstream today.
+        # sni_length / sni_entropy: derived by ingestion when a raw
+        # server_name is present; recomputed here otherwise.
         # Read the same way as every other optional field, so a future
         # ingestion release that emits them needs no adapter change.
         sni_length=raw.get("sni_length"),
@@ -187,7 +192,8 @@ def _build_http(record: Mapping[str, Any]) -> HttpInfo | None:
         return None
     return HttpInfo(
         uid=raw.get("uid"),
-        # host / uri / user_agent: integration TODO, absent upstream today.
+        # host / uri / user_agent: supplied by ingestion's `detector-v2` feature profile; absent under
+        # the frozen `legacy-m1d` one, so still Optional.
         host=raw.get("host"),
         uri=raw.get("uri"),
         user_agent=raw.get("user_agent"),

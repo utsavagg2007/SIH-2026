@@ -31,7 +31,9 @@ __all__ = [
     "FlowObservation",
     "ActivityWindow",
     "WindowIndex",
+    "COMPLETE_CONN_STATES",
     "INCOMPLETE_CONN_STATES",
+    "CLASSIFIED_CONN_STATES",
     "DEFAULT_ESTABLISHED_RESP_BYTES",
 ]
 
@@ -40,16 +42,39 @@ __all__ = [
 #: answered. These are the states a port scan produces and an ordinary session
 #: does not.
 #:
-#: ``S0`` heads the list and is the one that matters most - and the one current
-#: ingestion destroys: ``encode_conn_state`` in
-#: ``ingestion/src/features/flow.rs`` has no ``S0`` arm, so a scan's connection
-#: attempts arrive here encoded as ``0``, indistinguishable from "unknown".
-#: Detection therefore cannot rely on this set being populated today; see
-#: :meth:`ActivityWindow.conn_state_coverage`, which reports how much of a
-#: window actually carries the field so a detector can fall back.
+#: ``S0`` heads the list and is the one that matters most. Ingestion's
+#: ``encode_conn_state`` (``ingestion/src/features/flow.rs``) still has no
+#: ``S0`` arm, so under the frozen ``legacy-m1d`` feature profile a scan's
+#: connection attempts arrive encoded as ``0`` and decode back to ``None``.
+#: The ``detector-v2`` profile carries the raw string instead, so ``S0``
+#: survives there; see :meth:`ActivityWindow.conn_state_coverage`, which
+#: reports how much of a window carries a *classified* state so a detector
+#: can fall back when it does not.
 INCOMPLETE_CONN_STATES: frozenset[str] = frozenset(
     {"S0", "REJ", "RSTOS0", "RSTRH", "SH", "SHR"}
 )
+
+#: Zeek ``conn_state`` values meaning *the exchange completed*: the responder
+#: answered and the connection reached an established state, however it was
+#: later torn down. The complement of :data:`INCOMPLETE_CONN_STATES` among the
+#: states this project is willing to draw a conclusion from.
+COMPLETE_CONN_STATES: frozenset[str] = frozenset(
+    {"S1", "S2", "S3", "SF", "RSTO", "RSTR"}
+)
+
+#: The states that carry a verdict either way. **Coverage is measured over
+#: this set, not over "is not None".**
+#:
+#: Zeek's ``OTH`` means "no SYN seen, midstream traffic" - it is precisely the
+#: absence of a verdict about whether the responder engaged. Counting it as
+#: covered let an all-``OTH`` window report full coverage and a zero
+#: incomplete share, which reads as "the responder answered everything" and
+#: silences a scan that the byte proxy would have caught outright. The same
+#: went for any unrecognised or empty string ingestion happened to emit.
+#: Anything outside this set therefore counts as **uncovered**, which routes
+#: the decision to the responder-byte proxy rather than to a fabricated
+#: conclusion. See :meth:`ActivityWindow.conn_state_coverage`.
+CLASSIFIED_CONN_STATES: frozenset[str] = COMPLETE_CONN_STATES | INCOMPLETE_CONN_STATES
 
 #: Responder payload bytes at or above which a flow counts as a real exchange
 #: rather than a probe. A refused or unanswered connection returns no payload;
@@ -147,13 +172,22 @@ class ActivityWindow:
         window_seconds: float,
         *,
         established_resp_bytes: int = DEFAULT_ESTABLISHED_RESP_BYTES,
+        service_port_max: int | None = None,
     ) -> None:
         if window_seconds <= 0:
             raise ValueError("window_seconds must be positive")
         if established_resp_bytes < 0:
             raise ValueError("established_resp_bytes must not be negative")
+        if service_port_max is not None and not 0 <= service_port_max <= 65535:
+            raise ValueError("service_port_max must be within [0, 65535]")
         self.window_seconds = window_seconds
         self.established_resp_bytes = established_resp_bytes
+        #: Service-port boundary this window keeps an O(1) counter for. A
+        #: detector that always asks the same question - which is every
+        #: detector we have - pins it here and pays nothing per read.
+        #: :meth:`unique_service_port_count` still answers any *other*
+        #: boundary correctly, by scanning.
+        self.service_port_max = service_port_max
         self._events: deque[FlowObservation] = deque()
         self._reset_aggregates()
 
@@ -169,6 +203,14 @@ class ActivityWindow:
         self._conn_state_known = 0
         self._incomplete_total = 0
         self._established_total = 0
+        # Distinct (host, port) endpoints, and how many of them the responder
+        # ever answered. Endpoint-scoped rather than flow-scoped: see
+        # :meth:`endpoint_established_fraction`.
+        self._endpoint_counts: dict[tuple[str, int | None], int] = {}
+        self._established_endpoints: dict[tuple[str, int | None], int] = {}
+        # Distinct ports at or below ``service_port_max``, maintained rather
+        # than counted per call. Stays 0 when no boundary was pinned.
+        self._service_port_total = 0
         # Reference counts: value -> how many live observations carry it.
         # A zero count is deleted, so the key set is exactly the live values.
         self._dst_port_counts: dict[int, int] = {}
@@ -235,16 +277,33 @@ class ActivityWindow:
         self._orig_packets_total += observation.orig_packets
         self._orig_bytes_total += observation.orig_bytes
         self._resp_bytes_total += observation.resp_bytes
-        if observation.conn_state is not None:
+        # Only a *classified* state counts as covered. An OTH / unrecognised
+        # / empty state is the absence of a verdict, and must leave the window
+        # looking uncovered so the caller falls back rather than concluding
+        # "answered". See CLASSIFIED_CONN_STATES.
+        if observation.conn_state in CLASSIFIED_CONN_STATES:
             self._conn_state_known += 1
             if observation.conn_state in INCOMPLETE_CONN_STATES:
                 self._incomplete_total += 1
-        if observation.resp_bytes >= self.established_resp_bytes:
+        established = observation.resp_bytes >= self.established_resp_bytes
+        if established:
             self._established_total += 1
+
+        endpoint = (observation.dst_ip, observation.dst_port)
+        self._increment(self._endpoint_counts, endpoint)
+        if established:
+            self._increment(self._established_endpoints, endpoint)
 
         self._increment(self._dst_ip_counts, observation.dst_ip)
         if observation.dst_port is not None:
+            before_ports = self._dst_port_counts.get(observation.dst_port, 0)
             self._increment(self._dst_port_counts, observation.dst_port)
+            if (
+                before_ports == 0
+                and self.service_port_max is not None
+                and observation.dst_port <= self.service_port_max
+            ):
+                self._service_port_total += 1
             # Only ports the observation actually carried: there is no port
             # to correlate a portless flow across hosts.
             hosts = self._hosts_by_port.get(observation.dst_port)
@@ -270,16 +329,28 @@ class ActivityWindow:
         self._orig_packets_total -= observation.orig_packets
         self._orig_bytes_total -= observation.orig_bytes
         self._resp_bytes_total -= observation.resp_bytes
-        if observation.conn_state is not None:
+        if observation.conn_state in CLASSIFIED_CONN_STATES:
             self._conn_state_known -= 1
             if observation.conn_state in INCOMPLETE_CONN_STATES:
                 self._incomplete_total -= 1
-        if observation.resp_bytes >= self.established_resp_bytes:
+        established = observation.resp_bytes >= self.established_resp_bytes
+        if established:
             self._established_total -= 1
+
+        endpoint = (observation.dst_ip, observation.dst_port)
+        self._decrement(self._endpoint_counts, endpoint)
+        if established:
+            self._decrement(self._established_endpoints, endpoint)
 
         self._decrement(self._dst_ip_counts, observation.dst_ip)
         if observation.dst_port is not None:
             self._decrement(self._dst_port_counts, observation.dst_port)
+            if (
+                observation.dst_port not in self._dst_port_counts
+                and self.service_port_max is not None
+                and observation.dst_port <= self.service_port_max
+            ):
+                self._service_port_total -= 1
             hosts = self._hosts_by_port[observation.dst_port]
             before = len(hosts)
             self._decrement(hosts, observation.dst_ip)
@@ -346,19 +417,37 @@ class ActivityWindow:
         recorded the server as the initiator), not something enumerating
         services.
 
-        O(distinct ports), the same order as :meth:`dst_ports`, and the port
-        set is small even during a scan.
+        **O(1) for the boundary this window was constructed with.** The count
+        is maintained in ``_add`` / ``_remove`` like every other aggregate: a
+        port entering the window for the first time raises it, and the port's
+        last observation leaving lowers it again. Any *other* boundary is
+        still answered exactly, by scanning the distinct ports - so the method
+        is correct for every argument and merely fast for the expected one.
+
+        The scan was not free at scale: the port dict is O(distinct ports),
+        this runs on the hot qualification path, and a port scan's whole
+        character is that every flow brings a port nobody has seen - so the
+        scan grew with exactly the traffic it was there to qualify.
         """
+        if max_service_port == self.service_port_max:
+            return self._service_port_total
         return sum(1 for port in self._dst_port_counts if port <= max_service_port)
 
     def conn_state_coverage(self) -> float:
-        """Fraction of live observations that carry a ``conn_state`` at all.
+        """Fraction of live observations carrying a **classified** state.
 
         0.0 on an empty window. A detector reads this before trusting
-        :meth:`incomplete_fraction`: with today's ingestion the field is absent
-        (or, worse, present-but-flattened - see
-        :data:`INCOMPLETE_CONN_STATES`), and a fraction computed over a handful
-        of records that happen to carry it says nothing about the window.
+        :meth:`incomplete_fraction`: a fraction computed over a handful of
+        records that happen to carry a state says nothing about the window.
+
+        "Classified" means :data:`CLASSIFIED_CONN_STATES` - a state that
+        actually answers *did the responder engage*. ``OTH`` (midstream, no
+        SYN seen), an unrecognised value and an empty string are all counted
+        as **uncovered**, because none of them answers that question. Counting
+        them as covered was a silent-scan bug: an all-``OTH`` window reported
+        coverage 1.0 and an incomplete share of 0.0, which reads as "the
+        responder answered everything" and suppressed a no-reply scan that the
+        byte proxy caught immediately.
         """
         if not self._events:
             return 0.0
@@ -389,6 +478,38 @@ class ActivityWindow:
         if not self._events:
             return 0.0
         return self._established_total / len(self._events)
+
+    def unique_endpoint_count(self) -> int:
+        """Distinct ``(dst_ip, dst_port)`` endpoints in the window."""
+        return len(self._endpoint_counts)
+
+    def established_endpoint_count(self) -> int:
+        """Distinct endpoints the responder answered with real payload."""
+        return len(self._established_endpoints)
+
+    def endpoint_established_fraction(self) -> float:
+        """Share of distinct **endpoints** that answered, not of flows.
+
+        This is the responder-engagement measure a scan detector wants, and
+        :meth:`established_fraction` is not. That one divides by the whole
+        window, so ordinary answered browsing - which is a handful of
+        endpoints carrying many flows - dilutes the reading until a real scan
+        sitting in the same window falls below the gate: eight answered
+        browsing flows were enough to silence a thirty-port sweep.
+
+        Scoping to endpoints removes the leverage. Browsing contributes the
+        two or three endpoints it actually talks to however many flows it
+        sends them; a scan contributes one unanswered endpoint per port or
+        per host - which is the signal that qualified the window in the first
+        place. The measure therefore moves with the scan evidence rather than
+        with traffic volume that has nothing to do with it.
+
+        **Fail-open.** 0.0 on an empty window, and 0.0 on any capture with no
+        responder bytes at all - the reading that cannot suppress anything.
+        """
+        if not self._endpoint_counts:
+            return 0.0
+        return len(self._established_endpoints) / len(self._endpoint_counts)
 
     def unique_src_ip_count(self) -> int:
         """Distinct source hosts, as a number - what a flood grows."""
@@ -537,14 +658,20 @@ class WindowIndex:
         *,
         sweep_every: int = 500,
         established_resp_bytes: int = DEFAULT_ESTABLISHED_RESP_BYTES,
+        service_port_max: int | None = None,
     ) -> None:
         if window_seconds <= 0:
             raise ValueError("window_seconds must be positive")
         if established_resp_bytes < 0:
             raise ValueError("established_resp_bytes must not be negative")
+        if service_port_max is not None and not 0 <= service_port_max <= 65535:
+            raise ValueError("service_port_max must be within [0, 65535]")
         self.window_seconds = window_seconds
         self.sweep_every = sweep_every
         self.established_resp_bytes = established_resp_bytes
+        #: Pinned on every window this index creates - see
+        #: :meth:`ActivityWindow.unique_service_port_count`.
+        self.service_port_max = service_port_max
         self._windows: dict[Hashable, ActivityWindow] = {}
         self._since_sweep = 0
 
@@ -555,6 +682,7 @@ class WindowIndex:
             window = ActivityWindow(
                 self.window_seconds,
                 established_resp_bytes=self.established_resp_bytes,
+                service_port_max=self.service_port_max,
             )
             self._windows[key] = window
         window.observe(observation)

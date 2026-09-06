@@ -571,7 +571,36 @@ def _verify(rows: list[tuple[str, int, str, str]], *, sample: int, seed: int) ->
             raise AssertionError(f"feature extraction misbehaved on {domain!r}")
 
 
+def _assert_one_benign_family(rows: list[tuple[str, int, str, str]]) -> None:
+    """Every benign row must carry :data:`BENIGN_FAMILY`, and only it.
+
+    ``training.py`` derives its family headline as ``family_count - 1 if
+    BENIGN_FAMILY in breakdown`` - it subtracts the *one* benign family it
+    knows by name. A second benign family name is therefore silently counted
+    as a malware family, and the run summary overstates the corpus.
+
+    That is not hypothetical: 300 rows marked ``benign_cdn`` were once folded
+    into the shipped sample and made it report 28 families where there are 27.
+    Provenance belongs in the ``source`` column, which travels with the data
+    and reaches no metric. Refusing to write the file is the cheapest place to
+    catch this - after it is committed, only a test that pins the composition
+    will.
+    """
+    offenders = sorted(
+        {family for domain, label, family, source in rows
+         if label == 0 and family != BENIGN_FAMILY}
+    )
+    if offenders:
+        raise ValueError(
+            f"benign rows must carry family={BENIGN_FAMILY!r}; found "
+            f"{offenders}. Record provenance in the {SOURCE_COLUMN!r} column "
+            f"instead - a second benign family name is counted as malware by "
+            f"the training headline."
+        )
+
+
 def _write_csv(rows: list[tuple[str, int, str, str]], path: Path) -> None:
+    _assert_one_benign_family(rows)
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)

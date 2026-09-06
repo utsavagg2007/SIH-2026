@@ -22,10 +22,21 @@ __all__ = [
     "decode_http_method",
 ]
 
-# NOTE (integration TODO): ingestion's mapping has no entry for Zeek's "S0"
-# (connection attempt, no reply). S0 therefore encodes to 0 and is
-# indistinguishable from "unknown" here. S0 is a primary port-scan signal,
-# so a scan detector cannot rely on conn_state alone until ingestion adds it.
+# NOTE: ingestion's integer mapping still has no entry for Zeek's "S0"
+# (connection attempt, no reply) - `encode_conn_state` in
+# `ingestion/src/features/flow.rs` has no S0 arm, so under the frozen
+# `legacy-m1d` feature profile S0 encodes to 0 and decodes back to None here,
+# indistinguishable from "unknown".
+#
+# The `detector-v2` profile does not go through this table at all: it emits the
+# raw `conn_state` string alongside `conn_state_encoded`, and
+# `record_to_flow_event` prefers the raw value, so S0 survives intact. This
+# table is therefore the *fallback* path, not the only one.
+#
+# S0 is a primary port-scan signal, so a scan detector must still treat an
+# absent or unclassified conn_state as "no evidence" and fall back to the
+# responder-byte proxy rather than concluding the responder answered. See
+# `aggregators.sliding_window.CLASSIFIED_CONN_STATES`.
 CONN_STATE_BY_CODE: dict[int, str] = {
     1: "S1",
     2: "S2",
@@ -83,13 +94,26 @@ KNOWN_TOP_LEVEL_FIELDS: frozenset[str] = frozenset(
         "dns",
         "tls",
         "http",
-        # Forward-compatible, currently absent upstream.
+        # Emitted by ingestion's `detector-v2` feature profile; absent under
+        # the frozen `legacy-m1d` one, which is why they are listed rather
+        # than required.
         "uid",
         "src_port",
         "service",
         "conn_state",
         "ts",
         "timestamp",
+        # Layer-3 byte counters, carried by detector-v2 next to the payload
+        # counters. Listed here so they do not raise a drift warning on every
+        # single record - which is all this set does. Being recognized also
+        # keeps them out of FlowEvent.extra, and that is the intent: every
+        # volume threshold in this project is defined on payload bytes
+        # (orig_bytes / resp_bytes), and a header-inclusive counter sitting
+        # next to them in extra is an invitation to compare the wrong two
+        # numbers. Read them from the ingestion record if they are ever
+        # genuinely needed.
+        "orig_ip_bytes",
+        "resp_ip_bytes",
     }
 )
 

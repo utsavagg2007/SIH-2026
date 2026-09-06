@@ -16,6 +16,8 @@ from __future__ import annotations
 
 from .extremes import WindowExtreme
 from .sliding_window import (
+    CLASSIFIED_CONN_STATES,
+    COMPLETE_CONN_STATES,
     DEFAULT_ESTABLISHED_RESP_BYTES,
     INCOMPLETE_CONN_STATES,
     ActivityWindow,
@@ -24,6 +26,8 @@ from .sliding_window import (
 )
 
 __all__ = [
+    "CLASSIFIED_CONN_STATES",
+    "COMPLETE_CONN_STATES",
     "DEFAULT_ESTABLISHED_RESP_BYTES",
     "INCOMPLETE_CONN_STATES",
     "ActivityWindow",

@@ -219,23 +219,41 @@ do it.
 No model binary is committed (`.gitignore` blocks `*.joblib`); retrain from the
 CSV with `python -m detection_core.ml.dga.training`.
 
-## Addendum: benign CDN-shaped hostnames (300 rows, `family=benign_cdn`)
+## Addendum: synthetic CDN-shaped hostnames — an experiment, NOT in the corpus
 
-Added because the corpus had a hole exactly the shape of the false positives it
-produced. It contained 85 CDN *apex* domains (`akamai.com`, `akamaiedge.net`)
-and not one example of the thing that actually appears in traffic: a random
-looking label under a CDN or object-storage parent, like
-`d3f7k2mq9xz1lp.cloudfront.net`. The model had therefore never been shown that
-this shape is benign, and scored real CDN hostnames at 0.97 — above genuine DGA
-traffic — on the labelled evaluation capture.
+**Status: not shipped.** The 300 synthetic rows described here are *not* in
+`dga_dataset.sample.csv` and must not be reintroduced. The shipped corpus is
+16 939 rows / 27 DGA families; `tests/test_dga_corpus_invariants.py` pins that
+composition and names `benign_cdn` / `cdn_synthetic` explicitly so a merge
+cannot fold them back in unnoticed.
 
-Generated deterministically (`random.seed(26145)`): hex, base36 and
-`<word>-<region>-<id>` labels under fourteen real CDN and object-storage
-parents. **Synthetic, not observed** — they are the right *shape*, and no claim
-is made that these specific names were ever resolved by anyone.
+They were tried because the corpus has a hole roughly the shape of the false
+positives it produced: it carries CDN *apex* domains (`akamai.com`,
+`akamaiedge.net`) and few examples of the thing that actually appears in
+traffic — a random-looking label under a CDN or object-storage parent, like
+`d3f7k2mq9xz1lp.cloudfront.net`. Generated deterministically
+(`random.seed(26145)`): hex, base36 and `<word>-<region>-<id>` labels under
+fourteen real CDN and object-storage parents. **Synthetic, not observed** — the
+right *shape*, with no claim that these names were ever resolved by anyone.
 
-Effect at the detector's live threshold of 0.75: precision 0.9127, recall
-0.5891 on the held-out family-disjoint split (was 0.9444 / 0.7109). Recall is
-genuinely lower — the model is now unwilling to call a random-looking string
-generated on the string alone, which is the correct trade and the reason the
-end-to-end false-positive count on the labelled capture went from 5 to 0.
+Two reasons they stayed out.
+
+First, they were labelled `family=benign_cdn`, which is precisely the mistake
+["Why CDN rows say `family = benign`"](#why-cdn-rows-say-family--benign-and-where-the-marker-went)
+above exists to prevent: `training.py` derives its headline as
+`family_count - 1 if "benign" in breakdown`, so a second benign family name is
+counted as a malware family. With the rows in place the summary reported **28
+families for a corpus of 27** — the miscount that documentation already warns
+about, reintroduced by the data. `build_dataset._write_csv` now refuses to
+write a benign row whose family is not `benign`, so this shape cannot be
+generated again; provenance belongs in the `source` column.
+
+Second, the trade was not clearly good. Synthetic negatives teach the model
+about the generator that produced them as much as about CDNs, and the recall
+cost was real. The measured effect on the shipped corpus is in
+`docs/DGA_PRECISION.md` §3; the *observed* CDN rows (`source=cdn`, 1 824 of
+them) stay, and they are real.
+
+If the hole is worth closing, close it with observed hostnames — resolved
+names from a capture, not a seeded generator — and re-derive the threshold in
+the same change.

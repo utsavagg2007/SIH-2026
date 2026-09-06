@@ -118,8 +118,9 @@ class PortScanConfig:
     min_incomplete_fraction: float = 0.05
 
     #: How much of a window must carry a ``conn_state`` before it is trusted
-    #: over the byte proxy. Today's ingestion supplies none, so the proxy is
-    #: what runs; see ``INCOMPLETE_CONN_STATES`` for why.
+    #: over the byte proxy. Ingestion's ``detector-v2`` profile carries the
+    #: raw string, so this path runs there; the frozen ``legacy-m1d`` profile
+    #: supplies none and falls to the proxy. See ``CLASSIFIED_CONN_STATES``.
     min_conn_state_coverage: float = 0.50
 
     def __post_init__(self) -> None:
@@ -189,13 +190,22 @@ class PortScanDetector(Detector):
     # 0.3.0: a vertical alert needs ports a service could live on, and any
     # alert needs a window the responder did not answer. Both were derived
     # from real captures; see the module docstring.
-    version = "0.3.0"
+    # 0.3.1: two corrections to that responder check, both of which could
+    # silence a real scan. Coverage now counts only *classified* conn_states,
+    # so an OTH / unrecognised / empty window falls back to the byte proxy
+    # instead of concluding "answered"; and the proxy is scoped per endpoint,
+    # so answered browsing sharing the window cannot dilute a sweep below the
+    # gate. Alerts carry two new evidence keys - see `_build_alert`.
+    version = "0.3.1"
 
     def __init__(self, config: PortScanConfig | None = None) -> None:
         self.config = config or PortScanConfig()
         self._windows = WindowIndex(
             self.config.window_seconds,
             established_resp_bytes=self.config.established_resp_bytes,
+            # Pinned so unique_service_port_count() is an O(1) read on the
+            # hot qualification path rather than a scan over every port.
+            service_port_max=self.config.max_service_port,
         )
         self._state: dict[str, _SourceState] = {}
         self._since_sweep = 0
@@ -350,23 +360,41 @@ class PortScanDetector(Detector):
         Two ways to read it, best available first:
 
         * **``conn_state``** - authoritative, used once enough of the window
-          carries one. ``S0`` (attempt, no reply) is the classic scan state.
-        * **responder payload bytes** - the proxy that works today, because
-          ingestion currently flattens ``S0`` to the same code as "unknown"
-          (``encode_conn_state``, ``ingestion/src/features/flow.rs``). Nothing
-          came back means nothing was serving.
+          carries a *classified* state. ``S0`` (attempt, no reply) is the
+          classic scan state. Coverage counts only states that actually
+          answer "did the responder engage" - ``OTH``, an unrecognised value
+          and an empty string are **uncovered**, not answered, so they route
+          the decision to the proxy below instead of concluding from nothing.
+        * **responder payload bytes** - the proxy, and still the path under
+          the frozen ``legacy-m1d`` feature profile, which flattens ``S0`` to
+          the same code as "unknown" (``encode_conn_state``,
+          ``ingestion/src/features/flow.rs``). Nothing came back means
+          nothing was serving.
+
+        The proxy is scoped **per endpoint**, not per flow - see
+        :meth:`ActivityWindow.endpoint_established_fraction`. Divided across
+        the whole window it measured traffic volume rather than scan
+        evidence, and a handful of answered browsing flows could dilute a
+        real sweep below the gate.
 
         **A capture with no reverse direction is not penalised.** With no
-        responder bytes anywhere, ``established_fraction()`` is 0.0, which is
-        below any ceiling, so every window passes and the detector behaves as
-        it did before this check existed. The gate spends reply evidence when
-        it exists and asks for none when it does not - which is the only
-        reading compatible with a genuinely unidirectional deployment.
+        responder bytes anywhere the measured share is 0.0, which is below
+        any ceiling, so every window passes and the detector behaves as it
+        did before this check existed. The gate spends reply evidence when it
+        exists and asks for none when it does not - which is the only reading
+        compatible with a genuinely unidirectional deployment.
+
+        **This branch never silences a window the proxy would have passed.**
+        The ``conn_state`` path is taken only on a window that genuinely
+        carries classified states; everything else falls through to the proxy.
         """
         config = self.config
         if window.conn_state_coverage() >= config.min_conn_state_coverage:
             return window.incomplete_fraction() >= config.min_incomplete_fraction
-        return window.established_fraction() <= config.max_established_fraction
+        return (
+            window.endpoint_established_fraction()
+            <= config.max_established_fraction
+        )
 
     def _scan_type(self, vertical: bool, horizontal: bool) -> str:
         if vertical and horizontal:
@@ -466,7 +494,14 @@ class PortScanDetector(Detector):
                 "responder_evidence": "conn_state" if by_conn_state else "resp_bytes",
                 "conn_state_coverage": round(coverage, 4),
                 "incomplete_fraction": round(window.incomplete_fraction(), 4),
+                # Per-flow, kept for continuity with earlier alerts.
                 "established_fraction": round(window.established_fraction(), 4),
+                # Per-endpoint - what the byte proxy actually gates on.
+                "endpoint_established_fraction": round(
+                    window.endpoint_established_fraction(), 4
+                ),
+                "established_endpoints": window.established_endpoint_count(),
+                "unique_endpoints": window.unique_endpoint_count(),
             },
             detector=self.name,
             detector_version=self.version,

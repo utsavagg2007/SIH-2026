@@ -9,6 +9,8 @@ from __future__ import annotations
 import pytest
 
 from detection_core.aggregators import (
+    CLASSIFIED_CONN_STATES,
+    COMPLETE_CONN_STATES,
     DEFAULT_ESTABLISHED_RESP_BYTES,
     INCOMPLETE_CONN_STATES,
     ActivityWindow,
@@ -467,10 +469,18 @@ def test_a_completed_connection_is_not_incomplete():
     assert window.incomplete_fraction() == 1.0
 
     window.clear()
-    for state in ("SF", "S1", "S2", "RSTO", "OTH"):
+    for state in sorted(COMPLETE_CONN_STATES):
         window.observe(obs(100.0, conn_state=state))
     assert window.incomplete_fraction() == 0.0
     assert window.conn_state_coverage() == 1.0
+
+    # OTH is NOT a completed connection - it is the absence of a verdict, so
+    # it dilutes coverage rather than counting as "the responder answered".
+    window.clear()
+    for state in ("SF", "S1", "S2", "RSTO", "OTH"):
+        window.observe(obs(100.0, conn_state=state))
+    assert window.incomplete_fraction() == 0.0
+    assert window.conn_state_coverage() == 0.8
 
 
 def test_established_fraction_needs_real_payload_not_a_stub():

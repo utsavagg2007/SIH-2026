@@ -23,6 +23,7 @@ import random
 import pytest
 
 from detection_core.aggregators import (
+    CLASSIFIED_CONN_STATES,
     DEFAULT_ESTABLISHED_RESP_BYTES,
     INCOMPLETE_CONN_STATES,
     ActivityWindow,
@@ -105,7 +106,28 @@ class ReferenceWindow:
     def conn_state_coverage(self) -> float:
         if not self._events:
             return 0.0
-        return sum(e.conn_state is not None for e in self._events) / len(self._events)
+        # Classified, not merely present: OTH and any unrecognised value are
+        # the absence of a verdict. See CLASSIFIED_CONN_STATES.
+        return sum(
+            e.conn_state in CLASSIFIED_CONN_STATES for e in self._events
+        ) / len(self._events)
+
+    def unique_endpoint_count(self) -> int:
+        return len({(e.dst_ip, e.dst_port) for e in self._events})
+
+    def established_endpoint_count(self) -> int:
+        return len(
+            {
+                (e.dst_ip, e.dst_port)
+                for e in self._events
+                if e.resp_bytes >= self.established_resp_bytes
+            }
+        )
+
+    def endpoint_established_fraction(self) -> float:
+        if not self._events:
+            return 0.0
+        return self.established_endpoint_count() / self.unique_endpoint_count()
 
     def incomplete_fraction(self) -> float:
         if not self._events:
@@ -168,7 +190,20 @@ def assert_equivalent(fast: ActivityWindow, reference: ReferenceWindow, context:
     assert fast.conn_state_coverage() == reference.conn_state_coverage(), context
     assert fast.incomplete_fraction() == reference.incomplete_fraction(), context
     assert fast.established_fraction() == reference.established_fraction(), context
-    for boundary in (0, 1023, 49151, 65535):
+    # Endpoint scoping is maintained the same way, so it joins the same net.
+    assert fast.unique_endpoint_count() == reference.unique_endpoint_count(), context
+    assert fast.established_endpoint_count() == (
+        reference.established_endpoint_count()
+    ), context
+    assert fast.endpoint_established_fraction() == (
+        reference.endpoint_established_fraction()
+    ), context
+    # Every boundary, including whichever one this window pinned: the O(1)
+    # counter and the scan must agree, and the scan must still answer the
+    # boundaries it was not built for.
+    for boundary in (0, 1023, 49151, 65535, fast.service_port_max):
+        if boundary is None:
+            continue
         assert fast.unique_service_port_count(boundary) == (
             reference.unique_service_port_count(boundary)
         ), f"{context} boundary={boundary}"
@@ -208,27 +243,39 @@ def observation(
 # --------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("service_port_max", [None, 1023, 49151])
 @pytest.mark.parametrize("window_seconds", [1.0, 10.0, 60.0])
 @pytest.mark.parametrize("run", range(4))
-def test_randomized_sequences_agree_at_every_step(window_seconds, run):
+def test_randomized_sequences_agree_at_every_step(
+    window_seconds, run, service_port_max
+):
     """Deterministic pseudo-random traffic, compared after every observation.
 
     The pools are small on purpose: repeated hosts, repeated ports, repeated
     byte counts and colliding timestamps are the inputs where reference
     counting is easy to get wrong, so they must be common rather than rare.
+
+    ``service_port_max`` is parametrized so the incremental service-port
+    counter is compared against the materialized reference on both sides of
+    its boundary as well as when no boundary is pinned at all.
     """
     rng = random.Random(SEED + run * 17 + int(window_seconds))
-    fast = ActivityWindow(window_seconds)
+    fast = ActivityWindow(window_seconds, service_port_max=service_port_max)
     reference = ReferenceWindow(window_seconds)
 
     hosts = ["10.0.0.1", "10.0.0.2", "10.0.0.3"]
     sources = ["192.168.0.5", "192.168.0.6", None]
-    ports = [22, 80, 443, None]
+    # Ports straddle both pinned boundaries, and repeat, so a port entering
+    # and leaving the window has to move the counter exactly once each way.
+    ports = [22, 80, 443, 1023, 1024, 49151, 49152, 60_000, None]
     protocols = ["tcp", "udp", None]
     byte_values = [0, 100, 100, 5_000]
-    # None dominates on purpose: today's ingestion supplies no conn_state, so
-    # the mixed-coverage window is the case that has to stay correct.
-    conn_states = ["S0", "SF", "REJ", None, None, None]
+    # None dominates on purpose: under the frozen legacy-m1d profile ingestion
+    # supplies no conn_state, so the mixed-coverage window is the case that
+    # has to stay correct. OTH and an unrecognised value are in the pool
+    # because they are *uncovered* rather than absent, and the fast path and
+    # the reference must agree on that too.
+    conn_states = ["S0", "SF", "REJ", "OTH", "ZZ", "", None, None, None]
 
     timestamp = 1_000.0
     for step in range(400):
