@@ -43,6 +43,27 @@ Zeek runs in Docker (no local install). Two options depending on Docker access:
 sudo ./scripts/run_zeek.sh pcaps/capture.pcap zeek_output
 ```
 
+### Docker without sudo (local testing)
+
+The Zeek wrapper and both E2E harnesses shell out to `docker`. If you see
+`permission denied while trying to connect to the docker API at
+unix:///var/run/docker.sock`, your user is not yet on the socket:
+
+```bash
+sudo usermod -aG docker $USER
+# then ONE of: log out and back in, or refresh this shell with:
+newgrp docker
+docker run --rm hello-world        # no password prompt = fixed
+docker images --digests | grep -E "73e80|sih-zeek"   # pinned + JA4 images visible
+```
+
+Notes: group membership is evaluated at login, which is why a fresh shell can
+still fail right after `usermod` (compare `groups` vs `getent group docker`).
+Membership in `docker` is root-equivalent by design — accepted tradeoff for a
+dev box, never for shared/production hosts. The VM walkthrough lives in
+`DEPLOYMENT.md` §5a; the JA4 image additionally needs
+`./scripts/build_ja4_runtime.sh` before `--ja4` runs.
+
 The supported official runtime is frozen to:
 
 ```text
@@ -123,7 +144,14 @@ and all status/`--stats` text stays on stderr.
 For TLS, detector-v2 uses a lossless-derived projection that adds exact source
 `ja4` without changing the frozen legacy `SslRecord`. Missing, unset, and empty
 JA4 become `null`; every other non-empty source string is preserved exactly and
-is never derived from JA3, SNI, cipher, version, addresses, or ports.
+is never derived from JA3, SNI, cipher, version, addresses, or ports. `ja3` and
+`ja3s` are transported the same way when the runtime emits them, but neither
+qualified runtime does today (base `8.0.10` installs no fingerprint packages;
+the JA4 image adds only `ssl.log.ja4` — see the frozen `#fields` evidence in
+`tests/fixtures/runtime_headers/`), so real output carries them as `null` and
+`--stats` reports `tls.ja3=0`. Tests inject them synthetically. The
+encrypted-malware signature path therefore needs an emitting runtime plus a
+local feed before it can fire on real captures.
 
 ## CanonicalObservation v1 sidecar
 
@@ -371,12 +399,12 @@ unknown→0.
 | `is_txt` | bool | query was TXT type | **TXT ⇒ tunneling** |
 | `label_count` | int | number of DNS labels | many ⇒ DGA |
 
-### Optional `tls` block (present iff the flow carried JA3/JA3s)
+### Optional `tls` block (present iff the flow had a TLS record)
 
 | field | type | meaning | threat hint |
 |---|---|---|---|
 | `uid` | string | links to flow | |
-| `has_ja3` / `has_ja3s` | bool | client / server hash present | |
+| `has_ja3` / `has_ja3s` | bool | client / server hash present (false in real output today — neither qualified runtime emits JA3/JA3S; see above) | |
 | `ssl_version_encoded` | int (0–5) | see mapping | old/rare ⇒ suspicious |
 | `cipher_encoded` | int | coarse cipher encoding | **placeholder — needs a real JA3 lookup table** |
 
