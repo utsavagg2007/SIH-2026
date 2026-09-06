@@ -1,5 +1,7 @@
 use ingestion_core::features::dns_features::DnsFeatures;
-use ingestion_core::zeek_parser::dns_log::{parse_dns_log, parse_dns_log_lossless};
+use ingestion_core::zeek_parser::dns_log::{
+    parse_dns_log, parse_dns_log_detector, parse_dns_log_lossless,
+};
 use ingestion_core::zeek_parser::source_types::{DiagnosticKind, SourceValue, ZeekLogType};
 
 #[test]
@@ -136,4 +138,31 @@ NXDOMAIN\texample.test\tD-ORDER\t3.5\tA
     assert_eq!(records[0].query, "example.test");
     assert_eq!(records[0].qtype, "A");
     assert_eq!(records[0].rcode, "NXDOMAIN");
+}
+
+#[test]
+fn detector_dns_projection_retains_every_physical_row_and_approved_source_fact() {
+    let content = "#set_separator\t,\n\
+#fields\tquery\tuid\tts\tid.orig_h\tid.orig_p\tid.resp_h\tid.resp_p\tproto\tqtype\tqtype_name\trcode\trcode_name\tAA\tTC\tRD\tRA\tZ\tanswers\trejected\n\
+one.example\tD1\t1.25\t192.0.2.1\t53000\t198.51.100.53\t53\tudp\t1\tA\t0\tNOERROR\tF\tF\tT\tT\t0\t203.0.113.1,203.0.113.2\tF\n\
+two.example\tD1\t1.50\t192.0.2.1\t53000\t198.51.100.53\t53\tudp\t16\tTXT\t3\tNXDOMAIN\tT\tT\tF\tF\t1\t-\tT\n";
+    let records = parse_dns_log_detector(content).unwrap();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].source_ordinal, 0);
+    assert_eq!(records[1].source_ordinal, 1);
+    assert_eq!(records[0].event_time, Some(1.25));
+    assert_eq!(records[0].src_ip.as_deref(), Some("192.0.2.1"));
+    assert_eq!(records[0].src_port, Some(53000));
+    assert_eq!(records[0].dst_ip.as_deref(), Some("198.51.100.53"));
+    assert_eq!(records[0].dst_port, Some(53));
+    assert_eq!(records[0].proto.as_deref(), Some("udp"));
+    assert_eq!(records[0].qtype_name.as_deref(), Some("A"));
+    assert_eq!(records[0].rcode_name.as_deref(), Some("NOERROR"));
+    assert_eq!(records[0].answer_count, Some(2));
+    assert_eq!(records[1].authoritative_answer, Some(true));
+    assert_eq!(records[1].truncated, Some(true));
+    assert_eq!(records[1].recursion_desired, Some(false));
+    assert_eq!(records[1].recursion_available, Some(false));
+    assert_eq!(records[1].z, Some(1));
+    assert_eq!(records[1].rejected, Some(true));
 }

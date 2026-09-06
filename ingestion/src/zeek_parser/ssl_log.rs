@@ -278,6 +278,14 @@ fn legacy_f64(value: &SourceValue<String>) -> f64 {
     }
 }
 
+fn detector_f64(value: &SourceValue<String>) -> Option<f64> {
+    value.as_value().and_then(|raw| raw.parse::<f64>().ok())
+}
+
+fn detector_ip(value: &SourceValue<SourceIp>) -> Option<String> {
+    value.as_value().map(|address| address.raw.clone())
+}
+
 impl From<&ZeekTlsRecord> for SslRecord {
     fn from(record: &ZeekTlsRecord) -> Self {
         Self {
@@ -303,16 +311,22 @@ pub fn parse_ssl_log(content: &str) -> Result<Vec<SslRecord>, String> {
         .collect())
 }
 
-/// Detector-v2 parser API retaining source JA4 without changing SslRecord.
+/// Detector-v2 parser API retaining every physical row and approved source fact.
 pub fn parse_ssl_log_detector(content: &str) -> Result<Vec<DetectorSslRecord>, String> {
     let parsed = parse_ssl_log_lossless(content)?;
     Ok(parsed
         .records
         .iter()
-        .filter(|record| !record.row_too_short_for_legacy)
         .map(|record| DetectorSslRecord {
             legacy: SslRecord::from(record),
             ja4: legacy_optional_string(&record.ja4),
+            source_ordinal: record.row_ordinal,
+            event_time: detector_f64(&record.timestamp_raw),
+            src_ip: detector_ip(&record.src_ip),
+            src_port: record.src_port.copied(),
+            dst_ip: detector_ip(&record.dst_ip),
+            dst_port: record.dst_port.copied(),
+            proto: record.proto.as_value().cloned(),
         })
         .collect())
 }

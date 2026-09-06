@@ -1,5 +1,7 @@
 use ingestion_core::features::http_features::HttpFeatures;
-use ingestion_core::zeek_parser::http_log::{parse_http_log, parse_http_log_lossless};
+use ingestion_core::zeek_parser::http_log::{
+    parse_http_log, parse_http_log_detector, parse_http_log_lossless,
+};
 use ingestion_core::zeek_parser::source_types::{DiagnosticKind, SourceValue, ZeekLogType};
 
 #[test]
@@ -107,4 +109,22 @@ fn legacy_http_projection_and_features_are_exactly_compatible() {
         serde_json::to_string(&feature).unwrap(),
         r#"{"uid":"H-LEGACY","method_encoded":2,"host_length":1,"uri_length":1,"uri_entropy":-0.0,"has_user_agent":false,"user_agent_length":0,"request_body_len":0,"response_body_len":2,"status_code":0}"#
     );
+}
+
+#[test]
+fn detector_http_projection_retains_every_row_tuple_time_and_order() {
+    let content = "#fields\turi\tuid\tts\tid.orig_h\tid.orig_p\tid.resp_h\tid.resp_p\tproto\tmethod\thost\tuser_agent\trequest_body_len\tresponse_body_len\tstatus_code\n\
+/one\tH1\t2.25\t192.0.2.10\t40000\t198.51.100.80\t80\ttcp\tGET\texample.test\tAgent\t0\t3\t200\n\
+/two\tH1\t2.50\t192.0.2.10\t40000\t198.51.100.80\t80\ttcp\tPOST\texample.test\tAgent\t3\t4\t201\n";
+    let records = parse_http_log_detector(content).unwrap();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].source_ordinal, 0);
+    assert_eq!(records[1].source_ordinal, 1);
+    assert_eq!(records[0].event_time, Some(2.25));
+    assert_eq!(records[1].legacy.uri, "/two");
+    assert_eq!(records[0].src_ip.as_deref(), Some("192.0.2.10"));
+    assert_eq!(records[0].src_port, Some(40000));
+    assert_eq!(records[0].dst_ip.as_deref(), Some("198.51.100.80"));
+    assert_eq!(records[0].dst_port, Some(80));
+    assert_eq!(records[0].proto.as_deref(), Some("tcp"));
 }

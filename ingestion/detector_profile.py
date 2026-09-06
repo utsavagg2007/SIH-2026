@@ -81,6 +81,7 @@ class PipelineStats:
     with_http: int = 0
     with_raw_query: int = 0
     with_ja3: int = 0
+    with_ja3s: int = 0
     with_ja4: int = 0
     with_sni: int = 0
     multi_row_uids: dict[str, int] = field(default_factory=dict)
@@ -92,14 +93,14 @@ class PipelineStats:
             f"emitted  {self.emitted} flow record(s)",
             f"enriched dns={self.with_dns} tls={self.with_tls} http={self.with_http}",
             f"raw      dns.query={self.with_raw_query} tls.ja3={self.with_ja3} "
-            f"tls.ja4={self.with_ja4} "
+            f"tls.ja3s={self.with_ja3s} tls.ja4={self.with_ja4} "
             f"tls.server_name={self.with_sni}",
         ]
         for kind, count in sorted(self.multi_row_uids.items()):
             lines.append(
-                f"note     {count} uid(s) carried multiple {kind} rows; the "
-                f"earliest is inlined and the rest are counted in "
-                f"{kind}.transaction_count"
+                f"note     {count} uid(s) carried multiple {kind} rows; all rows "
+                f"are preserved in {kind}_transactions and the earliest "
+                f"event-time row remains in {kind} for compatibility"
             )
         if not self.with_raw_query and self.dns_records:
             lines.append(
@@ -144,7 +145,7 @@ def _protocol_index(
     """Choose the earliest protocol row per UID and expose multiplicity."""
 
     index: dict[str, tuple[dict, dict, int]] = {}
-    for record, derived in zip(records, features):
+    for record, derived in zip(records, features, strict=True):
         uid = record.get("uid")
         if not uid:
             continue
@@ -162,14 +163,27 @@ def _protocol_index(
     return index
 
 
-def _dns_block(raw: dict, derived: dict, transactions: int) -> dict:
-    qtype = _qtype_name(raw.get("qtype"))
+def _protocol_groups(
+    records: list[dict], features: list[dict]
+) -> dict[str, list[tuple[dict, dict]]]:
+    """Group rows by UID without changing physical source-row order."""
+
+    groups: dict[str, list[tuple[dict, dict]]] = {}
+    for record, derived in zip(records, features, strict=True):
+        uid = record.get("uid")
+        if uid:
+            groups.setdefault(uid, []).append((record, derived))
+    return groups
+
+
+def _dns_block(raw: dict, derived: dict, transactions: int | None) -> dict:
+    qtype = _qtype_name(raw.get("qtype_name") or raw.get("qtype"))
     block = {
         "uid": raw.get("uid"),
         "query": _clean(raw.get("query")),
         "qtype": qtype,
         "qtype_num": _clean(raw.get("qtype")),
-        "rcode": _rcode_name(raw.get("rcode")),
+        "rcode": _rcode_name(raw.get("rcode_name") or raw.get("rcode")),
         "rcode_num": _clean(raw.get("rcode")),
         "query_length": derived.get("query_length"),
         "query_entropy": derived.get("query_entropy"),
@@ -177,7 +191,7 @@ def _dns_block(raw: dict, derived: dict, transactions: int) -> dict:
         "is_txt": qtype == "TXT",
         "label_count": derived.get("label_count"),
     }
-    if transactions > 1:
+    if transactions is not None:
         block["transaction_count"] = transactions
     return block
 
@@ -189,7 +203,7 @@ def _shannon(text: str) -> float:
     return -sum((count / total) * log2(count / total) for count in Counter(text).values())
 
 
-def _tls_block(raw: dict, derived: dict, transactions: int) -> dict:
+def _tls_block(raw: dict, derived: dict, transactions: int | None) -> dict:
     server_name = _clean(raw.get("server_name"))
     block = {
         "uid": raw.get("uid"),
@@ -206,12 +220,12 @@ def _tls_block(raw: dict, derived: dict, transactions: int) -> dict:
     if server_name:
         block["sni_length"] = len(server_name)
         block["sni_entropy"] = _shannon(server_name)
-    if transactions > 1:
+    if transactions is not None:
         block["transaction_count"] = transactions
     return block
 
 
-def _http_block(raw: dict, derived: dict, transactions: int) -> dict:
+def _http_block(raw: dict, derived: dict, transactions: int | None) -> dict:
     block = {
         "uid": raw.get("uid"),
         "host": _clean(raw.get("host")),
@@ -227,8 +241,51 @@ def _http_block(raw: dict, derived: dict, transactions: int) -> dict:
         "request_body_len": derived.get("request_body_len"),
         "response_body_len": derived.get("response_body_len"),
     }
-    if transactions > 1:
+    if transactions is not None:
         block["transaction_count"] = transactions
+    return block
+
+
+def _transaction_source(raw: dict) -> dict:
+    """Approved source identity/tuple facts shared by transaction blocks."""
+
+    return {
+        "event_time": raw.get("event_time"),
+        "source_ordinal": raw.get("source_ordinal"),
+        "src_ip": _clean(raw.get("src_ip")),
+        "src_port": raw.get("src_port"),
+        "dst_ip": _clean(raw.get("dst_ip")),
+        "dst_port": raw.get("dst_port"),
+        "proto": _clean(raw.get("proto")),
+    }
+
+
+def _dns_transaction(raw: dict, derived: dict) -> dict:
+    block = _dns_block(raw, derived, None)
+    block.update(_transaction_source(raw))
+    block.update(
+        {
+            "authoritative_answer": raw.get("authoritative_answer"),
+            "truncated": raw.get("truncated"),
+            "recursion_desired": raw.get("recursion_desired"),
+            "recursion_available": raw.get("recursion_available"),
+            "z": raw.get("z"),
+            "answer_count": raw.get("answer_count"),
+            "rejected": raw.get("rejected"),
+        }
+    )
+    return block
+
+
+def _tls_transaction(raw: dict, derived: dict) -> dict:
+    block = _tls_block(raw, derived, None)
+    block.update(_transaction_source(raw))
+    return block
+
+
+def _http_transaction(raw: dict, derived: dict) -> dict:
+    block = _http_block(raw, derived, None)
+    block.update(_transaction_source(raw))
     return block
 
 
@@ -271,24 +328,21 @@ def build_records(
     dns_records = parsed.get("dns", [])
     ssl_records = parsed.get("ssl", [])
     http_records = parsed.get("http", [])
-    dns_index = _protocol_index(
-        dns_records,
-        json.loads(extract_dns_features(json.dumps(dns_records))) if dns_records else [],
-        "dns",
-        stats,
+    dns_features = (
+        json.loads(extract_dns_features(json.dumps(dns_records))) if dns_records else []
     )
-    tls_index = _protocol_index(
-        ssl_records,
-        json.loads(extract_tls_features(json.dumps(ssl_records))) if ssl_records else [],
-        "tls",
-        stats,
+    tls_features = (
+        json.loads(extract_tls_features(json.dumps(ssl_records))) if ssl_records else []
     )
-    http_index = _protocol_index(
-        http_records,
-        json.loads(extract_http_features(json.dumps(http_records))) if http_records else [],
-        "http",
-        stats,
+    http_features = (
+        json.loads(extract_http_features(json.dumps(http_records))) if http_records else []
     )
+    dns_index = _protocol_index(dns_records, dns_features, "dns", stats)
+    tls_index = _protocol_index(ssl_records, tls_features, "tls", stats)
+    http_index = _protocol_index(http_records, http_features, "http", stats)
+    dns_groups = _protocol_groups(dns_records, dns_features)
+    tls_groups = _protocol_groups(ssl_records, tls_features)
+    http_groups = _protocol_groups(http_records, http_features)
 
     for index, conn in enumerate(ordered):
         uid = conn.get("uid")
@@ -307,22 +361,36 @@ def build_records(
         if uid in dns_index:
             raw, derived, count = dns_index[uid]
             vector["dns"] = _dns_block(raw, derived, count)
+            vector["dns_transactions"] = [
+                _dns_transaction(transaction, transaction_features)
+                for transaction, transaction_features in dns_groups[uid]
+            ]
             stats.with_dns += 1
-            if vector["dns"]["query"]:
+            if any(item["query"] for item in vector["dns_transactions"]):
                 stats.with_raw_query += 1
         if uid in tls_index:
             raw, derived, count = tls_index[uid]
             vector["tls"] = _tls_block(raw, derived, count)
+            vector["tls_transactions"] = [
+                _tls_transaction(transaction, transaction_features)
+                for transaction, transaction_features in tls_groups[uid]
+            ]
             stats.with_tls += 1
-            if vector["tls"]["ja3"]:
+            if any(item["ja3"] for item in vector["tls_transactions"]):
                 stats.with_ja3 += 1
-            if vector["tls"]["ja4"]:
+            if any(item["ja3s"] for item in vector["tls_transactions"]):
+                stats.with_ja3s += 1
+            if any(item["ja4"] for item in vector["tls_transactions"]):
                 stats.with_ja4 += 1
-            if vector["tls"]["server_name"]:
+            if any(item["server_name"] for item in vector["tls_transactions"]):
                 stats.with_sni += 1
         if uid in http_index:
             raw, derived, count = http_index[uid]
             vector["http"] = _http_block(raw, derived, count)
+            vector["http_transactions"] = [
+                _http_transaction(transaction, transaction_features)
+                for transaction, transaction_features in http_groups[uid]
+            ]
             stats.with_http += 1
 
         stats.emitted += 1
