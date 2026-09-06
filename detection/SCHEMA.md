@@ -142,6 +142,7 @@ Handled entirely by `adapters/ingestion_jsonl.py` + `adapters/encodings.py`.
 | `dns.query`, `qtype`, `qtype_num`, `rcode`, `rcode_num`, `transaction_count` | direct from the earliest event-time DNS row plus per-UID multiplicity in `detector-v2` |
 | `tls.ja3`, `ja3s`, `ja4`, `server_name`, `version`, `cipher`, `transaction_count` | direct when observed; missing fingerprints are absent rather than fabricated; legacy version can be decoded from `ssl_version_encoded` |
 | `http.host`, `uri`, `user_agent`, `method`, `status_code`, `transaction_count` | direct from the earliest event-time HTTP row; legacy method can be decoded from `method_encoded` |
+| `dns_transactions`, `tls_transactions`, `http_transactions` | every correlated source row in physical order; each row carries optional source ordinal, event time, and tuple context; the scalar block remains the earliest-event compatibility projection |
 | dns/tls/http derived features | direct |
 
 ### Deliberately ignored
@@ -185,8 +186,9 @@ invents missing values.
 | `dns.query` | **DGA classification** and analyst evidence; supplied when observed. DNS tunnelling still qualifies on derived metadata |
 | `dns.qtype`, `dns.rcode`, numeric code companions | richer DNS evidence; supplied when observed |
 | `tls.server_name` (plus derived `sni_length` / `sni_entropy`) | encrypted-malware metadata path; supplied when observed, without decryption |
-| `tls.ja3`, `tls.ja3s` | fingerprint matching; supplied when the pinned Zeek logs contain them |
-| `tls.ja4` | exact source value from the qualified JA4 runtime through detector-v2; `None` for missing/unset/empty source and never derived |
+| `tls.ja3`, `tls.ja3s` | exact fingerprint matching; supplied by full fingerprint mode when the source handshake supports them |
+| `tls.ja4` | exact source value from JA4-only or full fingerprint mode; `None` for missing/unset/empty source and never derived |
+| DNS/TLS/HTTP transaction arrays | prevents later protocol rows from being hidden by the scalar compatibility projection; old scalar-only JSON remains accepted |
 | `http.host`, `http.uri`, `http.user_agent`, `http.method` | C2-over-HTTP evidence; supplied when observed |
 
 An encoded placeholder is never a substitute for the raw string: a decoded
