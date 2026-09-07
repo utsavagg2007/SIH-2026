@@ -594,7 +594,7 @@ export function AlertStream({
           fontFamily: SANS, fontSize: 10, letterSpacing: "0.02em", color: T.text3,
         }}
       >
-        j / k move &middot; enter analyst &middot; 1–4 severity &middot; 0 clear &middot; e expand raw &middot; esc clear
+        j / k move &middot; enter analyst &middot; / ask &middot; 1–4 severity &middot; 0 clear &middot; e expand raw &middot; esc clear
       </div>
     </div>
   );

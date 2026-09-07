@@ -95,7 +95,7 @@ function HostPicker({ onOpenHost }: { onOpenHost: (ip: string) => void }) {
           {hosts ? `${hosts.length} seen in stored alerts` : ""}
         </span>
       </div>
-      <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
+      <div className="launcher-clearance" style={{ flex: 1, overflowY: "auto", padding: 16 }}>
         <div style={{ fontFamily: SANS, fontSize: 13, color: T.text3, marginBottom: 14 }}>
           Every IP address in the interface opens its host view. These are the machines that appear in a stored alert.
         </div>
@@ -204,7 +204,7 @@ export function HostView({ host, alerts, incidents, onSelectAlert, onOpenHost }:
         )}
       </div>
 
-      <div style={{ flex: 1, overflowY: "auto", padding: 16 }}>
+      <div className="launcher-clearance" style={{ flex: 1, overflowY: "auto", padding: 16 }}>
         {error && (
           <div style={{ fontFamily: SANS, fontSize: 12, color: T.text2, marginBottom: 12 }}>
             Host record unavailable (<span style={{ fontFamily: MONO, color: T.text3 }}>{error}</span>). Showing what the live

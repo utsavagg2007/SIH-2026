@@ -434,3 +434,109 @@ table.grid td {
     transition: none !important;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Analyst launcher — the one control that must not read as a chip.
+
+   It sat in `.ctl`, which is correct for a small labelled action beside the
+   thing it acts on ("expand", "copy json", "Explain"). The launcher is not
+   that: it is a persistent entry point to a whole surface, floating over the
+   console with nothing beside it to explain what it does, in the busiest
+   corner of the screen. In `.ctl` it read as one more chip among thirty and
+   nobody found it.
+
+   Prominence here cannot come from colour. §2.1 reserves saturation entirely
+   for severity, §2.6 lists every permitted exception and buttons are not on
+   it, and §3.2 forbids shadows and anything above a 2px radius. So it is built
+   from the three channels the system does offer, all pushed one step at once:
+
+     surface   --panel-3, the top of the ladder. Elsewhere that value is hover
+               only, so a control resting there already reads as raised.
+     border    --rule-bright against every other control's --rule.
+     text      --text against every other control's --text-2.
+
+   Then separated rather than elevated: a 4px --bg-deep ring is the same
+   device the layout uses between panels (§3.2, "gutter: 1px --rule over
+   --bg-deep"), so the button appears to sit in its own gutter above the
+   instrument bar instead of belonging to it. No shadow is involved, which is
+   what §3.2 actually prohibits - the ban is on faked light, not on depth.
+
+   Size does the rest: 13px text in a 40px-tall block against the chip
+   register's 11px in 24px. It also puts the hit target comfortably past the
+   24px WCAG 2.5.8 minimum, which the chip did not clear with room to spare.
+*/
+.ask-launcher {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  height: 40px;
+  padding: 0 14px;
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text);
+  background: var(--panel-3);
+  border: 1px solid var(--rule-bright);
+  border-radius: 2px;
+  /* Separation, not elevation. Reads as the panel gutter, casts no light. */
+  outline: 4px solid var(--bg-deep);
+  cursor: pointer;
+}
+.ask-launcher:hover {
+  border-color: var(--text-3);
+}
+.ask-launcher:focus-visible {
+  /* Overrides the 4px --bg-deep ring while focused, so the focus state is the
+     outermost thing on the element rather than hidden underneath it. */
+  outline: 2px solid var(--baseline);
+  outline-offset: 1px;
+}
+
+/* The launcher floats over the panels, which means it sits on top of whatever
+   is in the bottom-right corner of a scrolling region - and the evidence
+   panel's "copy json" lives exactly there, right-aligned in the last row, so
+   it was completely unreachable.
+
+   Fixed by reserving the launcher's footprint at the end of every region it
+   can cover, rather than by moving the one control that was reported. There
+   are five such regions and the next one added would have had the same bug;
+   what they have in common is scrolling underneath a fixed overlay, so that is
+   where the fix belongs.
+
+   The arithmetic, so it can be rechecked rather than trusted: the launcher's
+   top edge sits 108px above the viewport bottom (64px offset + 40px tall + 4px
+   ring), and these regions end where the 48px instrument bar begins, so 60px
+   of clearance is the minimum. 64px, for the 4px of margin and because it
+   composes from the space scale (48 + 16).
+
+   An ::after spacer rather than padding-bottom: these containers are
+   inline-styled, and an inline `padding: 16` beats any padding this class
+   could set. A spacer element cannot be overridden that way. */
+:root {
+  --ask-launcher-clearance: 64px;
+}
+
+.launcher-clearance::after {
+  content: "";
+  display: block;
+  height: var(--ask-launcher-clearance);
+  flex-shrink: 0;
+}
+
+/* The shortcut, set as a key rather than as text. Mono because it names a
+   physical key, boxed because §2.7 already uses a 1px --rule-bright box to
+   mark a machine token. */
+.ask-launcher kbd {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-2);
+  border: 1px solid var(--rule-bright);
+  border-radius: 2px;
+  padding: 0 5px;
+  line-height: 16px;
+}

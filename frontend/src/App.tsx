@@ -13,6 +13,7 @@ import { InstrumentBar } from "./components/InstrumentBar";
 import { AlertStream, applyFilters, type StreamFilters } from "./components/AlertStream";
 import { EvidencePanel } from "./components/EvidencePanel";
 import { AnalystPanel } from "./components/AnalystPanel";
+import { AnalystChat } from "./components/AnalystChat";
 import { IncidentsView } from "./components/IncidentsView";
 import { HostView } from "./components/HostView";
 import { ReplayView } from "./components/ReplayView";
@@ -286,6 +287,12 @@ export default function App() {
 
         <InstrumentBar metrics={metrics} trafficSource={system.throughput?.traffic_source} />
       </div>
+
+      {/* Fixed to the viewport, so it reaches every view rather than only the
+          live one - a question about a host is as likely to occur on the
+          incidents screen as on the stream. Outside the column flex for the
+          same reason: it must not take part in any view's layout. */}
+      <AnalystChat suppressed={view === "live" && showAnalyst} />
     </div>
   );
 }

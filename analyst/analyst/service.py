@@ -84,7 +84,12 @@ class AnalystService:
             host=query.host,
             limit=query.limit,
         )
-        sheet = describe_corpus(question, alerts, window=query.window_label)
+        sheet = describe_corpus(
+            question,
+            alerts,
+            window=query.window_label,
+            threat_class=query.threat_class,
+        )
         # How the question was read belongs in the answer, not in a log. An
         # analyst who asked about one host and got the whole network should be
         # able to see that immediately.
@@ -93,7 +98,7 @@ class AnalystService:
             source="query plan",
             rank=95,
         )
-        return sheet, await self._render(sheet), query
+        return sheet, await self._render(sheet, question=question), query
 
     # -- rendering ---------------------------------------------------------
 
@@ -106,8 +111,16 @@ class AnalystService:
             degraded_reason=reason,
         )
 
-    async def _render(self, sheet: FactSheet) -> Generation:
-        """Generate if we can, verify what comes back, fall back if not."""
+    async def _render(self, sheet: FactSheet, question: str | None = None) -> Generation:
+        """Generate if we can, verify what comes back, fall back if not.
+
+        *question* is the operator's own wording, forwarded to the prompt for
+        corpus sheets. ``build_user_prompt`` has always accepted it and nothing
+        ever passed it, so the model saw the question only as the sheet's
+        subject line and was told to "answer the analyst's question" without
+        being shown one - which produced summaries of the retrieved set where a
+        direct answer was asked for.
+        """
         if sheet.empty_reason or (self._settings.require_evidence and sheet.is_empty):
             # Refusing to generate on an empty sheet is the single most
             # important rule in this layer. A model handed no facts will
@@ -118,7 +131,9 @@ class AnalystService:
             return self._plain(sheet)
 
         try:
-            text = await self._provider.generate(SYSTEM, build_user_prompt(sheet))
+            text = await self._provider.generate(
+                SYSTEM, build_user_prompt(sheet, question)
+            )
         except GenerationError as exc:
             logger.warning("generation failed, falling back to templates: %s", exc)
             return self._plain(sheet, reason=str(exc))

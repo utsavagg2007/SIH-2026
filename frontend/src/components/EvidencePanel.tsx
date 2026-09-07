@@ -271,7 +271,7 @@ function EvidencePanelImpl({ alert, onOpenHost, onOpenIncident, rawOpen = false,
         <span style={{ fontFamily: MONO, fontSize: 11, color: T.text3, marginLeft: "auto" }}>{alert.alert_id}</span>
       </div>
 
-      <div style={{ flex: 1, overflowY: "auto", minHeight: 0 }}>
+      <div className="launcher-clearance" style={{ flex: 1, overflowY: "auto", minHeight: 0 }}>
         {/* Identity and the class visual sit side by side, so the most
             convincing image in the product is above the fold rather than
             third in a scrolling column (§1.1E). */}

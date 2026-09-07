@@ -161,3 +161,64 @@ async def test_ask_reports_how_it_read_the_question():
     sheet, generation, _ = await service.ask("anything at all about port scanning")
     assert any(f.source == "query plan" for f in sheet.facts)
     assert "interpreted as" in generation.text
+
+
+# --------------------------------------------------------------------------
+# Reference knowledge
+#
+# The chatbot's core case: an operator asks what a threat is. Retrieval alone
+# cannot answer that - it is not a fact about any row - and before the knowledge
+# base existed the empty result was refused outright, so the most natural
+# question anyone types got "no stored alert matched that query".
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_threat_question_is_answered_with_no_stored_alerts():
+    provider = EchoProvider("DNS tunnelling carries data inside DNS queries.")
+    service = AnalystService(FakeStore(), provider, _settings())
+
+    sheet, generation, query = await service.ask("what is dns tunnelling?")
+
+    assert query.threat_class == "dns_tunnelling"
+    assert sheet.empty_reason is None, "a definition question must not be refused"
+    assert provider.calls, "the model should have been given the knowledge facts"
+    assert generation.generated is True
+
+
+@pytest.mark.asyncio
+async def test_knowledge_is_sourced_separately_from_measurement():
+    """Both halves of a mixed answer, each traceable to where it came from."""
+    service = AnalystService(FakeStore([ALERT]), TemplateOnly(), _settings())
+
+    sheet, _, _ = await service.ask("what is beaconing and have we seen any")
+
+    sources = {f.source for f in sheet.facts}
+    assert "knowledge base: c2_beaconing" in sources
+    assert "GET /api/v1/alerts" in sources
+
+
+@pytest.mark.asyncio
+async def test_unknown_subject_is_still_refused():
+    """The knowledge base must not become a way to answer anything at all."""
+    provider = EchoProvider("something confident")
+    service = AnalystService(FakeStore(), provider, _settings())
+
+    sheet, generation, _ = await service.ask("what is the wifi password")
+
+    assert sheet.empty_reason is not None
+    assert generation.generated is False
+    assert provider.calls == []
+
+
+@pytest.mark.asyncio
+async def test_the_question_reaches_the_prompt():
+    """`build_user_prompt` has always taken a question and nothing passed one,
+    so the model was told to answer a question it was never shown."""
+    provider = EchoProvider("an answer")
+    service = AnalystService(FakeStore([ALERT]), provider, _settings())
+
+    await service.ask("which hosts are beaconing")
+
+    _, user_prompt = provider.calls[0]
+    assert "which hosts are beaconing" in user_prompt

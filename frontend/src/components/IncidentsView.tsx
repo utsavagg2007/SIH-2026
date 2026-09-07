@@ -337,7 +337,7 @@ export function IncidentsView({
           {ordered.length} correlated
         </span>
       </div>
-      <div ref={focusRef} style={{ flex: 1, overflowY: "auto", padding: 16 }}>
+      <div ref={focusRef} className="launcher-clearance" style={{ flex: 1, overflowY: "auto", padding: 16 }}>
         {ordered.length === 0 ? (
           <div style={{ padding: "40px 16px", textAlign: "center", fontFamily: SANS, fontSize: 13, color: T.text3 }}>
             No correlated incidents yet.

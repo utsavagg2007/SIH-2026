@@ -57,6 +57,13 @@ ANALYST_GEMINI_MODEL=gemini-2.5-flash-lite
 | `GET /api/v1/analyst/health` | provider, model, and whether the alert store is reachable |
 | `GET /api/v1/analyst/constraints` | what this layer can and cannot reach — read this one out loud |
 
+`/ask` is what the dashboard's chat dock calls. It is reachable from the
+bottom-right of every view (`frontend/src/components/AnalystChat.tsx`), and
+needs nothing selected — the subject is the corpus, not a row. The right-docked
+`AnalystPanel` is the other surface: it explains whatever alert is selected,
+without being asked. Both render answers through the same components, so a
+badge or a citation means the same thing in either.
+
 Every answer returns:
 
 ```jsonc
@@ -71,6 +78,46 @@ Every answer returns:
   "alert_ids": ["..."]
 }
 ```
+
+## Two sources, never blended
+
+An answer draws on two things, and the panel keeps them visibly apart because
+they are different kinds of claim.
+
+**Measurement** comes from the alert store, cited to the field it came from —
+`evidence.interval_cv`, `severity`, `GET /api/v1/alerts`. It is what this
+network actually saw.
+
+**Reference** comes from `knowledge.py`, cited as `knowledge base: <class>`. It
+is what the threat *is*: why an attacker does it, how the detector recognises
+it, which evidence fields carry the signal, the MITRE technique, what to
+establish next, and — the line most consoles omit — what benign traffic has the
+same shape. Retrieval cannot produce any of that, because none of it is a fact
+about a row.
+
+That split is why "what is DNS tunnelling" and "have we seen any" are one
+answer rather than two features. It is also why the knowledge base contains not
+one number:
+
+> `unsupported_numbers()` builds the set of figures the model may state from
+> every fact in the sheet. A reference line reading "beacons roughly every
+> sixty seconds" would make 60 quotable as though something had measured it.
+> Every figure in an answer comes from a stored field, so no figure goes in the
+> reference text. `tests/test_knowledge.py` fails the build if one appears.
+
+MITRE technique ids are the sole exception — identifiers, not measurements.
+
+## The knowledge base needs no refresh
+
+A threat is answerable as soon as it is in the store, because there is no index
+between the two. Retrieval is a live `GET /api/v1/alerts` on every question, so
+the corpus the analyst reads is the corpus as it stands at that moment.
+
+Measured end to end: an alert POSTed to `/api/v1/alerts` was returned by
+`/ask` **about one second later** — the backend's write-behind batch interval
+(`DB_BATCH_INTERVAL_S`, default 0.5s), and nothing else. There is no embedding
+job to run, no vector store to backfill, and no window during which a stored
+threat is invisible to the analyst.
 
 ## Retrieval is structured, not embedded
 

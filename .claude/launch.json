@@ -2,6 +2,18 @@
   "version": "0.0.1",
   "configurations": [
     {
+      "name": "backend",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": ["-m", "uvicorn", "--app-dir", "backend", "app.main:app", "--port", "8000"],
+      "port": 8000
+    },
+    {
+      "name": "analyst",
+      "runtimeExecutable": ".venv/Scripts/python.exe",
+      "runtimeArgs": ["-m", "uvicorn", "--app-dir", "analyst", "analyst.main:app", "--port", "8100"],
+      "port": 8100
+    },
+    {
       "name": "frontend-dev",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "dev", "--prefix", "frontend"],
