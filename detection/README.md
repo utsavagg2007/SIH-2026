@@ -216,10 +216,11 @@ ja4:t13d1516h2_8daaf6152771_02713d6af862
   silently replacing them.
 
 Two honest limitations. `detector-v2` emits TLS fingerprints only when its Zeek
-source log contains them; JA4 therefore requires the separately qualified JA4
-runtime, and a capture without observed fingerprints gives the signature path
-nothing to match on however good the indicator list is. This remains metadata
-matching: **nothing here decrypts anything**.
+source log contains them: JA4-only mode supplies JA4, while full fingerprint
+mode supplies source JA3/JA3S/JA4 when the handshake supports them. A capture
+without observed fingerprints gives the signature path nothing to match on
+however good the indicator list is. This remains metadata matching: **nothing
+here decrypts anything**.
 
 ### Startup safety and exit codes
 
@@ -270,7 +271,10 @@ the integrated detector path:
 
 The adapter preserves top-level `uid`, `timestamp`, `src_port`, `service`, raw
 `conn_state`, IP-byte counters, decoded and numeric DNS codes, raw DNS/TLS/HTTP
-fields, and protocol-row multiplicity. Missing source observations remain
+fields, and protocol-row multiplicity. It exposes every protocol row in
+source-order transaction arrays while retaining earliest-event scalar blocks
+for old consumers; DGA, DNS-tunnelling, and encrypted-malware detection prefer
+the arrays and inspect each transaction once. Missing source observations remain
 `None`; encoded placeholders are never substituted for raw strings. See
 "Profile capabilities" in `SCHEMA.md`.
 

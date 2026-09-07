@@ -39,6 +39,13 @@ fn parse_dns_log(path: String) -> PyResult<String> {
 }
 
 #[pyfunction]
+fn parse_dns_log_detector(path: String) -> PyResult<String> {
+    let content = read_file(&path)?;
+    let records = to_py_err(dns_log::parse_dns_log_detector(&content))?;
+    to_py_err(serde_json::to_string(&records))
+}
+
+#[pyfunction]
 fn parse_ssl_log(path: String) -> PyResult<String> {
     let content = read_file(&path)?;
     let records = to_py_err(ssl_log::parse_ssl_log(&content))?;
@@ -56,6 +63,13 @@ fn parse_ssl_log_detector(path: String) -> PyResult<String> {
 fn parse_http_log(path: String) -> PyResult<String> {
     let content = read_file(&path)?;
     let records = to_py_err(http_log::parse_http_log(&content))?;
+    to_py_err(serde_json::to_string(&records))
+}
+
+#[pyfunction]
+fn parse_http_log_detector(path: String) -> PyResult<String> {
+    let content = read_file(&path)?;
+    let records = to_py_err(http_log::parse_http_log_detector(&content))?;
     to_py_err(serde_json::to_string(&records))
 }
 
@@ -146,9 +160,11 @@ fn extract_http_features(http_json: String) -> PyResult<String> {
 fn ingestion_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(parse_conn_log, m)?)?;
     m.add_function(wrap_pyfunction!(parse_dns_log, m)?)?;
+    m.add_function(wrap_pyfunction!(parse_dns_log_detector, m)?)?;
     m.add_function(wrap_pyfunction!(parse_ssl_log, m)?)?;
     m.add_function(wrap_pyfunction!(parse_ssl_log_detector, m)?)?;
     m.add_function(wrap_pyfunction!(parse_http_log, m)?)?;
+    m.add_function(wrap_pyfunction!(parse_http_log_detector, m)?)?;
     m.add_function(wrap_pyfunction!(sha256_input_file, m)?)?;
     m.add_function(wrap_pyfunction!(
         write_canonical_observations_from_zeek_logs,

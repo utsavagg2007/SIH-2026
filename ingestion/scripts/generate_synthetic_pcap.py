@@ -3,8 +3,9 @@
 
 The fixture uses only IANA documentation address ranges and Python's standard
 library. Packet timestamps, sequence numbers, headers, and payloads are fixed.
-It contains one UDP DNS transaction, one TCP DNS transaction, one HTTP/1.1
-connection with two requests, and one minimal TLS handshake.
+The primary fixture contains one UDP DNS transaction, one TCP DNS transaction,
+one HTTP/1.1 connection with two requests, and one minimal TLS handshake. A
+separate cardinality fixture contains five DNS transactions on one UDP flow.
 """
 
 from __future__ import annotations
@@ -328,6 +329,45 @@ def build_ja4_fixture() -> bytes:
     return bytes(output)
 
 
+def build_transaction_fixture() -> bytes:
+    """Five DNS transactions on one deterministic UDP connection/UID."""
+    PACKETS.clear()
+    global IP_ID
+    IP_ID = 800
+
+    second = 1_700_000_200
+    for index in range(5):
+        transaction = 0x2001 + index
+        name = f"txn-{index + 1}.example.test"
+        request_tick = index * 100_000
+        add_udp(
+            second,
+            request_tick,
+            "192.0.2.40",
+            "198.51.100.53",
+            54000,
+            53,
+            dns_query(transaction, name),
+        )
+        add_udp(
+            second,
+            request_tick + 50_000,
+            "198.51.100.53",
+            "192.0.2.40",
+            53,
+            54000,
+            dns_response(transaction, name, f"203.0.113.{40 + index}"),
+        )
+
+    output = bytearray(build_empty_fixture())
+    for packet_second, microsecond, frame in PACKETS:
+        output.extend(
+            struct.pack("<IIII", packet_second, microsecond, len(frame), len(frame))
+        )
+        output.extend(frame)
+    return bytes(output)
+
+
 def build_invalid_fixture() -> bytes:
     """A deterministically truncated packet record for Zeek failure testing."""
     output = bytearray(build_empty_fixture())
@@ -372,6 +412,11 @@ def main() -> None:
         help="also write the two-flow JA4 qualification fixture",
     )
     parser.add_argument(
+        "--transaction-output",
+        type=Path,
+        help="also write the five-row DNS cardinality qualification fixture",
+    )
+    parser.add_argument(
         "--auxiliary-directory",
         type=Path,
         help="also write deterministic empty, invalid, and unsupported-only fixtures",
@@ -382,6 +427,8 @@ def main() -> None:
     packet_count = len(PACKETS)
     if args.ja4_output is not None:
         write_fixture(args.ja4_output, build_ja4_fixture())
+    if args.transaction_output is not None:
+        write_fixture(args.transaction_output, build_transaction_fixture())
     if args.auxiliary_directory is not None:
         for name, auxiliary in [
             ("m1d_empty.pcap", build_empty_fixture()),

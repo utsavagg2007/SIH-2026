@@ -137,19 +137,30 @@ def _require_block(record: Mapping[str, Any], key: str) -> Mapping[str, Any] | N
     return raw
 
 
-def _build_dns(record: Mapping[str, Any]) -> DnsInfo | None:
-    raw = _require_block(record, "dns")
-    if raw is None:
-        return None
+def _build_dns_block(raw: Mapping[str, Any]) -> DnsInfo:
     return DnsInfo(
         uid=raw.get("uid"),
-        # query / qtype / rcode: integration TODO, absent upstream today.
+        event_time=raw.get("event_time"),
+        source_ordinal=raw.get("source_ordinal"),
+        src_ip=raw.get("src_ip"),
+        src_port=raw.get("src_port"),
+        dst_ip=raw.get("dst_ip"),
+        dst_port=raw.get("dst_port"),
+        proto=raw.get("proto"),
+        # Exact raw detector-v2 telemetry; old records may omit it.
         query=raw.get("query"),
         qtype=raw.get("qtype"),
         rcode=raw.get("rcode"),
         qtype_num=raw.get("qtype_num"),
         rcode_num=raw.get("rcode_num"),
         transaction_count=raw.get("transaction_count"),
+        authoritative_answer=raw.get("authoritative_answer"),
+        truncated=raw.get("truncated"),
+        recursion_desired=raw.get("recursion_desired"),
+        recursion_available=raw.get("recursion_available"),
+        z=raw.get("z"),
+        answer_count=raw.get("answer_count"),
+        rejected=raw.get("rejected"),
         query_length=raw.get("query_length"),
         query_entropy=raw.get("query_entropy"),
         subdomain_entropy=raw.get("subdomain_entropy"),
@@ -158,12 +169,23 @@ def _build_dns(record: Mapping[str, Any]) -> DnsInfo | None:
     )
 
 
-def _build_tls(record: Mapping[str, Any]) -> TlsInfo | None:
-    raw = _require_block(record, "tls")
+def _build_dns(record: Mapping[str, Any]) -> DnsInfo | None:
+    raw = _require_block(record, "dns")
     if raw is None:
         return None
+    return _build_dns_block(raw)
+
+
+def _build_tls_block(raw: Mapping[str, Any]) -> TlsInfo:
     return TlsInfo(
         uid=raw.get("uid"),
+        event_time=raw.get("event_time"),
+        source_ordinal=raw.get("source_ordinal"),
+        src_ip=raw.get("src_ip"),
+        src_port=raw.get("src_port"),
+        dst_ip=raw.get("dst_ip"),
+        dst_port=raw.get("dst_port"),
+        proto=raw.get("proto"),
         # Exact raw telemetry from detector-v2 when the source observed it.
         ja3=raw.get("ja3"),
         ja3s=raw.get("ja3s"),
@@ -174,9 +196,7 @@ def _build_tls(record: Mapping[str, Any]) -> TlsInfo | None:
         version=raw.get("version") or decode_ssl_version(raw.get("ssl_version_encoded")),
         has_ja3=raw.get("has_ja3"),
         has_ja3s=raw.get("has_ja3s"),
-        # sni_length / sni_entropy: integration TODO, absent upstream today.
-        # Read the same way as every other optional field, so a future
-        # ingestion release that emits them needs no adapter change.
+        # Derived only when ingestion observed a real server name.
         sni_length=raw.get("sni_length"),
         sni_entropy=raw.get("sni_entropy"),
     )
@@ -187,13 +207,24 @@ def _build_tls(record: Mapping[str, Any]) -> TlsInfo | None:
     # invite a detector to treat a meaningless number as a security signal.
 
 
-def _build_http(record: Mapping[str, Any]) -> HttpInfo | None:
-    raw = _require_block(record, "http")
+def _build_tls(record: Mapping[str, Any]) -> TlsInfo | None:
+    raw = _require_block(record, "tls")
     if raw is None:
         return None
+    return _build_tls_block(raw)
+
+
+def _build_http_block(raw: Mapping[str, Any]) -> HttpInfo:
     return HttpInfo(
         uid=raw.get("uid"),
-        # host / uri / user_agent: integration TODO, absent upstream today.
+        event_time=raw.get("event_time"),
+        source_ordinal=raw.get("source_ordinal"),
+        src_ip=raw.get("src_ip"),
+        src_port=raw.get("src_port"),
+        dst_ip=raw.get("dst_ip"),
+        dst_port=raw.get("dst_port"),
+        proto=raw.get("proto"),
+        # Exact raw detector-v2 request telemetry; old records may omit it.
         host=raw.get("host"),
         uri=raw.get("uri"),
         user_agent=raw.get("user_agent"),
@@ -208,6 +239,85 @@ def _build_http(record: Mapping[str, Any]) -> HttpInfo | None:
         status_code=raw.get("status_code"),
         transaction_count=raw.get("transaction_count"),
     )
+
+
+def _build_http(record: Mapping[str, Any]) -> HttpInfo | None:
+    raw = _require_block(record, "http")
+    if raw is None:
+        return None
+    return _build_http_block(raw)
+
+
+def _build_transactions(record: Mapping[str, Any], key: str, builder) -> list[Any]:
+    """Validate and map an explicitly present transaction array in source order."""
+
+    if key not in record:
+        return []
+    raw_items = record[key]
+    if not isinstance(raw_items, list):
+        raise ValueError(f"{key!r} must be a JSON array, got {type(raw_items).__name__}")
+    result = []
+    for index, raw in enumerate(raw_items):
+        if not isinstance(raw, Mapping):
+            raise ValueError(
+                f"{key}[{index}] must be a JSON object, got {type(raw).__name__}"
+            )
+        result.append(builder(raw))
+    return result
+
+
+def _validate_transaction_count(
+    name: str, scalar: Any, transactions: list[Any], array_present: bool
+) -> None:
+    if not array_present:
+        return
+    if scalar is None:
+        if transactions:
+            raise ValueError(f"{name}_transactions requires the {name!r} compatibility block")
+        return
+    if not transactions:
+        raise ValueError(f"{name}_transactions must not be empty when {name!r} is present")
+    if scalar.transaction_count is None:
+        raise ValueError(
+            f"{name}.transaction_count is required when {name}_transactions is present"
+        )
+    if scalar.transaction_count != len(transactions):
+        raise ValueError(
+            f"{name}.transaction_count={scalar.transaction_count} does not match "
+            f"len({name}_transactions)={len(transactions)}"
+        )
+
+
+def _validate_transaction_identity_and_order(
+    name: str,
+    record: Mapping[str, Any],
+    scalar: Any,
+    transactions: list[Any],
+) -> None:
+    """Reject cross-flow rows and contradictory physical-order evidence."""
+
+    if not transactions:
+        return
+    candidate_uids: list[tuple[str, str]] = []
+    top_level_uid = record.get("uid")
+    if isinstance(top_level_uid, str) and top_level_uid:
+        candidate_uids.append(("top-level uid", top_level_uid))
+    if scalar is not None and scalar.uid:
+        candidate_uids.append((f"{name}.uid", scalar.uid))
+    for index, transaction in enumerate(transactions):
+        if transaction.uid:
+            candidate_uids.append((f"{name}_transactions[{index}].uid", transaction.uid))
+    if candidate_uids:
+        expected_source, expected_uid = candidate_uids[0]
+        for source, uid in candidate_uids[1:]:
+            if uid == expected_uid:
+                continue
+            raise ValueError(
+                f"{source}={uid!r} does not match {expected_source}={expected_uid!r}"
+            )
+    ordinals = [item.source_ordinal for item in transactions if item.source_ordinal is not None]
+    if any(right <= left for left, right in zip(ordinals, ordinals[1:])):
+        raise ValueError(f"{name}_transactions source_ordinal values must be strictly increasing")
 
 
 def _resolve_uid(record: Mapping[str, Any], blocks: list[Any]) -> str | None:
@@ -245,10 +355,22 @@ def record_to_flow_event(record: Mapping[str, Any]) -> FlowEvent:
     dns = _build_dns(record)
     tls = _build_tls(record)
     http = _build_http(record)
+    dns_transactions = _build_transactions(record, "dns_transactions", _build_dns_block)
+    tls_transactions = _build_transactions(record, "tls_transactions", _build_tls_block)
+    http_transactions = _build_transactions(record, "http_transactions", _build_http_block)
+    _validate_transaction_count("dns", dns, dns_transactions, "dns_transactions" in record)
+    _validate_transaction_count("tls", tls, tls_transactions, "tls_transactions" in record)
+    _validate_transaction_count("http", http, http_transactions, "http_transactions" in record)
+    _validate_transaction_identity_and_order("dns", record, dns, dns_transactions)
+    _validate_transaction_identity_and_order("tls", record, tls, tls_transactions)
+    _validate_transaction_identity_and_order("http", record, http, http_transactions)
 
     return FlowEvent(
         flow_id=record.get("flow_id"),
-        uid=_resolve_uid(record, [dns, tls, http]),
+        uid=_resolve_uid(
+            record,
+            [dns, tls, http, *dns_transactions, *tls_transactions, *http_transactions],
+        ),
         timestamp=_resolve_timestamp(record),
         src_ip=record.get("src_ip"),
         src_port=record.get("src_port"),
@@ -268,6 +390,9 @@ def record_to_flow_event(record: Mapping[str, Any]) -> FlowEvent:
         dns=dns,
         tls=tls,
         http=http,
+        dns_transactions=dns_transactions,
+        tls_transactions=tls_transactions,
+        http_transactions=http_transactions,
         source=SOURCE_NAME,
         extra=_collect_extra(record),
     )

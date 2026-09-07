@@ -453,21 +453,22 @@ Use the venv interpreter (`.venv\Scripts\python.exe` on Windows,
 `.venv/bin/python` elsewhere); `python` below is shorthand for it.
 
 ```bash
-cd detection && python -m pytest -q            # 1645 passed, 1 optional-artifact skip
-cd backend   && python -m pytest -q            #  148
+cd detection && python -m pytest -q            # 1660 passed, 1 optional-artifact skip
+cd backend   && python -m pytest -q            #  146 passed, 2 optional PostgreSQL skips
 cd analyst   && python -m pytest -q            #   24
 cd ingestion && python -m pytest pytests -q     #   17
-python -m pytest tests/test_pipeline_m1d.py tests/test_pipeline_cli_m1d.py tests/test_pipeline_detector_profile.py -q  # 41 passed, 2 Windows symlink skips
-cargo test --locked                             #   99
+python -m pytest tests -q                       #   49 passed, 2 Windows symlink skips
+cargo test --locked                             #  103
 cd ..
-cd frontend  && npm test                       #   59
+cd frontend  && npm test                       #   94
 python -m pytest tools/tests -q                #   17   (from the repo root)
-python -m pytest pcap_dataset/test_ingest.py -q #    5   (from the repo root)
+python -m pytest pcap_dataset/test_ingest.py -q #   57   (from the repo root)
+python pcap_dataset/replay_integrity_docker_e2e.py # 10-run standard/JA4/full replay qualification
 pwsh -NoProfile -File contracts/tests/test_contract.ps1 # 49
 ```
 
-**2,104 passing checks, one optional DGA-artifact skip, and two intentional
-Windows symlink-privilege skips.**
+**2,216 passing checks, one optional DGA-artifact skip, two optional PostgreSQL
+skips, and two intentional Windows symlink-privilege skips.**
 Plus `tools/verify_e2e.py` — 30 checks across the seams between them, which is
 where the defects actually were.
 
@@ -567,10 +568,14 @@ test): precision 0.944, recall 0.711, F1 0.811 at its live threshold of 0.75.
   `--canonical-output`. Detectors intentionally consume the separate opt-in
   `detector-v2` feature profile while the default legacy projection remains
   byte-compatible.
-- **JA4 is opt-in telemetry.** `--ja4` selects the separately pinned,
-  repository-vendored JA4 runtime. Real source JA4 reaches canonical TLS and
-  `detector-v2`; the frozen default runtime and legacy bytes remain unchanged,
-  and missing values are never fabricated.
+- **TLS fingerprints are opt-in telemetry.** `--ja4` selects the separately
+  pinned JA4-only runtime; mutually exclusive `--tls-fingerprints` selects the
+  locked JA3/JA3S/JA4 runtime built offline from repository-vendored source.
+  Real source values reach canonical TLS and `detector-v2`; the default runtime
+  and legacy bytes remain unchanged, and missing values are never fabricated.
+- **Detector-v2 preserves protocol cardinality.** Its DNS/TLS/HTTP compatibility
+  scalar remains the earliest event-time row, while source-order transaction
+  arrays carry every correlated row into Detection with exact count checks.
 - **Incidents are not persisted.** They live in process memory and are lost on
   restart or after the correlation window; the `incidents` tables exist but are
   never written.

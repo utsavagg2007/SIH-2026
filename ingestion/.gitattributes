@@ -1,8 +1,13 @@
 *.sh text eol=lf
 tests/fixtures/pcap/*.sha256 text eol=lf
 docker/ja4/Dockerfile text eol=lf
+docker/tls-fingerprints/Dockerfile text eol=lf
 runtime/*.zeek text eol=lf
 runtime/*.lock text eol=lf
+vendor/ja3-zeek/** text eol=lf
+vendor/ja3-zeek/LICENSE.txt -whitespace
+vendor/ja3-zeek/zeek/ja3.zeek -whitespace
+vendor/ja3-zeek/zeek/ja3s.zeek -whitespace
 vendor/ja4-zeek/** text eol=lf
 vendor/ja4-zeek/LICENSE-JA4 -whitespace
 vendor/ja4-zeek/LICENSE-JA4PLUS -whitespace

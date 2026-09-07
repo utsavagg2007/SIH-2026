@@ -17,7 +17,7 @@ Steps (parse/extract, both modes):
   4. Write one JSON object per line to the output file.
 
 Usage:
-  .venv/bin/python ingestion/pipeline.py pcaps/capture.pcap -o features.jsonl --ja4
+  .venv/bin/python ingestion/pipeline.py pcaps/capture.pcap -o features.jsonl --tls-fingerprints
   .venv/bin/python ingestion/pipeline.py --skip-zeek -o features.jsonl
   # from ingestion/: ../.venv/bin/python pipeline.py ...
 """
@@ -39,9 +39,11 @@ import detector_profile
 from ingestion_core import (
     parse_conn_log,
     parse_dns_log,
+    parse_dns_log_detector,
     parse_ssl_log,
     parse_ssl_log_detector,
     parse_http_log,
+    parse_http_log_detector,
     extract_flow_features,
     extract_window_features,
     extract_dns_features,
@@ -70,6 +72,9 @@ def run_zeek(
     out_dir: str,
     use_ja4: bool = False,
     canonical_mode: bool = False,
+    deterministic_mode: bool = False,
+    *,
+    use_tls_fingerprints: bool = False,
 ) -> None:
     """Run Zeek on a PCAP via the run_zeek.sh wrapper (Docker-based)."""
     script = Path(__file__).parent / "scripts" / "run_zeek.sh"
@@ -91,12 +96,22 @@ def run_zeek(
                 "ERROR: Git Bash is required to run the Docker-backed Zeek "
                 "wrapper on Windows."
             )
-        cmd = [str(git_bash), str(script)]
+        # Git for Windows only prepends its bundled POSIX utilities (dirname,
+        # realpath, basename, and friends) when Bash reads its login profile.
+        # The wrapper relies on those utilities, so make that initialization
+        # explicit instead of depending on the caller's Windows PATH.
+        cmd = [str(git_bash), "--login", str(script)]
     cmd.extend([pcap_path, out_dir])
-    if use_ja4:
+    if use_ja4 and use_tls_fingerprints:
+        raise SystemExit("ERROR: --ja4 and --tls-fingerprints are mutually exclusive.")
+    if use_tls_fingerprints:
+        cmd.append("--tls-fingerprints")
+    elif use_ja4:
         cmd.append("--ja4")
     elif canonical_mode:
         cmd.append("--canonical")
+    elif deterministic_mode:
+        cmd.append("--deterministic")
     try:
         subprocess.run(cmd, check=True)
     except subprocess.CalledProcessError as exc:
@@ -126,8 +141,13 @@ def parse_logs(
     missing = []
     found_supported_log = False
     for kind, (fn, fname) in _LOG_MAP.items():
-        if kind == "ssl" and feature_profile == DETECTOR_FEATURE_PROFILE:
-            fn = parse_ssl_log_detector
+        if feature_profile == DETECTOR_FEATURE_PROFILE:
+            if kind == "dns":
+                fn = parse_dns_log_detector
+            elif kind == "ssl":
+                fn = parse_ssl_log_detector
+            elif kind == "http":
+                fn = parse_http_log_detector
         path = Path(out_dir) / fname
         if path.exists():
             found_supported_log = True
@@ -436,17 +456,27 @@ def run_pipeline(
     use_ja4: bool = False,
     skip_zeek: bool = False,
     *,
+    use_tls_fingerprints: bool = False,
     canonical_output_path: str | None = None,
     sensor_id: str | None = None,
     input_sha256: str | None = None,
     observed_at: str | None = None,
     feature_profile: str = LEGACY_FEATURE_PROFILE,
     emit_window: bool = False,
+    deterministic_zeek: bool = False,
 ) -> list[dict] | detector_profile.PipelineStats:
-    if skip_zeek and use_ja4:
+    if use_ja4 and use_tls_fingerprints:
+        raise SystemExit("ERROR: --ja4 and --tls-fingerprints are mutually exclusive.")
+    if skip_zeek and (use_ja4 or use_tls_fingerprints):
+        if use_tls_fingerprints:
+            raise SystemExit(
+                "ERROR: --skip-zeek cannot verify the qualified "
+                "--tls-fingerprints runtime; omit --tls-fingerprints to parse "
+                "already-produced logs."
+            )
         raise SystemExit(
-            "ERROR: --skip-zeek cannot verify the qualified JA4 runtime; omit "
-            "--ja4 to parse already-produced logs."
+            "ERROR: --skip-zeek cannot verify the qualified JA4 runtime; "
+            "omit --ja4 to parse already-produced logs."
         )
     if feature_profile not in FEATURE_PROFILES:
         raise SystemExit(
@@ -465,7 +495,27 @@ def run_pipeline(
         if not skip_zeek:
             if pcap_path is None:
                 sys.exit("ERROR: --skip-zeek not set, so a PCAP argument is required.")
-            run_zeek(pcap_path, out_dir, use_ja4)
+            if deterministic_zeek:
+                if use_tls_fingerprints:
+                    run_zeek(
+                        pcap_path,
+                        out_dir,
+                        use_tls_fingerprints=True,
+                        deterministic_mode=True,
+                    )
+                else:
+                    run_zeek(
+                        pcap_path,
+                        out_dir,
+                        use_ja4,
+                        deterministic_mode=True,
+                    )
+            else:
+                # Preserve the frozen global/default invocation exactly.
+                if use_tls_fingerprints:
+                    run_zeek(pcap_path, out_dir, use_tls_fingerprints=True)
+                else:
+                    run_zeek(pcap_path, out_dir, use_ja4)
         return _write_feature_output(
             out_dir,
             output_path,
@@ -511,12 +561,12 @@ def run_pipeline(
         sys.exit("ERROR: --skip-zeek not set, so a PCAP argument is required.")
 
     with tempfile.TemporaryDirectory(prefix="sih-m1d-zeek-") as fresh_log_dir:
-        run_zeek(
-            pcap_path,
-            fresh_log_dir,
-            use_ja4=use_ja4,
-            canonical_mode=True,
-        )
+        runtime_args = {"canonical_mode": True}
+        if use_tls_fingerprints:
+            runtime_args["use_tls_fingerprints"] = True
+        else:
+            runtime_args["use_ja4"] = use_ja4
+        run_zeek(pcap_path, fresh_log_dir, **runtime_args)
         post_zeek_sha = _hash_original_pcap(pcap_path)
         if post_zeek_sha != resolved_sha:
             sys.exit("ERROR: original PCAP changed while Zeek was processing it.")
@@ -550,10 +600,16 @@ def main() -> None:
     ap.add_argument(
         "-w", "--window", type=float, default=60.0, help="Sliding window size (seconds)"
     )
-    ap.add_argument(
+    fingerprint_group = ap.add_mutually_exclusive_group()
+    fingerprint_group.add_argument(
         "--ja4",
         action="store_true",
         help="use the pinned, locally qualified JA4 Zeek runtime",
+    )
+    fingerprint_group.add_argument(
+        "--tls-fingerprints",
+        action="store_true",
+        help="use the pinned JA3/JA3S/JA4 Zeek runtime",
     )
     ap.add_argument(
         "--skip-zeek", action="store_true", help="Skip Zeek; read logs from --keep-logs"
@@ -615,6 +671,7 @@ def main() -> None:
         args.window,
         args.ja4,
         args.skip_zeek,
+        use_tls_fingerprints=args.tls_fingerprints,
         canonical_output_path=args.canonical_output,
         sensor_id=args.sensor_id,
         input_sha256=args.input_sha256,

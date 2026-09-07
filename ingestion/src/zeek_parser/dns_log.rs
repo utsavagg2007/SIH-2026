@@ -3,7 +3,7 @@ use crate::zeek_parser::source_types::{
     is_plain_decimal, DiagnosticKind, LosslessParseResult, SourceCode, SourceDiagnostic, SourceIp,
     SourceValue, ZeekDnsRecord, ZeekLogType,
 };
-use crate::zeek_parser::types::DnsRecord;
+use crate::zeek_parser::types::{DetectorDnsRecord, DnsRecord};
 
 fn source_string(
     cols: &[&str],
@@ -517,6 +517,18 @@ fn legacy_f64(value: &SourceValue<String>) -> f64 {
     }
 }
 
+fn detector_string(value: &SourceValue<String>) -> Option<String> {
+    value.as_value().cloned()
+}
+
+fn detector_f64(value: &SourceValue<String>) -> Option<f64> {
+    value.as_value().and_then(|raw| raw.parse::<f64>().ok())
+}
+
+fn detector_ip(value: &SourceValue<SourceIp>) -> Option<String> {
+    value.as_value().map(|address| address.raw.clone())
+}
+
 impl From<&ZeekDnsRecord> for DnsRecord {
     fn from(record: &ZeekDnsRecord) -> Self {
         Self {
@@ -537,5 +549,36 @@ pub fn parse_dns_log(content: &str) -> Result<Vec<DnsRecord>, String> {
         .iter()
         .filter(|record| !record.row_too_short_for_legacy)
         .map(DnsRecord::from)
+        .collect())
+}
+
+/// Detector-v2 parser API retaining every physical row and approved source fact.
+pub fn parse_dns_log_detector(content: &str) -> Result<Vec<DetectorDnsRecord>, String> {
+    let parsed = parse_dns_log_lossless(content)?;
+    Ok(parsed
+        .records
+        .iter()
+        .map(|record| DetectorDnsRecord {
+            legacy: DnsRecord::from(record),
+            source_ordinal: record.row_ordinal,
+            event_time: detector_f64(&record.timestamp_raw),
+            src_ip: detector_ip(&record.src_ip),
+            src_port: record.src_port.copied(),
+            dst_ip: detector_ip(&record.dst_ip),
+            dst_port: record.dst_port.copied(),
+            proto: detector_string(&record.proto),
+            qtype_name: detector_string(&record.qtype_name),
+            rcode_name: detector_string(&record.rcode_name),
+            authoritative_answer: record.authoritative_answer.copied(),
+            truncated: record.truncated.copied(),
+            recursion_desired: record.recursion_desired.copied(),
+            recursion_available: record.recursion_available.copied(),
+            z: match &record.z {
+                SourceValue::Value(value) => Some(value.value),
+                _ => None,
+            },
+            answer_count: record.answer_count.copied(),
+            rejected: record.rejected.copied(),
+        })
         .collect())
 }

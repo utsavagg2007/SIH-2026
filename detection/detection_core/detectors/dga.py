@@ -29,10 +29,9 @@ invalidate every score.
 Requires a raw query name
 -------------------------
 This detector reads ``flow.dns.query``. Current ingestion does **not** emit
-it (see SCHEMA.md "Integration TODOs"), so against today's feed this detector
-is correctly silent: no query, nothing to classify. The adapter already
-preserves ``query`` / ``qtype`` / ``rcode`` when they appear, so the day
-ingestion starts emitting them this works with no further change here.
+it in legacy-m1d, so legacy records remain correctly silent. The explicit
+detector-v2 profile preserves every source query and this detector classifies
+each one exactly once; no query still means nothing to classify.
 
 The derived ``dns.query_entropy`` / ``query_length`` features that *are*
 available today are deliberately not used as a substitute: the model was
@@ -270,7 +269,31 @@ class DGADetector(Detector):
     # --- detection ------------------------------------------------------
 
     def process(self, flow: FlowEvent) -> list[ThreatAlert]:
-        """Classify this flow's queried domain, if it has one."""
+        """Classify every represented DNS transaction, once and in source order."""
+        if not flow.dns_transactions:
+            return self._process_one(flow)
+
+        alerts: list[ThreatAlert] = []
+        for dns in flow.dns_transactions:
+            transaction_flow = flow.model_copy(
+                update={
+                    "timestamp": dns.event_time
+                    if dns.event_time is not None
+                    else flow.timestamp,
+                    "dns": dns,
+                    "dns_transactions": [],
+                    "src_ip": dns.src_ip if dns.src_ip is not None else flow.src_ip,
+                    "src_port": dns.src_port if dns.src_port is not None else flow.src_port,
+                    "dst_ip": dns.dst_ip if dns.dst_ip is not None else flow.dst_ip,
+                    "dst_port": dns.dst_port if dns.dst_port is not None else flow.dst_port,
+                    "proto": dns.proto if dns.proto is not None else flow.proto,
+                }
+            )
+            alerts.extend(self._process_one(transaction_flow))
+        return alerts
+
+    def _process_one(self, flow: FlowEvent) -> list[ThreatAlert]:
+        """Apply the original one-query behavior to one selected transaction."""
         domain = self._queried_domain(flow)
         if domain is None:
             return []

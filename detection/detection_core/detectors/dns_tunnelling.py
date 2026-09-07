@@ -18,18 +18,17 @@ Near-real-time: the decision happens inside
 :meth:`DnsTunnellingDetector.process` and fires the moment the window
 qualifies. ``flush()`` is not part of normal detection.
 
-**Working from derived features only.** Current ingestion does not emit
-``dns.query`` / ``dns.qtype`` / ``dns.rcode`` (see SCHEMA.md "Integration
-TODOs"), so this detector reads exactly the DNS features that *are*
-normalized onto :class:`~detection_core.schemas.DnsInfo`: ``query_length``,
-``query_entropy``, ``subdomain_entropy``, ``label_count`` and ``is_txt``.
+The detector-v2 ingestion profile now carries every DNS transaction and its
+raw query/type/result metadata. Detection still uses the established derived
+signals—``query_length``, ``query_entropy``, ``subdomain_entropy``,
+``label_count`` and ``is_txt``—and reports raw-query availability as evidence.
 Nothing here reconstructs a query string, and any field ingestion leaves
 ``None`` simply contributes no signal rather than being invented.
 
 **This is a heuristic signal, not proof of exfiltration.** An alert means
 "this host's DNS to this resolver looks encoded", which is a lead to
-investigate. Confirming that data actually left requires the raw query
-names this layer does not have.
+investigate. Confirming that data actually left requires packet/content-level
+evidence beyond this metadata pipeline.
 """
 
 from __future__ import annotations
@@ -637,7 +636,35 @@ class DnsTunnellingDetector(Detector):
     # --- detection ------------------------------------------------------
 
     def process(self, flow: FlowEvent) -> list[ThreatAlert]:
-        """Update this pair's DNS window and alert if it looks tunnelled."""
+        """Observe every represented DNS transaction exactly once."""
+        if not flow.dns_transactions:
+            return self._process_one(flow)
+
+        alerts: list[ThreatAlert] = []
+        for index, dns in enumerate(flow.dns_transactions):
+            transaction_flow = flow.model_copy(
+                update={
+                    "timestamp": dns.event_time
+                    if dns.event_time is not None
+                    else flow.timestamp,
+                    "dns": dns,
+                    "dns_transactions": [],
+                    "src_ip": dns.src_ip if dns.src_ip is not None else flow.src_ip,
+                    "src_port": dns.src_port if dns.src_port is not None else flow.src_port,
+                    "dst_ip": dns.dst_ip if dns.dst_ip is not None else flow.dst_ip,
+                    "dst_port": dns.dst_port if dns.dst_port is not None else flow.dst_port,
+                    "proto": dns.proto if dns.proto is not None else flow.proto,
+                    # Flow bytes cannot be apportioned to individual DNS rows.
+                    # Count them once instead of multiplying them by the
+                    # number of transactions on the connection.
+                    "orig_bytes": flow.orig_bytes if index == 0 else 0,
+                }
+            )
+            alerts.extend(self._process_one(transaction_flow))
+        return alerts
+
+    def _process_one(self, flow: FlowEvent) -> list[ThreatAlert]:
+        """Apply the original one-query window update to one transaction."""
         if flow.dns is None:
             # Not DNS as far as this layer can tell - the block is the only
             # honest marker we have. Ingestion emits no `service`, and a

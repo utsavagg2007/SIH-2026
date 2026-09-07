@@ -10,10 +10,13 @@ the passive threat-detection pipeline.
 - `src/features/` — flow-level, sliding-window, DNS, TLS, and HTTP feature extractors
 - `src/utils/` — entropy helpers
 - `pipeline.py` — frozen legacy features, explicit detector-v2 features, and the opt-in canonical sidecar
-- `scripts/run_zeek.sh` — Docker wrapper for standard and qualified JA4 Zeek runs
+- `scripts/run_zeek.sh` — Docker wrapper for standard, deterministic, canonical, JA4-only, and full-fingerprint Zeek runs
 - `scripts/build_ja4_runtime.sh` — reproducible, integrity-checked JA4 image build
 - `runtime/ja4-runtime.lock` — immutable JA4 build and image identities
 - `vendor/ja4-zeek/` — minimal licensed and hash-pinned FoxIO JA4 source
+- `scripts/build_tls_fingerprint_runtime.sh` — offline reproducible JA3/JA3S/JA4 image build
+- `runtime/tls-fingerprint-runtime.lock` — immutable composite runtime identities
+- `vendor/ja3-zeek/` — minimal BSD-licensed, commit- and hash-pinned Salesforce source
 - `scripts/generate_synthetic_pcap.py` — dependency-free deterministic M1D PCAP generator
 
 ## Build & install (single canonical venv at repo root)
@@ -43,6 +46,27 @@ Zeek runs in Docker (no local install). Two options depending on Docker access:
 sudo ./scripts/run_zeek.sh pcaps/capture.pcap zeek_output
 ```
 
+### Docker without sudo (local testing)
+
+The Zeek wrapper and Docker E2E harnesses shell out to `docker`. If you see
+`permission denied while trying to connect to the docker API at
+unix:///var/run/docker.sock`, your user is not yet on the socket:
+
+```bash
+sudo usermod -aG docker $USER
+# then ONE of: log out and back in, or refresh this shell with:
+newgrp docker
+docker run --rm hello-world        # no password prompt = fixed
+docker images --digests | grep -E "73e80|sih-zeek"   # pinned fingerprint images visible
+```
+
+Notes: group membership is evaluated at login, which is why a fresh shell can
+still fail right after `usermod` (compare `groups` vs `getent group docker`).
+Membership in `docker` is root-equivalent by design — accepted tradeoff for a
+dev box, never for shared/production hosts. The VM walkthrough lives in
+`DEPLOYMENT.md` §5a; fingerprint images additionally need their explicit build
+scripts before `--ja4` or `--tls-fingerprints` runs.
+
 The supported official runtime is frozen to:
 
 ```text
@@ -53,9 +77,11 @@ canonical invocation: zeek -D -C -r <pcap> local
 
 `-D` initializes random seeds deterministically, `-C` ignores invalid packet
 checksums for offline analysis, and `local` loads the standard local policy.
-Canonical replay must use all three. The package-free official profile does not
-install fingerprint packages, so JA3/JA3S/JA4 remain optional there. The
-separate `--ja4` profile uses the same exact base digest plus the minimal
+Canonical replay must use all three. `pcap_dataset` also requests this exact
+deterministic standard invocation through the internal `deterministic_zeek`
+pipeline option; the ordinary pipeline CLI/default remains unchanged. The
+package-free official profile does not install fingerprint packages, so
+JA3/JA3S/JA4 remain optional there. The separate `--ja4` profile uses the same exact base digest plus the minimal
 vendored FoxIO JA4 source and a JA4-only loader. Build it explicitly before use:
 
 ```bash
@@ -67,6 +93,20 @@ reproduce the image/config digests in `runtime/ja4-runtime.lock`. Runtime use
 verifies repository inputs, the vendored file manifest, image identity, and
 image labels, then executes the immutable image ID without any network fetch or
 fallback. Only `ssl.log.ja4` is added; JA4S/JA4H/JA4L/JA4T fields are rejected.
+
+The mutually exclusive `--tls-fingerprints` profile composes that exact JA4
+source with the minimum vendored Salesforce JA3/JA3S Zeek scripts. Build it
+offline from repository-controlled inputs, then run it explicitly:
+
+```bash
+./scripts/build_tls_fingerprint_runtime.sh
+./scripts/run_zeek.sh pcaps/capture.pcap zeek_output --tls-fingerprints
+```
+
+The composite lock binds the source repository/commit/tree/archive, both source
+manifests, loader and Dockerfile hashes, base digest, image ID, and config
+digest. Runtime execution uses `--network none`, verifies all inputs and image
+labels, adds exactly `ja3`, `ja3s`, and `ja4` to `ssl.log`, and never falls back.
 
 The one-command shell wrapper is supported on Linux, WSL2, compatible Linux
 Docker environments, and native Windows when Git Bash is installed. Native
@@ -88,13 +128,15 @@ Or, if your user can run Docker, do it in one shot (Zeek runs automatically):
 
 ```bash
 .venv/bin/python ingestion/pipeline.py pcaps/capture.pcap -o features.jsonl --ja4
+.venv/bin/python ingestion/pipeline.py pcaps/capture.pcap -o features.jsonl --tls-fingerprints
 ```
 
-`--ja4` is also valid with `--canonical-output` after the qualified image has
-been built. It fails closed if the locked image or any locked source/loader
-input is unavailable or altered. `--skip-zeek --ja4` is rejected because a
-pre-existing log directory cannot prove which runtime produced it; omit the
-flag to parse those logs, and real JA4 is still transported when present.
+Both fingerprint modes are valid with `--canonical-output` after their selected
+image has been built. They fail closed if the locked image or any locked
+source/loader input is unavailable or altered. `--skip-zeek` rejects either
+fingerprint flag because a pre-existing log directory cannot prove which
+runtime produced it; omit the flag to parse those logs, and source fingerprints
+are still transported when present.
 
 Output `features.jsonl` has one object per flow, with `dns`/`tls`/`http` nested
 feature blocks when those records exist. Hand the file to the ML team.
@@ -113,17 +155,24 @@ versioned projection explicitly:
 `detector-v2` adds the observed event time, source port, service, raw connection
 state and protocol observables required by the current detectors. Records are
 stable-sorted by event time. For several protocol rows sharing one UID, it
-inlines the earliest row and reports `transaction_count`; this is a
-detector-specific aggregation only. Canonical output independently retains all
-DNS/TLS/HTTP rows. Global legacy window features remain off in detector-v2
+keeps the earliest event-time row as the compatibility scalar, reports
+`transaction_count`, and preserves every physical source row in the matching
+`dns_transactions`, `tls_transactions`, or `http_transactions` array. Arrays
+remain in source order and carry per-row timestamps and source ordinals.
+Canonical output independently retains all DNS/TLS/HTTP rows. Global legacy window features remain off in detector-v2
 because detection computes entity-keyed windows; they can be requested only
 with `--window-features`. In detector-v2, `-o -` streams flushed JSONL to stdout
 and all status/`--stats` text stays on stderr.
 
 For TLS, detector-v2 uses a lossless-derived projection that adds exact source
-`ja4` without changing the frozen legacy `SslRecord`. Missing, unset, and empty
-JA4 become `null`; every other non-empty source string is preserved exactly and
-is never derived from JA3, SNI, cipher, version, addresses, or ports.
+`ja4` without changing the frozen legacy `SslRecord`; JA3 and JA3S retain their
+existing exact-source transport. Missing, unset, and empty values become
+`null`, and no fingerprint is derived from another fingerprint, SNI, cipher,
+version, addresses, or ports. Standard mode emits none, JA4 mode emits only
+JA4, and full mode emits source JA3/JA3S/JA4 when the handshake supports them.
+The frozen `#fields` evidence lives under `tests/fixtures/runtime_headers/`.
+The encrypted-malware signature path also requires a trusted local indicator
+feed; no indicators ship by default.
 
 ## CanonicalObservation v1 sidecar
 
@@ -371,12 +420,12 @@ unknown→0.
 | `is_txt` | bool | query was TXT type | **TXT ⇒ tunneling** |
 | `label_count` | int | number of DNS labels | many ⇒ DGA |
 
-### Optional `tls` block (present iff the flow carried JA3/JA3s)
+### Optional `tls` block (present iff the flow had a TLS record)
 
 | field | type | meaning | threat hint |
 |---|---|---|---|
 | `uid` | string | links to flow | |
-| `has_ja3` / `has_ja3s` | bool | client / server hash present | |
+| `has_ja3` / `has_ja3s` | bool | client / server source hash present; true in full mode when the handshake supports it | |
 | `ssl_version_encoded` | int (0–5) | see mapping | old/rare ⇒ suspicious |
 | `cipher_encoded` | int | coarse cipher encoding | **placeholder — needs a real JA3 lookup table** |
 
@@ -444,9 +493,9 @@ unknown→0.
 
 In the frozen `legacy-m1d` projection, repeated protocol rows retain the
 historical last-row collapse. `detector-v2` instead chooses the earliest row by
-event time and exposes `transaction_count`; canonical output preserves every
-row independently. Consumers needing transaction-level evidence must use the
-canonical sidecar rather than either per-flow feature projection.
+event time for scalar compatibility, exposes exact `transaction_count`, and
+preserves every row in source-order transaction arrays. Canonical output also
+preserves every row independently.
 
 ---
 
@@ -457,9 +506,12 @@ cargo test --locked --manifest-path ingestion/Cargo.toml
 # Run Python ingestion tests from ingestion/ so local pipeline imports are explicit.
 cd ingestion
 ../.venv/bin/python -m pytest pytests -q
-../.venv/bin/python -m pytest tests/test_pipeline_m1d.py tests/test_pipeline_cli_m1d.py tests/test_pipeline_detector_profile.py -q
+../.venv/bin/python -m pytest tests/test_pipeline_m1d.py tests/test_pipeline_cli_m1d.py tests/test_pipeline_detector_profile.py tests/test_pipeline_dataset_determinism.py -q
 cd ..
 .venv/bin/python -m pytest pcap_dataset/test_ingest.py -q
+./.venv/bin/python pcap_dataset/replay_integrity_docker_e2e.py
+.venv/bin/python ingestion/tests/test_ja4_docker_e2e.py
+.venv/bin/python ingestion/tests/test_tls_fingerprint_docker_e2e.py
 pwsh -NoProfile -File ingestion/tests/test_m1d_docker_e2e.ps1
 pwsh -NoProfile -File contracts/tests/test_contract.ps1
 ```

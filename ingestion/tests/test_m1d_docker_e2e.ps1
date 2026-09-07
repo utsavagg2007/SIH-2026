@@ -11,6 +11,7 @@ $ExpectedOrder = @("flow", "flow", "flow", "flow", "dns", "dns", "tls", "http", 
 $ScriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $IngestionRoot = Split-Path -Parent $ScriptRoot
 $RepositoryRoot = Split-Path -Parent $IngestionRoot
+$DetectionRoot = Join-Path $RepositoryRoot "detection"
 $FixtureDirectory = Join-Path $ScriptRoot "fixtures\pcap"
 $Fixture = Join-Path $FixtureDirectory "m1d_synthetic.pcap"
 $Schema = Join-Path $RepositoryRoot "contracts\canonical_observation_v1.schema.json"
@@ -154,7 +155,11 @@ try {
     } else {
         Copy-Item -LiteralPath (Join-Path $IngestionRoot "target/debug/libingestion_core.so") -Destination (Join-Path $moduleDirectory "ingestion_core.so")
     }
-    $env:PYTHONPATH = if ([string]::IsNullOrEmpty($OriginalPythonPath)) { $moduleDirectory } else { "$moduleDirectory$([IO.Path]::PathSeparator)$OriginalPythonPath" }
+    $pythonPathEntries = @($moduleDirectory, $DetectionRoot)
+    if (-not [string]::IsNullOrEmpty($OriginalPythonPath)) {
+        $pythonPathEntries += $OriginalPythonPath
+    }
+    $env:PYTHONPATH = $pythonPathEntries -join [IO.Path]::PathSeparator
 
     # Verify every checked-in PCAP is exactly reproducible from the generator.
     $generated = Join-Path $TempRoot "generated"
