@@ -3,7 +3,7 @@ use crate::zeek_parser::source_types::{
     is_plain_decimal, DiagnosticKind, LosslessParseResult, SourceDiagnostic, SourceIp, SourceValue,
     ZeekHttpRecord, ZeekLogType,
 };
-use crate::zeek_parser::types::HttpRecord;
+use crate::zeek_parser::types::{DetectorHttpRecord, HttpRecord};
 
 fn source_string(
     cols: &[&str],
@@ -316,6 +316,18 @@ fn legacy_u16(value: &SourceValue<u16>) -> u16 {
     }
 }
 
+fn detector_string(value: &SourceValue<String>) -> Option<String> {
+    value.as_value().cloned()
+}
+
+fn detector_f64(value: &SourceValue<String>) -> Option<f64> {
+    value.as_value().and_then(|raw| raw.parse::<f64>().ok())
+}
+
+fn detector_ip(value: &SourceValue<SourceIp>) -> Option<String> {
+    value.as_value().map(|address| address.raw.clone())
+}
+
 impl From<&ZeekHttpRecord> for HttpRecord {
     fn from(record: &ZeekHttpRecord) -> Self {
         Self {
@@ -340,5 +352,24 @@ pub fn parse_http_log(content: &str) -> Result<Vec<HttpRecord>, String> {
         .iter()
         .filter(|record| !record.row_too_short_for_legacy)
         .map(HttpRecord::from)
+        .collect())
+}
+
+/// Detector-v2 parser API retaining every physical row and its source tuple.
+pub fn parse_http_log_detector(content: &str) -> Result<Vec<DetectorHttpRecord>, String> {
+    let parsed = parse_http_log_lossless(content)?;
+    Ok(parsed
+        .records
+        .iter()
+        .map(|record| DetectorHttpRecord {
+            legacy: HttpRecord::from(record),
+            source_ordinal: record.row_ordinal,
+            event_time: detector_f64(&record.timestamp_raw),
+            src_ip: detector_ip(&record.src_ip),
+            src_port: record.src_port.copied(),
+            dst_ip: detector_ip(&record.dst_ip),
+            dst_port: record.dst_port.copied(),
+            proto: detector_string(&record.proto),
+        })
         .collect())
 }

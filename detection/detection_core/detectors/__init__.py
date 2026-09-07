@@ -25,13 +25,14 @@ Implemented:
                     generated-looking SNI (src, dst)-keyed
     dga_domain    - Phase-2 live wrapper around the ml/dga model
 
-All threat classes now have a detector.
+All threat classes now have a detector. The integrated detector-v2 profile
+supplies the formerly missing raw protocol fields; DGA still requires an
+operator-provided trained model and fingerprint matching still requires a
+trusted local indicator feed.
 
 Note: ``dga`` imports ``detection_core.ml`` (scikit-learn) only when a
 DGADetector is CONSTRUCTED, so importing this package stays dependency-free.
 
-Note: several of those are blocked on raw fields current ingestion does not
-emit (see SCHEMA.md "Integration TODOs").
 """
 
 from __future__ import annotations

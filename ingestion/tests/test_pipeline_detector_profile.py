@@ -61,12 +61,31 @@ class DetectorProfileIntegrationTests(unittest.TestCase):
         self.assertEqual(rows[0]["tls"]["ja3"], "client-ja3")
         self.assertIsNone(rows[0]["tls"]["ja4"])
         self.assertEqual(rows[0]["tls"]["server_name"], "example.test")
+        self.assertEqual(rows[0]["tls"]["transaction_count"], 1)
+        self.assertEqual(
+            [item["ja3"] for item in rows[0]["tls_transactions"]],
+            ["client-ja3"],
+        )
         self.assertEqual(rows[0]["http"]["uri"], "/first")
         self.assertEqual(rows[0]["http"]["transaction_count"], 2)
+        self.assertEqual(
+            [item["uri"] for item in rows[0]["http_transactions"]],
+            ["/first", "/second"],
+        )
+        self.assertEqual(
+            [item["source_ordinal"] for item in rows[0]["http_transactions"]],
+            [0, 1],
+        )
         self.assertEqual(rows[1]["dns"]["query"], "abc.def")
         self.assertEqual(rows[1]["dns"]["qtype"], "A")
         self.assertEqual(rows[1]["dns"]["rcode"], "NOERROR")
         self.assertEqual(rows[1]["dns"]["transaction_count"], 2)
+        self.assertEqual(
+            [item["query"] for item in rows[1]["dns_transactions"]],
+            ["abc.def", "ghi.jkl"],
+        )
+        self.assertEqual(rows[1]["dns_transactions"][0]["answer_count"], 1)
+        self.assertIsNone(rows[1]["dns_transactions"][1]["answer_count"])
         self.assertEqual(result.multi_row_uids, {"dns": 1, "http": 1})
         self.assertTrue(all("flow_rate" not in row for row in rows))
 
@@ -100,6 +119,18 @@ class DetectorProfileIntegrationTests(unittest.TestCase):
         tls = rows[0]["tls"]
         self.assertEqual(tls["ja4"], "t13d020200_exact-source-token")
         self.assertEqual(tls["transaction_count"], 2)
+        self.assertEqual(
+            [item["ja4"] for item in rows[0]["tls_transactions"]],
+            ["later-source-ja4", "t13d020200_exact-source-token"],
+        )
+        self.assertEqual(
+            [item["event_time"] for item in rows[0]["tls_transactions"]],
+            [1000.1, 999.9],
+        )
+        self.assertEqual(
+            [item["source_ordinal"] for item in rows[0]["tls_transactions"]],
+            [0, 1],
+        )
         self.assertEqual(result.with_ja4, 1)
         self.assertEqual(result.multi_row_uids.get("tls"), 1)
 
@@ -133,6 +164,35 @@ class DetectorProfileIntegrationTests(unittest.TestCase):
 
         self.assertEqual(canonical_a.read_bytes(), canonical_b.read_bytes())
         self.assertNotEqual(legacy.read_bytes(), detector.read_bytes())
+
+    def test_five_transactions_survive_without_special_case_loss(self) -> None:
+        parsed = pipeline.parse_logs(
+            str(LOG_FIXTURE), feature_profile=pipeline.DETECTOR_FEATURE_PROFILE
+        )
+        template = parsed["dns"][0]
+        parsed["dns"] = []
+        for index in range(5):
+            transaction = dict(template)
+            transaction["query"] = f"query-{index}.example"
+            transaction["timestamp"] = 1001.5
+            transaction["event_time"] = 1001.5
+            transaction["source_ordinal"] = index
+            parsed["dns"].append(transaction)
+
+        rows = list(
+            detector_profile.build_records(detector_profile.join_by_uid(parsed), parsed)
+        )
+        dns_row = next(row for row in rows if row["uid"] == "C2")
+        self.assertEqual(dns_row["dns"]["transaction_count"], 5)
+        self.assertEqual(len(dns_row["dns_transactions"]), 5)
+        self.assertEqual(
+            [item["query"] for item in dns_row["dns_transactions"]],
+            [f"query-{index}.example" for index in range(5)],
+        )
+        self.assertEqual(
+            [item["source_ordinal"] for item in dns_row["dns_transactions"]],
+            list(range(5)),
+        )
 
     def test_detector_stdout_is_jsonl_and_window_block_is_explicit(self) -> None:
         stream = io.StringIO()
