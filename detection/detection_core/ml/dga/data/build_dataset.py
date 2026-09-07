@@ -36,6 +36,13 @@ is dropped. Domains are then deduplicated (a domain seen under two families,
 or as both benign and DGA, is dropped), and each DGA family is capped at
 ``--per-family-cap`` rows.
 
+The cross-family drop is decided over **all** families before any row is kept,
+so it does not depend on the order of ``--families``, and the count is reported
+as ``cross_family_dropped``. The 27 default families share no domain today, so
+the shipped corpus is unaffected; ``--families all`` reaches many more of them,
+which is where an ambiguous domain would otherwise be attributed to whichever
+family happened to be fetched first.
+
 With ``--balance`` (the default) the benign side is trimmed to the DGA total,
 the CDN rows counting against that same budget rather than adding to it. The
 committed dataset is built with ``--no-balance`` instead, because the two sides
@@ -435,12 +442,41 @@ def build(
     rng = random.Random(seed)
 
     # --- DGA side -----------------------------------------------------------
-    dga_by_domain: dict[str, str] = {}
+    # Every family is fetched before any domain is kept. Which domains are
+    # ambiguous is a property of the whole corpus, so it cannot be decided
+    # while walking it.
+    fetched_by_family: dict[str, list[str]] = {}
     per_family_fetched: dict[str, int] = {}
-    per_family_kept: dict[str, int] = {}
     for family in families:
+        if family in fetched_by_family:  # `--families a,a`: fetch once
+            continue
         fetched = fetch_dga_family(family, timeout=timeout)
         per_family_fetched[family] = len(fetched)
+        fetched_by_family[family] = fetched
+
+    # A domain published under more than one family has no defensible family
+    # attribution, so it is dropped from all of them.
+    #
+    # It used to go to whichever family iterated first, which made the corpus
+    # depend on the order of `--families` - the same request in a different
+    # order produced a different dataset, and the module docstring said these
+    # rows were dropped while the code kept them. `family` is not a label
+    # here; it is the *grouping key* the family-disjoint split is built on, so
+    # a wrong attribution puts a domain in the train fold on the strength of a
+    # family it may not belong to, while its real family sits in the held-out
+    # test fold. That leaks across the split the whole evaluation rests on.
+    # Guessing is worth less than the row.
+    claimed_by: dict[str, set[str]] = {}
+    for family, fetched in fetched_by_family.items():
+        for domain in fetched:
+            claimed_by.setdefault(domain, set()).add(family)
+    cross_family = {
+        domain for domain, owners in claimed_by.items() if len(owners) > 1
+    }
+
+    dga_by_domain: dict[str, str] = {}
+    per_family_kept: dict[str, int] = {}
+    for family, fetched in fetched_by_family.items():
         if not fetched:
             continue
         rng.shuffle(fetched)
@@ -448,8 +484,11 @@ def build(
         for domain in fetched:
             if kept >= per_family_cap:
                 break
-            if domain in dga_by_domain:  # a domain claimed by an earlier family
+            if domain in cross_family:
                 continue
+            # `fetch_dga_family` already deduplicates within a family, and any
+            # domain shared across families is in `cross_family` above, so no
+            # domain can reach this line twice.
             dga_by_domain[domain] = family
             kept += 1
         per_family_kept[family] = kept
@@ -544,6 +583,11 @@ def build(
         "per_family_fetched": per_family_fetched,
         "per_family_kept": per_family_kept,
         "per_family_cap": per_family_cap,
+        # Domains published under more than one family, dropped from all of
+        # them. Reported rather than silently discarded: a number that climbs
+        # between rebuilds means the upstream families are diverging, and that
+        # is worth seeing.
+        "cross_family_dropped": len(cross_family),
         "cdn_per_suffix_cap": cdn_per_suffix_cap,
         "cdn_per_suffix_kept": cdn_per_suffix,
         "cdn_suffixes_held_out": sorted(cdn_holdout_suffixes),
@@ -627,6 +671,9 @@ def _print_report(report: dict[str, object], out: Path | None) -> None:
         if held:
             print(f"    cdn held out     : {', '.join(held)}")
     print(f"  total rows         : {report['total_rows']}")
+    if report.get("cross_family_dropped"):
+        print(f"  dropped (claimed by >1 family): "
+              f"{report['cross_family_dropped']}")
     empty = report["families_empty"]
     if empty:
         print(f"  families with no examples (skipped): {', '.join(empty)}")

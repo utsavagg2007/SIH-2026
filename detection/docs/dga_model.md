@@ -257,13 +257,26 @@ rows             : 16 939  (benign 10 824 / dga 6 115, 0 duplicates)
 families         : 27 DGA families -> 20 in train, 7 held out (disjoint)
 held-out families: banjori, necurs, newgoz, nymaim, pitou, qadars, simda
 split            : group_disjoint, group_aware_split=True, zero family overlap
-PR-AUC / ROC-AUC : 0.8437 / 0.8914
-precision/recall/F1 @ 0.75 : 0.8953 / 0.5691 / 0.6959
-recall              @ 0.65 : 0.711   (the recommended operating point)
-confusion @ 0.75 [[tn,fp],[fn,tp]] : [[2577, 129], [835, 1103]]
+PR-AUC / ROC-AUC : 0.8478 / 0.8931
+precision/recall/F1 @ 0.75 : 0.8981 / 0.4732 / 0.6198
+precision/recall/F1 @ 0.65 : 0.8873 / 0.6419 / 0.7449  (the recommended
+                   operating point)
+confusion @ 0.75 [[tn,fp],[fn,tp]] : [[2602, 104], [1021, 917]]
 baseline (LogReg)  : F1 0.7692, precision 0.8969, recall 0.6734, PR-AUC 0.8838
 artifact           : 33.9 MB, gitignored, rebuilt by tools/build_dga_model.py
 ```
+
+**These figures are from scikit-learn 1.5.1 / numpy 1.26.4**, the same run as
+the table in `docs/DGA_PRECISION.md` §3, so the two documents agree line for
+line. `pyproject.toml` pins only `scikit-learn>=1.4`, and these are
+RandomForest vote fractions rather than calibrated probabilities, so a rebuild
+on a newer library moves them — recall most of all, because the score
+distribution is dense between 0.70 and 0.75. A run on scikit-learn 1.9.0 reads
+0.711 at 0.65 and 0.569 at 0.75 on this same corpus and split. **The split
+itself does not move**: 12 295 / 4 644, the same seven held-out families, and
+the same 2 706 benign / 1 938 DGA test fold on either library. The LogReg
+baseline row has not been re-measured on 1.5.1 and is carried forward from the
+1.9.0 run. See the re-run note in `DGA_PRECISION.md` §5.
 
 **Neither list is byte-reproducible.** Tranco's unpinned "latest" URL and the
 Cisco Umbrella daily list are both regenerated every day; rebuilding on a
@@ -394,7 +407,7 @@ not a threshold.**
 
 Three more things a reader should not have to discover for themselves:
 
-* **PR-AUC 0.9116 → 0.8437 is not a regression.** Average precision depends on
+* **PR-AUC 0.9119 → 0.8478 is not a regression.** Average precision depends on
   the positive rate, which fell from 0.50 to 0.36 when the benign side grew.
   The two figures come from differently-composed test folds and are not
   comparable. Compare on fixed populations instead.

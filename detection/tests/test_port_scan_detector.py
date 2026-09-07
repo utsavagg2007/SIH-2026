@@ -156,7 +156,7 @@ def test_invalid_config_rejected(kwargs):
 def test_detector_identity():
     detector = PortScanDetector()
     assert detector.name == "port_scan"
-    assert detector.version == "0.3.1"
+    assert detector.version == "0.3.2"
 
 
 # --------------------------------------------------------------------------
@@ -763,7 +763,7 @@ def test_alert_conforms_to_v1_1(sample_alert):
     assert sample_alert.flow_id is None
     assert sample_alert.src_ip == SCANNER
     assert sample_alert.detector == "port_scan"
-    assert sample_alert.detector_version == "0.3.1"
+    assert sample_alert.detector_version == "0.3.2"
     assert sample_alert.mitre_techniques == ["T1046"]
     assert sample_alert.incident_id is None
 

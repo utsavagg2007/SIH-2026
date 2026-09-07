@@ -36,6 +36,22 @@
 # recall: that is the one axis where 0.65 is slightly behind the old model
 # (0.0937 vs 0.0770), and 0.70 puts it back in front (0.0757).
 #
+# LIBRARY VERSION
+# ---------------
+# The DGA recall column above is carried forward from the original sweep, which
+# ran on an older scikit-learn; the CDN and ordinary columns need the Umbrella
+# and Tranco evaluation lists, which are not in the repo, so the table is
+# restated rather than re-derived. Scores here are RandomForest vote fractions,
+# not calibrated probabilities, and `pyproject.toml` pins only
+# `scikit-learn>=1.4` - so absolute recall moves with the library while the
+# shape does not. On scikit-learn 1.5.1 the same corpus and split read 0.642 at
+# 0.65 and 0.473 at 0.75, against 0.711 and 0.569 here.
+#
+# None of that changes the choice. What selects 0.65 is the knee - recall falls
+# away past 0.70 while the false-positive rates barely move - and the knee is
+# between 0.65 and 0.70 on both libraries. See the re-run note in
+# docs/DGA_PRECISION.md section 5, and detection/docs/dga_model.md section 5.
+#
 # These are measurements on real public lists (Tranco, Umbrella) and generated
 # tunnel names - NOT a capture from the deployment network. Re-derive against a
 # real benign capture before treating any of it as a production error rate.
