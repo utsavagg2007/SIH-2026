@@ -144,11 +144,18 @@ export function AnalystChat({ suppressed = false }: Props) {
     return () => window.removeEventListener("keydown", onKey);
   }, [open, suppressed]);
 
-  // Newest turn into view. The transcript grows downward and the answer to what
-  // you just asked is the only part worth looking at.
+  // Newest turn to the TOP of the viewport, not the bottom of the transcript.
+  // Pinning to scrollHeight put the end of the newest answer on screen and its
+  // first line above it, so every answer long enough to need the space had to
+  // be scrolled back up before it could be read. Scrolling to the question
+  // instead puts the start of what you just asked - and the answer under it -
+  // where reading starts. The browser clamps scrollTop, so a short transcript
+  // simply stays where it is.
   useEffect(() => {
     const el = scroller.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    const newest = el?.lastElementChild;
+    if (!el || !newest) return;
+    el.scrollTop += newest.getBoundingClientRect().top - el.getBoundingClientRect().top;
   }, [turns]);
 
   const ask = useCallback(async (raw: string) => {

@@ -76,7 +76,17 @@ class AnalystService:
             question,
             limit=min(limit or self._settings.max_retrieved_alerts, self._settings.max_retrieved_alerts),
         )
-        alerts = await self._store.query_alerts(
+        if query.rejected:
+            # Out of scope, or shaped like an attempt to retarget the model.
+            # Nothing is retrieved and nothing is generated: the question text
+            # never reaches a prompt at all, which is the only injection
+            # defence that does not depend on the model cooperating. The
+            # subject deliberately does not echo the question back into the
+            # panel.
+            sheet = FactSheet(subject="an out-of-scope question", kind="corpus")
+            sheet.empty_reason = query.rejected
+            return sheet, self._plain(sheet), query
+        alerts = [] if not query.wants_evidence else await self._store.query_alerts(
             from_ts=query.from_ts,
             to_ts=query.to_ts,
             threat_class=query.threat_class,
@@ -89,6 +99,8 @@ class AnalystService:
             alerts,
             window=query.window_label,
             threat_class=query.threat_class,
+            background=query.wants_background,
+            evidence=query.wants_evidence,
         )
         # How the question was read belongs in the answer, not in a log. An
         # analyst who asked about one host and got the whole network should be

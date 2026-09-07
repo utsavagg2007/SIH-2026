@@ -485,6 +485,8 @@ def describe_corpus(
     alerts: list[dict[str, Any]],
     window: str | None = None,
     threat_class: str | None = None,
+    background: bool = True,
+    evidence: bool = True,
 ) -> FactSheet:
     """Reduce a set of retrieved alerts to facts that answer a question.
 
@@ -500,6 +502,15 @@ def describe_corpus(
         subject=question.strip() or "the alert history", kind="corpus", alert_ids=ids
     )
 
+    if not evidence:
+        # A pure definition question. It is answered from the knowledge base
+        # and says nothing about the alert history, because it asked nothing
+        # about it - "what is beaconing" that comes back with today's counts
+        # stapled on is answering a question nobody typed.
+        if not add_knowledge(sheet, threat_class):
+            sheet.empty_reason = "there is no reference entry for that subject"
+        return sheet
+
     if not alerts:
         # "What is a DGA" is a question this layer can answer well with nothing
         # stored, and refusing it because retrieval came back empty would be
@@ -509,7 +520,7 @@ def describe_corpus(
         nothing_matched = "No stored alert matches this query" + (
             f" {window}" if window else ""
         ) + "."
-        if add_knowledge(sheet, threat_class):
+        if background and add_knowledge(sheet, threat_class):
             sheet.add(nothing_matched, source="GET /api/v1/alerts", value=0, rank=0)
             return sheet
         sheet.empty_reason = "no stored alert matched that query" + (
@@ -604,8 +615,11 @@ def describe_corpus(
     # 10.4.2.19" that returns nothing but beaconing should say what beaconing
     # is. A mixed set gets no background rather than seven competing
     # definitions, which would bury the counts the question actually asked for.
-    subject_class = threat_class or (next(iter(by_class)) if len(by_class) == 1 else None)
-    add_knowledge(sheet, subject_class)
+    if background:
+        subject_class = threat_class or (
+            next(iter(by_class)) if len(by_class) == 1 else None
+        )
+        add_knowledge(sheet, subject_class)
 
     return sheet
 
