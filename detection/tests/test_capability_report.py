@@ -198,3 +198,125 @@ def test_watch_streams_rather_than_buffering():
     next(stream)
     assert consumed == 1, "watch() pulled more than the one event requested"
     assert report.flows == 1
+
+
+# --- the runner wiring ------------------------------------------------
+#
+# Everything above tests the counter in isolation. These test the only thing
+# that makes it matter: that a real ``runner.main()`` run actually prints the
+# notes. Without them, ``capability.watch(...)`` could be dropped from the
+# source chain in a refactor and every other test in this file would still
+# pass while real runs went back to reporting a blind capture as a clean one -
+# which is the exact failure this feature exists to prevent.
+
+
+def _write(tmp_path, name, records):
+    path = tmp_path / name
+    path.write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n", encoding="utf-8"
+    )
+    return path
+
+
+def _degraded(capsys):
+    """The ``degraded:`` lines a real run puts in front of the operator.
+
+    Read from stderr rather than through ``caplog``: the runner deliberately
+    sets ``propagate = False`` on the package logger so that stdout carries
+    alert JSONL and nothing else, which puts these records permanently out of
+    reach of a root-level capture. Stderr is where they are contracted to
+    appear, so stderr is what this asserts on.
+    """
+    return [
+        line
+        for line in capsys.readouterr().err.splitlines()
+        if "degraded: " in line
+    ]
+
+
+def _legacy_records():
+    """What ``pipeline.py`` emits on its default ``legacy-m1d`` profile.
+
+    No raw ``conn_state`` (Zeek's ``S0`` encodes to 0, which decodes back to
+    None), no raw ``dns.query``, no ``ja3``/``ja3s``/``ja4``, no
+    ``server_name`` - only the derived numbers.
+    """
+    return [
+        _base(
+            conn_state_encoded=0,
+            dst_port=1000 + index,
+            dns={"uid": f"Cdns{index}", "query_length": 24, "label_count": 3},
+            tls={"uid": f"Ctls{index}", "has_ja3": False, "ssl_version_encoded": 3},
+        )
+        for index in range(5)
+    ]
+
+
+def _detector_v2_records():
+    """The same flows under ``--feature-profile detector-v2``, fingerprinted."""
+    return [
+        _base(
+            conn_state="S0",
+            dst_port=1000 + index,
+            dns={"uid": f"Cdns{index}", "query": f"host{index}.example.test",
+                 "qtype": "A", "rcode": "NOERROR"},
+            tls={"uid": f"Ctls{index}",
+                 "ja3": "3207ef9f2e951242b53b44f07d8439d0",
+                 "ja3s": "cce84e7a8b742462e40afb585a3e3ccc",
+                 "ja4": "t13d020200_c1929292aa6b_b9a491fefe05",
+                 "server_name": "tls.example.test"},
+        )
+        for index in range(5)
+    ]
+
+
+def test_the_runner_reports_a_legacy_capture_as_degraded(tmp_path, capsys):
+    from detection_core import runner
+
+    path = _write(tmp_path, "legacy.jsonl", _legacy_records())
+    assert runner.main([str(path), "--output", str(tmp_path / "a.jsonl")]) == 0
+
+    notes = " | ".join(_degraded(capsys))
+    assert notes, "a capture with no raw observables reported no limitation"
+    # Each blinded detector is named, so the operator knows what the silence
+    # in the alert stream does and does not mean.
+    assert "conn_state" in notes and "port_scan" in notes and "ddos" in notes
+    assert "dga_domain" in notes
+    assert "encrypted_malware" in notes
+
+
+def test_the_runner_stays_silent_on_a_detector_v2_capture(tmp_path, capsys):
+    """A capture that carried everything must make no claim at all."""
+    from detection_core import runner
+
+    path = _write(tmp_path, "v2.jsonl", _detector_v2_records())
+    assert runner.main([str(path), "--output", str(tmp_path / "a.jsonl")]) == 0
+
+    assert _degraded(capsys) == []
+
+
+def test_the_notes_reach_the_operator_at_warning_level(tmp_path, capsys):
+    """WARNING, not INFO: the runner logs at INFO by default, so an INFO note
+    would be indistinguishable from ordinary progress chatter."""
+    from detection_core import runner
+
+    path = _write(tmp_path, "legacy.jsonl", _legacy_records())
+    runner.main([str(path), "--output", str(tmp_path / "a.jsonl")])
+
+    notes = _degraded(capsys)
+    assert notes
+    assert all(line.startswith("WARNING detection_core.runner: ") for line in notes)
+
+
+def test_a_quiet_run_suppresses_the_notes_like_every_other_warning(tmp_path, capsys):
+    """``--quiet`` means "errors only"; these are not errors, so they go.
+
+    Pinned so the behaviour is a decision rather than an accident: a run that
+    asked for silence gets it, and the notes are not special-cased past it.
+    """
+    from detection_core import runner
+
+    path = _write(tmp_path, "legacy.jsonl", _legacy_records())
+    runner.main([str(path), "--output", str(tmp_path / "a.jsonl"), "--quiet"])
+
+    assert _degraded(capsys) == []
