@@ -73,6 +73,7 @@ from pathlib import Path
 from typing import Iterator
 
 from .adapters import IngestionJsonlAdapter
+from .adapters.capability import ObservableCapability
 from .config import ConfigError, DetectorSettings, load_detector_settings
 from .fingerprints import FingerprintError, load_fingerprint_feed
 from .pipeline import (
@@ -351,6 +352,9 @@ def _run(args: argparse.Namespace) -> int:
     logger.info("reading %s", _describe_input(args))
 
     adapter = IngestionJsonlAdapter(path=None if streaming else args.input)
+    # Counts the raw observables that actually arrive, so a run that could not
+    # have seen a threat class reports that rather than reporting silence.
+    capability = ObservableCapability()
     stop = threading.Event()
     try:
         # Ctrl-C is only intercepted for a run that would not otherwise end on
@@ -361,7 +365,7 @@ def _run(args: argparse.Namespace) -> int:
             # counts them, and the whole capture is still processed. They are
             # reported below, and in the exit code.
             stats = run_detection(
-                _build_source(args, adapter, stop),
+                capability.watch(_build_source(args, adapter, stop)),
                 sink,
                 detectors,
                 log=logger,
@@ -388,6 +392,12 @@ def _run(args: argparse.Namespace) -> int:
     )
     for warning in adapter.stats.drift_warnings:
         logger.warning("%s", warning)
+    # Emitted after the counts and before the output line, so the limits on a
+    # result are read next to the result itself. Silent when the capture
+    # carried everything: anything printed here is a real gap in what this run
+    # was able to see, not a warning about how it ran.
+    for note in capability.notes():
+        logger.warning("degraded: %s", note)
     if args.output is not None and jsonl_sink is not None:
         logger.info("wrote %d alert(s) to %s", jsonl_sink.count, args.output)
     if telemetry is not None:
