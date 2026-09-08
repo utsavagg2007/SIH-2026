@@ -21,7 +21,17 @@ import type {
   Throughput,
 } from "./types";
 
-const BASE = "/api/v1";
+/**
+ * Where the backend REST API lives.
+ *
+ * Relative by default, which is correct under the Vite dev proxy and correct
+ * again when the backend serves the built bundle itself. It is NOT correct when
+ * the bundle is hosted on a different origin (Vercel) from the API (Render):
+ * there is no proxy there, so every call would hit the static host and 404.
+ * Set VITE_API_BASE at build time to the absolute API root in that deployment.
+ */
+const BASE =
+  (import.meta.env?.VITE_API_BASE as string | undefined) || "/api/v1";
 
 /**
  * Where the analyst service lives.
@@ -201,6 +211,18 @@ export const analyst = {
   },
 };
 
+/**
+ * The live feed's address.
+ *
+ * Same-origin by default. A Vercel-hosted bundle cannot reach the socket that
+ * way and cannot be rescued by a rewrite either - Vercel's rewrites do not
+ * upgrade a WebSocket - so a split-origin deploy must point VITE_WS_URL
+ * straight at the backend, e.g. wss://sih-backend.onrender.com/ws/alerts.
+ */
+export const WS_URL =
+  (import.meta.env?.VITE_WS_URL as string | undefined) ||
+  `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws/alerts`;
+
 export type ConnState = "connecting" | "open" | "closed";
 
 /**
@@ -221,8 +243,7 @@ export function connectFeed(
   const open = () => {
     if (closed) return;
     onState("connecting");
-    const proto = location.protocol === "https:" ? "wss:" : "ws:";
-    ws = new WebSocket(`${proto}//${location.host}/ws/alerts`);
+    ws = new WebSocket(WS_URL);
 
     ws.onopen = () => {
       retry = 0;

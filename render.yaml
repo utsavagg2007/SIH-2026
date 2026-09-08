@@ -1,0 +1,67 @@
+# Render blueprint: the two Python services. The dashboard is not here - it goes
+# to Vercel, and the three VITE_* variables in DEPLOYMENT.md are what join them.
+#
+# Deploy order matters once: CORS_ORIGINS below needs the Vercel URL, and the
+# Vercel build needs these services' URLs. Bring these up first with the
+# placeholder, deploy Vercel, then come back and set the real origin.
+
+services:
+  # ---------------------------------------------------------------------------
+  # Layer 7 - the API and the live socket. Everything the dashboard needs.
+  # ---------------------------------------------------------------------------
+  - type: web
+    name: sih-backend
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    # One worker, always. The alert bus, the WebSocket hub and the replay engine
+    # are process state; a second worker would answer half the requests from an
+    # instance that has never seen the alerts the other one is holding.
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    # Unconditional liveness. NOT /api/v1/system/health - that one reports
+    # degraded states, and a health check that fails on "storage is memory"
+    # would restart-loop the free instance on a condition that is by design.
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      # The demo-day fallback made the default. Nothing to provision, and every
+      # screen works; history resets when the free instance sleeps. Switch to
+      # postgres + DATABASE_URL when you want alerts to survive that.
+      - key: STORAGE_BACKEND
+        value: memory
+      # JSON list, not a bare string - pydantic-settings parses list[str] as
+      # JSON. A bare hostname here fails at import and the service never starts.
+      # Replace after the Vercel deploy, then redeploy this service.
+      - key: CORS_ORIGINS
+        sync: false
+      - key: LOG_LEVEL
+        value: INFO
+
+  # ---------------------------------------------------------------------------
+  # Layer 8 - optional by construction. Stop it and the system above is intact.
+  # ---------------------------------------------------------------------------
+  - type: web
+    name: sih-analyst
+    runtime: python
+    plan: free
+    rootDir: analyst
+    buildCommand: pip install .
+    startCommand: uvicorn analyst.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      # Every key on this service takes the ANALYST_ prefix.
+      # The analyst reads the alert store through the backend's public REST API
+      # - the same one the dashboard uses - so this is the backend's Render URL.
+      - key: ANALYST_BACKEND_URL
+        sync: false
+      - key: ANALYST_CORS_ORIGINS
+        sync: false
+      # Left unset the service answers from the deterministic template provider
+      # with no network access at all, which is a working demo. Set it to turn
+      # generation on.
+      - key: ANALYST_GEMINI_API_KEY
+        sync: false

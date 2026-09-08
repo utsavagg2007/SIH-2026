@@ -63,9 +63,10 @@ docker images --digests | grep -E "73e80|sih-zeek"   # pinned fingerprint images
 Notes: group membership is evaluated at login, which is why a fresh shell can
 still fail right after `usermod` (compare `groups` vs `getent group docker`).
 Membership in `docker` is root-equivalent by design — accepted tradeoff for a
-dev box, never for shared/production hosts. The VM walkthrough lives in
-`DEPLOYMENT.md` §5a; fingerprint images additionally need their explicit build
-scripts before `--ja4` or `--tls-fingerprints` runs.
+dev box, never for shared/production hosts. Ingestion runs on the machine
+watching the traffic and is not part of the deploy — see `DEPLOYMENT.md` §1.
+Fingerprint images additionally need their explicit build scripts before
+`--ja4` or `--tls-fingerprints` runs.
 
 The supported official runtime is frozen to:
 
