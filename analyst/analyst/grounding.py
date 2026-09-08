@@ -25,9 +25,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+from .knowledge import lookup as knowledge_for
+
 __all__ = [
     "Fact",
     "FactSheet",
+    "add_knowledge",
     "describe_alert",
     "describe_incident",
     "describe_corpus",
@@ -171,6 +174,71 @@ _SCOPE_WORDING = {
 
 
 # --------------------------------------------------------------------------
+# Reference knowledge
+# --------------------------------------------------------------------------
+
+#: Knowledge facts sort after everything measured. The sheet is ordered by rank
+#: and the model is told to lead with the direct answer, so what this network
+#: actually observed must come first and the background second - an explanation
+#: that opens with a definition and reaches the evidence last has the priorities
+#: of a textbook rather than of a console. Well clear of the highest rank any
+#: describe_* function assigns, so this stays true as those grow.
+_KNOWLEDGE_RANK = 200
+
+
+def add_knowledge(sheet: FactSheet, threat_class: str | None) -> bool:
+    """Add reference facts about *threat_class* to *sheet*.
+
+    Returns whether anything was added, which is what lets a question about a
+    threat class with no stored alerts still be answered instead of refused.
+
+    Each fact is sourced ``knowledge base: <class>`` rather than to a stored
+    field, because that is the truth: it is background, not measurement, and
+    the panel renders the distinction inline beside every claim. A judge asking
+    "where did that sentence come from" gets a different answer for these than
+    for the ones carrying an evidence key, which is the point.
+    """
+    entry = knowledge_for(threat_class)
+    if entry is None:
+        return False
+
+    source = f"knowledge base: {threat_class}"
+    for offset, text in enumerate(
+        (
+            f"{entry.label}: {entry.summary}",
+            entry.intent,
+            entry.detection,
+        )
+    ):
+        sheet.add(text, source=source, rank=_KNOWLEDGE_RANK + offset)
+
+    sheet.add(
+        "The evidence fields carrying this signal are "
+        + ", ".join(entry.evidence_fields)
+        + ".",
+        source=source,
+        rank=_KNOWLEDGE_RANK + 3,
+    )
+    if entry.mitre:
+        sheet.add(
+            "It maps to MITRE ATT&CK " + ", ".join(entry.mitre) + ".",
+            source=source,
+            # The id is the value as well as being in the text: as a string it
+            # is rendered beside the claim, and unlike a number it is not added
+            # to the set of figures the verifier will accept.
+            value=", ".join(entry.mitre),
+            rank=_KNOWLEDGE_RANK + 4,
+        )
+    sheet.add(entry.investigate, source=source, rank=_KNOWLEDGE_RANK + 5)
+    sheet.add(
+        "Benign traffic with the same shape: " + entry.benign_lookalike,
+        source=source,
+        rank=_KNOWLEDGE_RANK + 6,
+    )
+    return True
+
+
+# --------------------------------------------------------------------------
 # Alert
 # --------------------------------------------------------------------------
 
@@ -284,6 +352,12 @@ def describe_alert(alert: dict[str, Any]) -> FactSheet:
             source="incident_id, kill_chain_stage",
             rank=80,
         )
+
+    # Background on the class, after everything this alert actually measured.
+    # The explain panel gets it for free: "why did this fire" is a better
+    # answer when it also says what the behaviour is and what benign traffic
+    # looks the same.
+    add_knowledge(sheet, alert.get("threat_class"))
 
     if sheet.is_empty:
         sheet.empty_reason = "the alert carried no readable fields"
@@ -407,15 +481,48 @@ def describe_incident(
 
 
 def describe_corpus(
-    question: str, alerts: list[dict[str, Any]], window: str | None = None
+    question: str,
+    alerts: list[dict[str, Any]],
+    window: str | None = None,
+    threat_class: str | None = None,
+    background: bool = True,
+    evidence: bool = True,
 ) -> FactSheet:
-    """Reduce a set of retrieved alerts to facts that answer a question."""
+    """Reduce a set of retrieved alerts to facts that answer a question.
+
+    *threat_class* is what the query planner read out of the question. When it
+    names a class we hold reference material for, that material is added
+    alongside whatever was retrieved - so "what is DNS tunnelling and have we
+    seen any" is one answer covering both halves, and the half about this
+    network stays sourced to stored fields while the half about the threat
+    stays sourced to the knowledge base.
+    """
     ids = [str(a.get("alert_id")) for a in alerts if a.get("alert_id")]
     sheet = FactSheet(
         subject=question.strip() or "the alert history", kind="corpus", alert_ids=ids
     )
 
+    if not evidence:
+        # A pure definition question. It is answered from the knowledge base
+        # and says nothing about the alert history, because it asked nothing
+        # about it - "what is beaconing" that comes back with today's counts
+        # stapled on is answering a question nobody typed.
+        if not add_knowledge(sheet, threat_class):
+            sheet.empty_reason = "there is no reference entry for that subject"
+        return sheet
+
     if not alerts:
+        # "What is a DGA" is a question this layer can answer well with nothing
+        # stored, and refusing it because retrieval came back empty would be
+        # answering a different question than the one asked. So the knowledge
+        # base gets its turn first, and the absence of matching alerts becomes
+        # a fact in the sheet rather than a reason to say nothing at all.
+        nothing_matched = "No stored alert matches this query" + (
+            f" {window}" if window else ""
+        ) + "."
+        if background and add_knowledge(sheet, threat_class):
+            sheet.add(nothing_matched, source="GET /api/v1/alerts", value=0, rank=0)
+            return sheet
         sheet.empty_reason = "no stored alert matched that query" + (
             f" within {window}" if window else ""
         )
@@ -502,6 +609,18 @@ def describe_corpus(
             value=alert.get("score"),
             rank=10 + position,
         )
+
+    # Background on the class in question. When the question did not name one,
+    # fall back to the retrieved set only if it is unanimous: "what happened on
+    # 10.4.2.19" that returns nothing but beaconing should say what beaconing
+    # is. A mixed set gets no background rather than seven competing
+    # definitions, which would bury the counts the question actually asked for.
+    if background:
+        subject_class = threat_class or (
+            next(iter(by_class)) if len(by_class) == 1 else None
+        )
+        add_knowledge(sheet, subject_class)
+
     return sheet
 
 

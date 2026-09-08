@@ -65,8 +65,8 @@ def test_decode_rejects_bools():
 # --------------------------------------------------------------------------
 
 
-def test_provenance_names_the_actual_repo_directory():
-    """The directory on disk is spelled 'injestion_core'."""
+def test_historical_provenance_tag_stays_backward_compatible():
+    """The historical serialized provenance tag remains stable after relocation."""
     assert SOURCE_NAME == "injestion_core.features_jsonl"
 
 
@@ -223,6 +223,177 @@ def test_explicit_timestamp_preferred_over_flow_id():
         "resp_pkts": 1,
     }
     assert record_to_flow_event(record).timestamp == pytest.approx(2000.5)
+
+
+def test_detector_v2_optional_facts_reach_flow_event():
+    record = {
+        "flow_id": "10.0.0.1:10.0.0.2:443:tcp:1000.0",
+        "timestamp": 1000.0,
+        "src_ip": "10.0.0.1",
+        "src_port": 50000,
+        "dst_ip": "10.0.0.2",
+        "dst_port": 443,
+        "proto": "tcp",
+        "duration": 0.1,
+        "orig_bytes": 10,
+        "resp_bytes": 20,
+        "orig_pkts": 1,
+        "resp_pkts": 2,
+        "orig_ip_bytes": 50,
+        "resp_ip_bytes": 100,
+        "dns": {
+            "uid": "C1",
+            "query": "example.test",
+            "qtype": "A",
+            "qtype_num": "1",
+            "rcode": "NOERROR",
+            "rcode_num": "0",
+            "transaction_count": 2,
+        },
+        "tls": {"uid": "C1", "cipher": "TLS_AES_128_GCM_SHA256", "transaction_count": 2},
+        "http": {"uid": "C1", "uri": "/one", "transaction_count": 3},
+    }
+    flow = record_to_flow_event(record)
+    assert flow.orig_ip_bytes == 50
+    assert flow.resp_ip_bytes == 100
+    assert flow.dns.qtype_num == "1" and flow.dns.transaction_count == 2
+    assert flow.tls.cipher == "TLS_AES_128_GCM_SHA256"
+    assert flow.tls.transaction_count == 2
+    assert flow.http.transaction_count == 3
+    assert flow.extra == {}
+
+
+def test_transaction_arrays_preserve_order_content_and_source_identity():
+    record = {
+        "flow_id": "10.0.0.1:10.0.0.2:443:tcp:1000.0",
+        "timestamp": 1000.0,
+        "src_ip": "10.0.0.1",
+        "src_port": 50000,
+        "dst_ip": "10.0.0.2",
+        "dst_port": 443,
+        "proto": "tcp",
+        "duration": 0.1,
+        "orig_bytes": 10,
+        "resp_bytes": 20,
+        "orig_pkts": 1,
+        "resp_pkts": 2,
+        "dns": {"uid": "C1", "query": "first.test", "transaction_count": 2},
+        "dns_transactions": [
+            {
+                "uid": "C1",
+                "query": "first.test",
+                "event_time": 1000.2,
+                "source_ordinal": 0,
+                "answer_count": 1,
+            },
+            {
+                "uid": "C1",
+                "query": "second.test",
+                "event_time": 1000.1,
+                "source_ordinal": 1,
+                "truncated": True,
+            },
+        ],
+        "tls": {"uid": "C1", "ja3": "A", "transaction_count": 2},
+        "tls_transactions": [
+            {"uid": "C1", "ja3": "A", "source_ordinal": 0},
+            {"uid": "C1", "ja3": "B", "source_ordinal": 1},
+        ],
+        "http": {"uid": "C1", "uri": "/one", "transaction_count": 2},
+        "http_transactions": [
+            {"uid": "C1", "uri": "/one", "source_ordinal": 0},
+            {"uid": "C1", "uri": "/two", "source_ordinal": 1},
+        ],
+    }
+
+    flow = record_to_flow_event(record)
+
+    assert [item.query for item in flow.dns_observations] == [
+        "first.test",
+        "second.test",
+    ]
+    assert [item.source_ordinal for item in flow.dns_transactions] == [0, 1]
+    assert [item.event_time for item in flow.dns_transactions] == [1000.2, 1000.1]
+    assert [item.ja3 for item in flow.tls_observations] == ["A", "B"]
+    assert [item.uri for item in flow.http_observations] == ["/one", "/two"]
+    assert flow.extra == {}
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"dns_transactions": "not-an-array"},
+        {"dns_transactions": ["not-an-object"]},
+        {
+            "dns": {"uid": "C1", "transaction_count": 2},
+            "dns_transactions": [{"uid": "C1"}],
+        },
+        {
+            "dns": {"uid": "C1", "transaction_count": 1},
+            "dns_transactions": [],
+        },
+        {
+            "dns": {"uid": "C1", "transaction_count": 1},
+            "dns_transactions": [{"uid": "OTHER", "source_ordinal": 0}],
+        },
+        {
+            "dns": {"uid": "C1", "transaction_count": 2},
+            "dns_transactions": [
+                {"uid": "C1", "source_ordinal": 0},
+                {"uid": "OTHER", "source_ordinal": 1},
+            ],
+        },
+        {
+            "dns": {"uid": "C1", "transaction_count": 2},
+            "dns_transactions": [
+                {"uid": "C1", "source_ordinal": 2},
+                {"uid": "C1", "source_ordinal": 1},
+            ],
+        },
+        {
+            "dns": {"uid": "C1", "transaction_count": 1},
+            "dns_transactions": [{"uid": "C1", "event_time": float("inf")}],
+        },
+    ],
+)
+def test_malformed_transaction_arrays_fail_closed(change):
+    record = {
+        "flow_id": "10.0.0.1:10.0.0.2:53:udp:1000.0",
+        "timestamp": 1000.0,
+        "src_ip": "10.0.0.1",
+        "dst_ip": "10.0.0.2",
+        "dst_port": 53,
+        "proto": "udp",
+        "duration": 0.1,
+        "orig_bytes": 10,
+        "resp_bytes": 20,
+        "orig_pkts": 1,
+        "resp_pkts": 2,
+        "dns": {"uid": "C1", "transaction_count": 1},
+    }
+    record.update(change)
+    with pytest.raises((ValueError, ValidationError)):
+        record_to_flow_event(record)
+
+
+def test_old_scalar_only_input_uses_observation_fallback_without_duplication():
+    record = {
+        "flow_id": "10.0.0.1:10.0.0.2:53:udp:1000.0",
+        "timestamp": 1000.0,
+        "src_ip": "10.0.0.1",
+        "dst_ip": "10.0.0.2",
+        "dst_port": 53,
+        "proto": "udp",
+        "duration": 0.1,
+        "orig_bytes": 10,
+        "resp_bytes": 20,
+        "orig_pkts": 1,
+        "resp_pkts": 2,
+        "dns": {"uid": "C1", "query": "only.test"},
+    }
+    flow = record_to_flow_event(record)
+    assert flow.dns_transactions == []
+    assert [item.query for item in flow.dns_observations] == ["only.test"]
 
 
 # --------------------------------------------------------------------------

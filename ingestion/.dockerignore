@@ -1,0 +1,9 @@
+**
+!docker/
+!docker/ja4/
+!docker/ja4/Dockerfile
+!runtime/
+!runtime/ja4-only.zeek
+!vendor/
+!vendor/ja4-zeek/
+!vendor/ja4-zeek/**

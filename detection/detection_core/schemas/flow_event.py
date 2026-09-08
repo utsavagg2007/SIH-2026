@@ -8,9 +8,8 @@ Design rules baked into these models:
 * Core fields are required and strictly validated. Malformed core data
   raises; it is never coerced to ``None``, and a stringly-typed number such
   as ``"123"`` is rejected rather than quietly converted.
-* Optional fields are ``| None`` because current ingestion does not supply
-  them yet (see SCHEMA.md "Integration TODOs"). Absent means ``None``.
-  Nothing is ever invented.
+* Optional fields are ``| None`` because source runtimes and compatibility
+  profiles differ in availability. Absent means ``None``; nothing is invented.
 * Models are frozen. The engine hands the same FlowEvent instance to every
   registered detector, so immutability stops one detector corrupting the
   input of the next.
@@ -35,6 +34,8 @@ _NUMERIC_CORE_FIELDS = (
     "resp_bytes",
     "orig_pkts",
     "resp_pkts",
+    "orig_ip_bytes",
+    "resp_ip_bytes",
     "src_port",
     "dst_port",
 )
@@ -64,18 +65,35 @@ def _require_json_number(value: Any) -> Any:
 class DnsInfo(BaseModel):
     """DNS data attached to a flow.
 
-    ``query`` / ``qtype`` / ``rcode`` are integration TODOs: current
-    ingestion emits only derived features, not the raw strings.
+    The detector-v2 profile supplies raw query/type/result metadata and
+    derived features; old scalar-only records may still omit any field.
     """
 
     model_config = _BLOCK_CONFIG
 
     uid: str | None = None
+    event_time: float | None = None
+    source_ordinal: int | None = Field(default=None, ge=0)
+    src_ip: str | None = None
+    src_port: int | None = Field(default=None, ge=0, le=65535)
+    dst_ip: str | None = None
+    dst_port: int | None = Field(default=None, ge=0, le=65535)
+    proto: str | None = None
 
-    # Raw values - not supplied by current ingestion.
+    # Raw values supplied by the explicit detector-v2 ingestion profile.
     query: str | None = None
     qtype: str | None = None
     rcode: str | None = None
+    qtype_num: str | None = None
+    rcode_num: str | None = None
+    transaction_count: int | None = Field(default=None, ge=1)
+    authoritative_answer: bool | None = None
+    truncated: bool | None = None
+    recursion_desired: bool | None = None
+    recursion_available: bool | None = None
+    z: int | None = Field(default=None, ge=0, le=255)
+    answer_count: int | None = Field(default=None, ge=0)
+    rejected: bool | None = None
 
     # Derived features - supplied by current ingestion.
     query_length: int | None = Field(default=None, ge=0)
@@ -84,15 +102,21 @@ class DnsInfo(BaseModel):
     is_txt: bool | None = None
     label_count: int | None = Field(default=None, ge=0)
 
+    @field_validator("event_time", "query_entropy", "subdomain_entropy")
+    @classmethod
+    def _finite_optional_float(cls, value: float | None) -> float | None:
+        if value is not None and not math.isfinite(value):
+            raise ValueError("must be a finite number")
+        return value
+
 
 class TlsInfo(BaseModel):
     """TLS data attached to a flow.
 
-    ``ja3`` / ``ja3s`` / ``ja4`` / ``server_name`` are integration TODOs:
-    current ingestion emits only the ``has_ja3`` / ``has_ja3s`` booleans and
-    an encoded SSL version. ``sni_length`` / ``sni_entropy`` are the same
-    kind of TODO - slots for derived SNI features an ingestion release could
-    supply, mirroring what ``DnsInfo`` already gets for query names.
+    The explicit detector-v2 ingestion profile supplies raw JA3/JA3S/JA4/SNI
+    when its source telemetry contains them. The standard runtime may omit
+    fingerprints, while the qualified modes provide JA4 alone or JA3/JA3S/JA4.
+    SNI length and entropy are supplied only when a real server name exists.
 
     Everything optional here defaults to ``None`` meaning *not available*.
     Nothing is ever invented, and no absent value is defaulted to 0.
@@ -101,12 +125,21 @@ class TlsInfo(BaseModel):
     model_config = _BLOCK_CONFIG
 
     uid: str | None = None
+    event_time: float | None = None
+    source_ordinal: int | None = Field(default=None, ge=0)
+    src_ip: str | None = None
+    src_port: int | None = Field(default=None, ge=0, le=65535)
+    dst_ip: str | None = None
+    dst_port: int | None = Field(default=None, ge=0, le=65535)
+    proto: str | None = None
 
-    # Raw values - not supplied by current ingestion.
+    # Raw values supplied by the explicit detector-v2 ingestion profile.
     ja3: str | None = None
     ja3s: str | None = None
     ja4: str | None = None
     server_name: str | None = None
+    cipher: str | None = None
+    transaction_count: int | None = Field(default=None, ge=1)
 
     # Decoded from ssl_version_encoded by the adapter.
     version: str | None = None
@@ -115,25 +148,39 @@ class TlsInfo(BaseModel):
     has_ja3: bool | None = None
     has_ja3s: bool | None = None
 
-    # Derived SNI features - NOT supplied by current ingestion. Present so
+    # Derived SNI features supplied only for an observed server name.
     # the adapter can carry them the day it is emitted; detection_core can
     # also compute the same two numbers itself from a raw ``server_name``.
     sni_length: int | None = Field(default=None, ge=0)
     sni_entropy: float | None = None
 
+    @field_validator("event_time", "sni_entropy")
+    @classmethod
+    def _finite_optional_float(cls, value: float | None) -> float | None:
+        if value is not None and not math.isfinite(value):
+            raise ValueError("must be a finite number")
+        return value
+
 
 class HttpInfo(BaseModel):
     """HTTP data attached to a flow.
 
-    ``host`` / ``uri`` / ``user_agent`` are integration TODOs: current
-    ingestion emits only lengths and entropies.
+    The detector-v2 profile supplies raw request metadata and derived
+    features; old scalar-only records may still omit any field.
     """
 
     model_config = _BLOCK_CONFIG
 
     uid: str | None = None
+    event_time: float | None = None
+    source_ordinal: int | None = Field(default=None, ge=0)
+    src_ip: str | None = None
+    src_port: int | None = Field(default=None, ge=0, le=65535)
+    dst_ip: str | None = None
+    dst_port: int | None = Field(default=None, ge=0, le=65535)
+    proto: str | None = None
 
-    # Raw values - not supplied by current ingestion.
+    # Raw values supplied by the explicit detector-v2 ingestion profile.
     host: str | None = None
     uri: str | None = None
     user_agent: str | None = None
@@ -150,6 +197,14 @@ class HttpInfo(BaseModel):
     request_body_len: int | None = Field(default=None, ge=0)
     response_body_len: int | None = Field(default=None, ge=0)
     status_code: int | None = Field(default=None, ge=0)
+    transaction_count: int | None = Field(default=None, ge=1)
+
+    @field_validator("event_time", "uri_entropy")
+    @classmethod
+    def _finite_optional_float(cls, value: float | None) -> float | None:
+        if value is not None and not math.isfinite(value):
+            raise ValueError("must be a finite number")
+        return value
 
 
 class FlowEvent(BaseModel):
@@ -174,12 +229,17 @@ class FlowEvent(BaseModel):
     resp_bytes: int = Field(ge=0)
     orig_pkts: int = Field(ge=0)
     resp_pkts: int = Field(ge=0)
+    orig_ip_bytes: int | None = Field(default=None, ge=0)
+    resp_ip_bytes: int | None = Field(default=None, ge=0)
     conn_state: str | None = None
 
     # --- optional protocol blocks ---------------------------------------
     dns: DnsInfo | None = None
     tls: TlsInfo | None = None
     http: HttpInfo | None = None
+    dns_transactions: list[DnsInfo] = Field(default_factory=list)
+    tls_transactions: list[TlsInfo] = Field(default_factory=list)
+    http_transactions: list[HttpInfo] = Field(default_factory=list)
 
     # --- provenance / forward compatibility -----------------------------
     source: str = "unknown"
@@ -217,3 +277,24 @@ class FlowEvent(BaseModel):
     @property
     def total_pkts(self) -> int:
         return self.orig_pkts + self.resp_pkts
+
+    @property
+    def dns_observations(self) -> tuple[DnsInfo, ...]:
+        """All DNS rows, falling back to the compatibility scalar for old input."""
+        if self.dns_transactions:
+            return tuple(self.dns_transactions)
+        return (self.dns,) if self.dns is not None else ()
+
+    @property
+    def tls_observations(self) -> tuple[TlsInfo, ...]:
+        """All TLS rows, falling back to the compatibility scalar for old input."""
+        if self.tls_transactions:
+            return tuple(self.tls_transactions)
+        return (self.tls,) if self.tls is not None else ()
+
+    @property
+    def http_observations(self) -> tuple[HttpInfo, ...]:
+        """All HTTP rows, falling back to the compatibility scalar for old input."""
+        if self.http_transactions:
+            return tuple(self.http_transactions)
+        return (self.http,) if self.http is not None else ()

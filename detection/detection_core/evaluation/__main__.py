@@ -1,6 +1,6 @@
 """One evaluation CLI, three modes.
 
-    python -m detection_core.evaluation benign --input ../injestion_core/features.jsonl
+    python -m detection_core.evaluation benign --input ../ingestion/features.jsonl
     python -m detection_core.evaluation benign --synthetic 10000
     python -m detection_core.evaluation throughput --flows 10000 --jsonl --latency
     python -m detection_core.evaluation profile --flows 20000

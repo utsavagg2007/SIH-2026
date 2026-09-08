@@ -4,7 +4,7 @@ This module is ingestion-format knowledge and MUST NOT be imported outside
 ``detection_core.adapters``. Detectors depend on FlowEvent, not on how
 ingestion happens to encode a conn_state today.
 
-Tables transcribed (read-only) from injestion_core/README.md.
+Tables transcribed (read-only) from ingestion/README.md.
 """
 
 from __future__ import annotations
@@ -22,21 +22,10 @@ __all__ = [
     "decode_http_method",
 ]
 
-# NOTE: ingestion's integer mapping still has no entry for Zeek's "S0"
-# (connection attempt, no reply) - `encode_conn_state` in
-# `ingestion/src/features/flow.rs` has no S0 arm, so under the frozen
-# `legacy-m1d` feature profile S0 encodes to 0 and decodes back to None here,
-# indistinguishable from "unknown".
-#
-# The `detector-v2` profile does not go through this table at all: it emits the
-# raw `conn_state` string alongside `conn_state_encoded`, and
-# `record_to_flow_event` prefers the raw value, so S0 survives intact. This
-# table is therefore the *fallback* path, not the only one.
-#
-# S0 is a primary port-scan signal, so a scan detector must still treat an
-# absent or unclassified conn_state as "no evidence" and fall back to the
-# responder-byte proxy rather than concluding the responder answered. See
-# `aggregators.sliding_window.CLASSIFIED_CONN_STATES`.
+# The legacy numeric mapping has no entry for Zeek's "S0" (connection attempt,
+# no reply), so code 0 remains indistinguishable from unknown. The detector-v2
+# profile carries the raw top-level ``conn_state`` and the adapter prefers it;
+# this table exists only for legacy records that lack the raw field.
 CONN_STATE_BY_CODE: dict[int, str] = {
     1: "S1",
     2: "S2",
@@ -72,10 +61,9 @@ HTTP_METHOD_BY_CODE: dict[int, str] = {
     9: "PATCH",
 }
 
-# Top-level keys the adapter recognizes. Includes forward-compatible names
-# (uid, src_port, service, conn_state, ts/timestamp) that current ingestion
-# does not emit yet: if they appear, the adapter uses them and no drift
-# warning fires.
+# Top-level keys the adapter recognizes across legacy-m1d, detector-v2, and
+# transaction-array detector-v2 records. Recognized optional fields do not
+# trigger a schema-drift warning when absent or present.
 KNOWN_TOP_LEVEL_FIELDS: frozenset[str] = frozenset(
     {
         "flow_id",
@@ -89,31 +77,23 @@ KNOWN_TOP_LEVEL_FIELDS: frozenset[str] = frozenset(
         "byte_ratio",
         "orig_pkts",
         "resp_pkts",
+        "orig_ip_bytes",
+        "resp_ip_bytes",
         "pkt_ratio",
         "conn_state_encoded",
         "dns",
+        "dns_transactions",
         "tls",
+        "tls_transactions",
         "http",
-        # Emitted by ingestion's `detector-v2` feature profile; absent under
-        # the frozen `legacy-m1d` one, which is why they are listed rather
-        # than required.
+        "http_transactions",
+        # Forward-compatible, currently absent upstream.
         "uid",
         "src_port",
         "service",
         "conn_state",
         "ts",
         "timestamp",
-        # Layer-3 byte counters, carried by detector-v2 next to the payload
-        # counters. Listed here so they do not raise a drift warning on every
-        # single record - which is all this set does. Being recognized also
-        # keeps them out of FlowEvent.extra, and that is the intent: every
-        # volume threshold in this project is defined on payload bytes
-        # (orig_bytes / resp_bytes), and a header-inclusive counter sitting
-        # next to them in extra is an invitation to compare the wrong two
-        # numbers. Read them from the ingestion record if they are ever
-        # genuinely needed.
-        "orig_ip_bytes",
-        "resp_ip_bytes",
     }
 )
 

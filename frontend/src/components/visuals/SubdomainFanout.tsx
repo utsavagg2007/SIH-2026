@@ -1,6 +1,6 @@
 import { T, MONO, labelStyle } from "../../lib/tokens";
 import type { ClassVisual } from "../../lib/types";
-import { SourceBadge, type VisualChrome } from "./chrome";
+import { type VisualChrome } from "./chrome";
 
 type Props = Extract<ClassVisual, { kind: "subdomain_fanout" }> & VisualChrome;
 
@@ -13,7 +13,6 @@ export function SubdomainFanout({ parent, count, subs, lengths, source, sevColor
 
   return (
     <div>
-      <SourceBadge source={source} />
       <div style={{ ...labelStyle, marginBottom: 4 }}>parent domain</div>
       <div style={{ fontFamily: MONO, fontSize: 16, color: T.text, marginBottom: 10 }}>{parent}</div>
       <div style={{ display: "flex", alignItems: "baseline", gap: 8, marginBottom: 10 }}>

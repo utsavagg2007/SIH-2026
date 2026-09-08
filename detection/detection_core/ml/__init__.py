@@ -5,8 +5,8 @@ Implemented:
           training/evaluation CLI. The live half,
           :class:`~detection_core.detectors.DGADetector`, is wired into the
           detector factory and reports per source; it needs a trained model
-          (``--dga-model``) and a raw ``dns.query``, which current ingestion
-          does not emit yet, so against today's feed it is correctly silent.
+          (``--dga-model``) and a raw ``dns.query``. Detector-v2 supplies the
+          query; legacy-m1d does not, so legacy input remains correctly silent.
 
 A model that emits alerts wraps into the same ``Detector`` interface as
 everything else, so the engine cannot tell a model from a rule. Note that a

@@ -31,6 +31,29 @@ pub struct DnsRecord {
     pub rcode: String,
 }
 
+/// Detector-v2 DNS projection retaining physical-row identity and source facts.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DetectorDnsRecord {
+    #[serde(flatten)]
+    pub legacy: DnsRecord,
+    pub source_ordinal: u64,
+    pub event_time: Option<f64>,
+    pub src_ip: Option<String>,
+    pub src_port: Option<u16>,
+    pub dst_ip: Option<String>,
+    pub dst_port: Option<u16>,
+    pub proto: Option<String>,
+    pub qtype_name: Option<String>,
+    pub rcode_name: Option<String>,
+    pub authoritative_answer: Option<bool>,
+    pub truncated: Option<bool>,
+    pub recursion_desired: Option<bool>,
+    pub recursion_available: Option<bool>,
+    pub z: Option<u8>,
+    pub answer_count: Option<u16>,
+    pub rejected: Option<bool>,
+}
+
 /// An SSL/TLS record parsed from Zeek's ssl.log.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SslRecord {
@@ -41,6 +64,25 @@ pub struct SslRecord {
     pub ja3: Option<String>,
     pub ja3s: Option<String>,
     pub server_name: String,
+}
+
+/// Detector-facing TLS source projection.
+///
+/// The frozen `SslRecord` remains byte-compatible with legacy-m1d. This
+/// opt-in projection adds the exact source JA4 value plus physical-row and
+/// source-tuple context needed by the detector-v2 transaction interface.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DetectorSslRecord {
+    #[serde(flatten)]
+    pub legacy: SslRecord,
+    pub ja4: Option<String>,
+    pub source_ordinal: u64,
+    pub event_time: Option<f64>,
+    pub src_ip: Option<String>,
+    pub src_port: Option<u16>,
+    pub dst_ip: Option<String>,
+    pub dst_port: Option<u16>,
+    pub proto: Option<String>,
 }
 
 /// An HTTP record parsed from Zeek's http.log.
@@ -55,4 +97,18 @@ pub struct HttpRecord {
     pub request_body_len: u64,
     pub response_body_len: u64,
     pub status_code: u16,
+}
+
+/// Detector-v2 HTTP projection retaining physical-row identity and source tuple.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DetectorHttpRecord {
+    #[serde(flatten)]
+    pub legacy: HttpRecord,
+    pub source_ordinal: u64,
+    pub event_time: Option<f64>,
+    pub src_ip: Option<String>,
+    pub src_port: Option<u16>,
+    pub dst_ip: Option<String>,
+    pub dst_port: Option<u16>,
+    pub proto: Option<String>,
 }

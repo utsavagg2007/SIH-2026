@@ -11,10 +11,12 @@ import type {
   AnalystHealth,
   Capture,
   ConstraintProof,
+  DetectorStatus,
   Frame,
   Health,
   HostView,
   Incident,
+  MetricsFrame,
   ReplayStatus,
   Throughput,
 } from "./types";
@@ -93,6 +95,15 @@ export const api = {
   health: () => get<Health>("/system/health"),
   throughput: () => get<Throughput>("/system/throughput"),
   constraints: () => get<ConstraintProof>("/system/constraints"),
+  /** Per-detector state, versions and mean scoring time. The System view reads
+   *  this rather than inventing figures: the backend measures all three, and a
+   *  fabricated latency on a screen whose purpose is proving throughput is a
+   *  correctness bug, not a placeholder. */
+  detectors: () =>
+    get<{ items: DetectorStatus[]; online: number; total: number }>("/system/detectors"),
+  /** The same frame pushed over the WebSocket once per second, over REST. Used
+   *  as a fallback where a view needs metrics without holding a socket. */
+  metricsFrame: () => get<MetricsFrame>("/system/metrics"),
 
   captures: () => get<{ items: Capture[] }>("/replay/captures"),
   replayStatus: () => get<ReplayStatus>("/replay/status"),

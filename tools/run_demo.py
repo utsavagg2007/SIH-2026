@@ -86,7 +86,16 @@ def build_capture(args) -> Path:
         # The real path. Needs the compiled Rust extension and Zeek (Docker).
         print(f"\nrunning the ingestion pipeline over {args.pcap} ...")
         result = subprocess.run(
-            [str(PY), "pipeline.py", args.pcap, "-o", str(features), "--stats"],
+            [
+                str(PY),
+                "pipeline.py",
+                args.pcap,
+                "-o",
+                str(features),
+                "--feature-profile",
+                "detector-v2",
+                "--stats",
+            ],
             cwd=str(ROOT / "ingestion"),
         )
         if result.returncode != 0:

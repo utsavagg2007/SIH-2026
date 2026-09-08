@@ -12,9 +12,8 @@ that reports but never selects.
 The **online half** is :class:`~detection_core.detectors.DGADetector`, which
 is wired into the detector factory and correlates findings per source. It
 needs two things this package cannot supply: a trained model artifact, and a
-raw ``dns.query`` on the flow. Ingestion does not emit the latter yet (see
-SCHEMA.md), so against today's feed the detector is correctly silent -
-reconstructing a domain from an entropy value would be inventing data.
+raw ``dns.query`` on the flow. Detector-v2 supplies the latter while legacy-m1d
+does not; reconstructing a domain from an entropy value would be inventing data.
 
 Requires the ``ml`` extra::
 

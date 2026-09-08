@@ -114,6 +114,49 @@ def feed(detector, flows) -> list[ThreatAlert]:
     return alerts
 
 
+def test_later_dns_transaction_updates_tunnel_window_once():
+    detector = DnsTunnellingDetector(
+        DnsTunnellingConfig(
+            min_dns_observations=3,
+            min_suspicious_ratio=0.3,
+            min_signals_per_observation=2,
+        )
+    )
+    flow = make_flow(
+        timestamp=1000.0,
+        src_ip=SRC,
+        dst_ip=RESOLVER,
+        dst_port=53,
+        proto="udp",
+        dns=DnsInfo(query_length=20, query_entropy=3.0, transaction_count=3),
+        dns_transactions=[
+            DnsInfo(
+                query_length=20,
+                query_entropy=3.0,
+                event_time=1000.1,
+                source_ordinal=0,
+            ),
+            DnsInfo(
+                query_length=24,
+                query_entropy=3.2,
+                event_time=1000.15,
+                source_ordinal=1,
+            ),
+            DnsInfo(
+                query_length=110,
+                query_entropy=4.9,
+                event_time=1000.2,
+                source_ordinal=2,
+            ),
+        ],
+    )
+    alerts = detector.process(flow)
+    assert len(alerts) == 1
+    assert alerts[0].evidence["observation_count"] == 3
+    assert alerts[0].evidence["suspicious_observation_count"] == 1
+    assert alerts[0].evidence["total_orig_bytes"] == flow.orig_bytes
+
+
 @pytest.fixture
 def config() -> DnsTunnellingConfig:
     return DnsTunnellingConfig(

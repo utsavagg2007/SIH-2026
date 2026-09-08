@@ -37,12 +37,33 @@ from app.config import get_settings  # noqa: E402
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "db" / "migrations"
 
+#: The ledger is created here rather than by a migration, because it has to
+#: exist before the first migration can be recorded. That made it the one table
+#: in `public` that `0002_rls_lockdown.sql` could not cover, and Supabase's
+#: Security Advisor flagged it as the project's only RLS error: PostgREST
+#: publishes every public table, so the anon key that ships in the frontend
+#: bundle could read which migrations had been applied and when.
+#:
+#: Locked down at creation, so a database created from here is never exposed
+#: even briefly. `0004_ledger_lockdown.sql` carries the same two statements for
+#: databases that already have an unlocked ledger.
 _LEDGER = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version     TEXT PRIMARY KEY,
     checksum    TEXT NOT NULL,
     applied_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-)
+);
+
+ALTER TABLE schema_migrations ENABLE ROW LEVEL SECURITY;
+
+DO $$
+BEGIN
+    REVOKE ALL ON schema_migrations FROM anon, authenticated;
+EXCEPTION WHEN undefined_object THEN
+    -- Not a Supabase database; it has neither role and needs neither revoke.
+    NULL;
+END
+$$;
 """
 
 

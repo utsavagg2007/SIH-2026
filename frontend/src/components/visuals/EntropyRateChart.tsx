@@ -1,6 +1,6 @@
 import { T, labelStyle } from "../../lib/tokens";
 import type { ClassVisual } from "../../lib/types";
-import { SourceBadge, type VisualChrome } from "./chrome";
+import { type VisualChrome } from "./chrome";
 
 type Props = Extract<ClassVisual, { kind: "entropy_rate" }> & VisualChrome;
 
@@ -17,7 +17,6 @@ export function EntropyRateChart({ rateSeries, entropySeries, spoofed, baselineL
 
   return (
     <div>
-      <SourceBadge source={source} />
       <div style={{ ...labelStyle, marginBottom: 4 }}>packet rate</div>
       <svg width="100%" viewBox={`0 0 ${width} ${rateH}`} style={{ display: "block", marginBottom: gapY }}>
         <line x1="0" y1={rateH} x2={width} y2={rateH} stroke={T.rule} strokeWidth="1" />

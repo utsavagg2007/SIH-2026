@@ -25,6 +25,7 @@ import asyncio
 import json
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -47,8 +48,6 @@ if Path(sys.executable).resolve() != PY.resolve() and PY.exists():
 
 BACKEND = "http://127.0.0.1:8000"
 ANALYST = "http://127.0.0.1:8100"
-DATA = ROOT / "data"
-
 PASS, FAIL = "PASS", "FAIL"
 results: list[tuple[str, str, str]] = []
 
@@ -136,17 +135,55 @@ async def collect_frames(seconds: float) -> list[dict]:
 
 
 def main() -> int:
-    DATA.mkdir(exist_ok=True)
     services: list[Service] = []
+    scenario_workspace = tempfile.TemporaryDirectory(prefix="sih-verify-scenario-")
+    scenario_root = Path(scenario_workspace.name)
+    capture_path = scenario_root / "features.jsonl"
+    alerts_path = scenario_root / "alerts.jsonl"
+    dga_workspace = tempfile.TemporaryDirectory(prefix="sih-verify-dga-")
+    dga_artifact = Path(dga_workspace.name) / "dga_model.joblib"
 
     try:
+        # A fresh clone intentionally has no ignored model artifact. Build an
+        # ephemeral one so this verifier can truthfully require all seven
+        # threat classes without mutating the repository or depending on a
+        # previous demo run.
+        dga_dataset = (
+            ROOT
+            / "detection"
+            / "detection_core"
+            / "ml"
+            / "dga"
+            / "data"
+            / "dga_dataset.sample.csv"
+        )
+        training = subprocess.run(
+            [
+                str(PY),
+                "-m",
+                "detection_core.ml.dga.training",
+                "-i",
+                str(dga_dataset),
+                "-o",
+                str(dga_artifact),
+            ],
+            cwd=str(ROOT / "detection"),
+            capture_output=True,
+            text=True,
+        )
+        check(
+            "ephemeral DGA model trained",
+            training.returncode == 0 and dga_artifact.is_file(),
+            "fresh-clone verification must not rely on ignored artifacts/",
+        )
+
         # -- Layers 1-3: a labelled capture in the ingestion record format ----
         print("\nLAYER 1-3  ingestion record format")
         subprocess.run(
-            [str(PY), "tools/synth_flows.py", "-o", "data/features.jsonl"],
+            [str(PY), "tools/synth_flows.py", "-o", str(capture_path)],
             cwd=str(ROOT), check=True, capture_output=True,
         )
-        flows = [json.loads(l) for l in (DATA / "features.jsonl").read_text().splitlines() if l.strip()]
+        flows = [json.loads(l) for l in capture_path.read_text().splitlines() if l.strip()]
         check("capture generated", len(flows) > 500, f"{len(flows)} flows")
         check(
             "raw dns.query survives to the record",
@@ -213,14 +250,20 @@ def main() -> int:
 
         # -- Layers 4-5 -> 6: detection posting into the backend --------------
         print("\nLAYER 4-5  detection -> backend (over HTTP, with telemetry)")
+        # The dedup claim is about what THIS run adds to the store, not about
+        # how much the store already holds. Comparing this run's emissions to
+        # the absolute total failed against any backend that had already served
+        # a run - which is every backend up for more than one demo.
+        stored_before = _get(f"{BACKEND}/api/v1/alerts?limit=1")["total"]
         frames_task = asyncio.new_event_loop().run_until_complete  # noqa: F841
         loop = asyncio.new_event_loop()
         listener = loop.create_task(collect_frames(seconds=25.0))
 
         def run_detection():
             return subprocess.run(
-                [str(PY), "-m", "detection_core.runner", "data/features.jsonl",
-                 "--output", "data/alerts.jsonl",
+                [str(PY), "-m", "detection_core.runner", str(capture_path),
+                 "--output", str(alerts_path),
+                 "--dga-model", str(dga_artifact),
                  "--ja3-feed", "tools/ja3_feed.example.txt",
                  "--api-url", f"{BACKEND}/api/v1/alerts",
                  "--telemetry-url", f"{BACKEND}/api/v1/telemetry"],
@@ -243,7 +286,7 @@ def main() -> int:
             (detection.stderr.strip().splitlines()[-1] if detection and detection.stderr else ""),
         )
 
-        alerts = [json.loads(l) for l in (DATA / "alerts.jsonl").read_text().splitlines() if l.strip()]
+        alerts = [json.loads(l) for l in alerts_path.read_text().splitlines() if l.strip()]
         classes = {a["threat_class"] for a in alerts}
         check("alerts emitted", len(alerts) > 0, f"{len(alerts)} alerts")
         check(
@@ -295,8 +338,8 @@ def main() -> int:
         stored = _get(f"{BACKEND}/api/v1/alerts?limit=200")
         check(
             "deduplication collapsed repeats",
-            stored["total"] <= len(alerts),
-            f"{len(alerts)} emitted -> {stored['total']} stored",
+            stored["total"] - stored_before <= len(alerts),
+            f"{len(alerts)} emitted -> {stored['total'] - stored_before} added",
         )
         check(
             "stored alert ids are unique",
@@ -348,6 +391,8 @@ def main() -> int:
     finally:
         for service in reversed(services):
             service.stop()
+        scenario_workspace.cleanup()
+        dga_workspace.cleanup()
 
 
 if __name__ == "__main__":

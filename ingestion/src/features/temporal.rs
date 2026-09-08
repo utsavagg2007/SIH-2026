@@ -81,7 +81,8 @@ impl SlidingWindow {
         let stddev = if inter.len() < 2 {
             0.0
         } else {
-            let v = inter.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (inter.len() - 1) as f64;
+            let v =
+                inter.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (inter.len() - 1) as f64;
             v.sqrt()
         };
 

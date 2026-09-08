@@ -3,7 +3,11 @@
  *
  * A right-docked 380px panel. Not a page, and deliberately not a chat bubble:
  * the analyst is an annotation on the alert you are already looking at, so it
- * sits beside the evidence rather than replacing it or floating over it.
+ * sits beside the evidence rather than replacing it or floating over it. The
+ * chat bubble exists separately, in `AnalystChat` - a question you arrived
+ * with is a different act from an explanation of what is already selected, and
+ * conflating the two would make each worse. Both render answers through
+ * `AnalystAnswer`, so provenance looks identical in either place.
  *
  * Three things this component holds to, all of them from the spec:
  *
@@ -31,6 +35,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { X } from "lucide-react";
 import { T, MONO, SANS, headingStyle, labelStyle } from "../lib/tokens";
 import { analyst, AnalystUnavailable } from "../lib/api";
+import { Answer } from "./AnalystAnswer";
 import type { Alert, AnalystAnswer } from "../lib/types";
 
 const PANEL_WIDTH = 380;
@@ -41,110 +46,6 @@ type Status =
   | { state: "answered"; answer: AnalystAnswer }
   | { state: "unavailable" }
   | { state: "failed"; detail: string };
-
-/**
- * The provenance badge. Mirrors the console's existing badge idiom - 9px sans,
- * uppercase, 1px rule, unsaturated - because colour in this product is
- * reserved entirely for severity and threat class (spec 2.1). Provenance is
- * information, but it is not severity, so it must not borrow the ramp.
- */
-function Badge({ children, strong = false }: { children: React.ReactNode; strong?: boolean }) {
-  return (
-    <span
-      style={{
-        fontFamily: SANS,
-        fontSize: 9,
-        fontWeight: 600,
-        letterSpacing: "0.07em",
-        textTransform: "uppercase",
-        color: strong ? T.text2 : T.text3,
-        border: `1px solid ${strong ? T.ruleBright : T.rule}`,
-        padding: "3px 4px",
-        whiteSpace: "nowrap",
-      }}
-    >
-      {children}
-    </span>
-  );
-}
-
-/**
- * One traced claim: the statement, then the stored field it came from as a
- * small inline reference. The reference is mono because it names a field the
- * machine produced; the claim is sans because it is a sentence written for a
- * human (spec 2.3).
- */
-function Claim({ text, source, value }: { text: string; source: string; value?: unknown }) {
-  const shown =
-    value === null || value === undefined || typeof value === "object"
-      ? null
-      : String(value);
-  return (
-    <div style={{ padding: "7px 0", borderBottom: `1px solid ${T.rule}` }}>
-      <div style={{ fontFamily: SANS, fontSize: 13, lineHeight: 1.5, color: T.text }}>
-        {text}
-      </div>
-      <div style={{ display: "flex", alignItems: "baseline", gap: 6, marginTop: 3, flexWrap: "wrap" }}>
-        <span style={{ fontFamily: MONO, fontSize: 10, color: T.text3 }}>[{source}]</span>
-        {shown !== null && (
-          <span style={{ fontFamily: MONO, fontSize: 10, color: T.text2, fontVariantNumeric: "tabular-nums" }}>
-            {shown}
-          </span>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function Answer({ answer }: { answer: AnalystAnswer }) {
-  return (
-    <>
-      <div style={{ padding: "12px 14px", borderBottom: `1px solid ${T.rule}` }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8, flexWrap: "wrap" }}>
-          {answer.generated ? (
-            <Badge>model output &middot; {answer.provider}{answer.model ? ` ${answer.model}` : ""}</Badge>
-          ) : (
-            <Badge strong>rendered locally &middot; no model</Badge>
-          )}
-        </div>
-        <div style={{ fontFamily: SANS, fontSize: 13, lineHeight: 1.6, color: T.text }}>
-          {answer.text}
-        </div>
-        {answer.degraded_reason && (
-          // Surfaced, not swallowed. When generation was attempted and the
-          // result was rejected as ungrounded, that rejection is the system
-          // working, and saying why is more reassuring than hiding it.
-          <div style={{ marginTop: 8, fontFamily: MONO, fontSize: 10, color: T.text3, lineHeight: 1.5 }}>
-            generation declined: {answer.degraded_reason}
-          </div>
-        )}
-        {answer.interpreted_as && answer.interpreted_as.length > 0 && (
-          <div style={{ marginTop: 8 }}>
-            <div style={{ ...labelStyle, marginBottom: 3 }}>read as</div>
-            <div style={{ fontFamily: MONO, fontSize: 11, color: T.text2, lineHeight: 1.5 }}>
-              {answer.interpreted_as.join(" · ")}
-            </div>
-          </div>
-        )}
-      </div>
-
-      <div style={{ padding: "12px 14px" }}>
-        <div style={{ ...labelStyle, marginBottom: 4 }}>
-          Claims and their fields ({answer.citations.length})
-        </div>
-        {answer.citations.length === 0 ? (
-          <div style={{ fontFamily: SANS, fontSize: 12, color: T.text3, paddingTop: 4 }}>
-            No stored field supports a statement about this subject.
-          </div>
-        ) : (
-          answer.citations.map((c, i) => (
-            <Claim key={`${c.source}-${i}`} text={c.text} source={c.source} value={c.value} />
-          ))
-        )}
-      </div>
-    </>
-  );
-}
 
 interface Props {
   alert: Alert | null;
@@ -224,7 +125,7 @@ export function AnalystPanel({ alert, onClose }: Props) {
         </button>
       </div>
 
-      <div style={{ flex: 1, overflowY: "auto", minHeight: 0 }}>
+      <div className="launcher-clearance" style={{ flex: 1, overflowY: "auto", minHeight: 0 }}>
         {status.state === "idle" && (
           <div style={{ padding: 14, fontFamily: SANS, fontSize: 13, color: T.text3, lineHeight: 1.6 }}>
             No alert selected. Select one for an explanation, or ask a question below.

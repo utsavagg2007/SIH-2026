@@ -9,18 +9,30 @@ the passive threat-detection pipeline.
 - `src/zeek_parser/` — header-aware parsers for each Zeek log type
 - `src/features/` — flow-level, sliding-window, DNS, TLS, and HTTP feature extractors
 - `src/utils/` — entropy helpers
-- `pipeline.py` — orchestration: PCAP → Zeek → parse → join by uid → features (JSON lines)
-- `scripts/run_zeek.sh` — Docker wrapper that runs Zeek on a PCAP
+- `pipeline.py` — frozen legacy features, explicit detector-v2 features, and the opt-in canonical sidecar
+- `scripts/run_zeek.sh` — Docker wrapper for standard, deterministic, canonical, JA4-only, and full-fingerprint Zeek runs
+- `scripts/build_ja4_runtime.sh` — reproducible, integrity-checked JA4 image build
+- `runtime/ja4-runtime.lock` — immutable JA4 build and image identities
+- `vendor/ja4-zeek/` — minimal licensed and hash-pinned FoxIO JA4 source
+- `scripts/build_tls_fingerprint_runtime.sh` — offline reproducible JA3/JA3S/JA4 image build
+- `runtime/tls-fingerprint-runtime.lock` — immutable composite runtime identities
+- `vendor/ja3-zeek/` — minimal BSD-licensed, commit- and hash-pinned Salesforce source
+- `scripts/generate_synthetic_pcap.py` — dependency-free deterministic M1D PCAP generator
 
-## Build & install (per-project venv)
+## Build & install (single canonical venv at repo root)
 
 ```bash
+# from repository root
 python3 -m venv .venv
-.venv/bin/pip install maturin
-.venv/bin/maturin develop
+.venv/bin/pip install "maturin>=1.0,<2.0>"
+.venv/bin/maturin develop --manifest-path ingestion/Cargo.toml
+# or: bash -c 'source .venv/bin/activate && maturin develop --manifest-path ingestion/Cargo.toml'
 ```
 
-Uses pyo3 0.25, which supports Python 3.14 natively (no compat flag needed).
+The PyO3 crate itself supports Python 3.14, but the integrated monorepo's pinned
+backend dependencies currently require Python 3.11–3.13; Python 3.12 is the
+qualified root environment. The `.venv` directory is ignored by git — do not
+commit it and do not create a nested `ingestion/.venv`.
 
 ## Running Zeek
 
@@ -34,7 +46,71 @@ Zeek runs in Docker (no local install). Two options depending on Docker access:
 sudo ./scripts/run_zeek.sh pcaps/capture.pcap zeek_output
 ```
 
-For JA3/JA4 hashes add `--ja4` (uses the `activecm/zeek:8.0.6` image).
+### Docker without sudo (local testing)
+
+The Zeek wrapper and Docker E2E harnesses shell out to `docker`. If you see
+`permission denied while trying to connect to the docker API at
+unix:///var/run/docker.sock`, your user is not yet on the socket:
+
+```bash
+sudo usermod -aG docker $USER
+# then ONE of: log out and back in, or refresh this shell with:
+newgrp docker
+docker run --rm hello-world        # no password prompt = fixed
+docker images --digests | grep -E "73e80|sih-zeek"   # pinned fingerprint images visible
+```
+
+Notes: group membership is evaluated at login, which is why a fresh shell can
+still fail right after `usermod` (compare `groups` vs `getent group docker`).
+Membership in `docker` is root-equivalent by design — accepted tradeoff for a
+dev box, never for shared/production hosts. The VM walkthrough lives in
+`DEPLOYMENT.md` §5a; fingerprint images additionally need their explicit build
+scripts before `--ja4` or `--tls-fingerprints` runs.
+
+The supported official runtime is frozen to:
+
+```text
+zeek/zeek:8.0.10@sha256:73e80e9cd23ff71fd28d158e9a9af5c7b2b0ef5d4036af61521827531347c0e3
+platform: linux/amd64
+canonical invocation: zeek -D -C -r <pcap> local
+```
+
+`-D` initializes random seeds deterministically, `-C` ignores invalid packet
+checksums for offline analysis, and `local` loads the standard local policy.
+Canonical replay must use all three. `pcap_dataset` also requests this exact
+deterministic standard invocation through the internal `deterministic_zeek`
+pipeline option; the ordinary pipeline CLI/default remains unchanged. The
+package-free official profile does not install fingerprint packages, so
+JA3/JA3S/JA4 remain optional there. The separate `--ja4` profile uses the same exact base digest plus the minimal
+vendored FoxIO JA4 source and a JA4-only loader. Build it explicitly before use:
+
+```bash
+./scripts/build_ja4_runtime.sh
+```
+
+The build uses a fixed epoch and disabled provenance attestations, and must
+reproduce the image/config digests in `runtime/ja4-runtime.lock`. Runtime use
+verifies repository inputs, the vendored file manifest, image identity, and
+image labels, then executes the immutable image ID without any network fetch or
+fallback. Only `ssl.log.ja4` is added; JA4S/JA4H/JA4L/JA4T fields are rejected.
+
+The mutually exclusive `--tls-fingerprints` profile composes that exact JA4
+source with the minimum vendored Salesforce JA3/JA3S Zeek scripts. Build it
+offline from repository-controlled inputs, then run it explicitly:
+
+```bash
+./scripts/build_tls_fingerprint_runtime.sh
+./scripts/run_zeek.sh pcaps/capture.pcap zeek_output --tls-fingerprints
+```
+
+The composite lock binds the source repository/commit/tree/archive, both source
+manifests, loader and Dockerfile hashes, base digest, image ID, and config
+digest. Runtime execution uses `--network none`, verifies all inputs and image
+labels, adds exactly `ja3`, `ja3s`, and `ja4` to `ssl.log`, and never falls back.
+
+The one-command shell wrapper is supported on Linux, WSL2, compatible Linux
+Docker environments, and native Windows when Git Bash is installed. Native
+Windows without Git Bash can canonicalize existing logs with `--skip-zeek`.
 
 ## Pipeline (feature extraction)
 
@@ -44,17 +120,190 @@ to run Zeek as root and the Python step as your normal user:
 
 ```bash
 sudo ./scripts/run_zeek.sh pcaps/capture.pcap zeek_output
-.venv/bin/python pipeline.py --skip-zeek -o features.jsonl --window 60
+# from repo root, or ../.venv/bin/python when inside ingestion/
+.venv/bin/python ingestion/pipeline.py --skip-zeek --keep-logs ingestion/zeek_output -o features.jsonl --window 60
 ```
 
 Or, if your user can run Docker, do it in one shot (Zeek runs automatically):
 
 ```bash
-.venv/bin/python pipeline.py pcaps/capture.pcap -o features.jsonl --ja4
+.venv/bin/python ingestion/pipeline.py pcaps/capture.pcap -o features.jsonl --ja4
+.venv/bin/python ingestion/pipeline.py pcaps/capture.pcap -o features.jsonl --tls-fingerprints
 ```
+
+Both fingerprint modes are valid with `--canonical-output` after their selected
+image has been built. They fail closed if the locked image or any locked
+source/loader input is unavailable or altered. `--skip-zeek` rejects either
+fingerprint flag because a pre-existing log directory cannot prove which
+runtime produced it; omit the flag to parse those logs, and source fingerprints
+are still transported when present.
 
 Output `features.jsonl` has one object per flow, with `dns`/`tls`/`http` nested
 feature blocks when those records exist. Hand the file to the ML team.
+
+The default feature contract is the frozen M1D legacy projection and remains
+byte-compatible with its golden artifact. Detection must opt in to the richer,
+versioned projection explicitly:
+
+```bash
+.venv/bin/python ingestion/pipeline.py capture.pcap \
+  -o detector_features.jsonl \
+  --feature-profile detector-v2 \
+  --stats
+```
+
+`detector-v2` adds the observed event time, source port, service, raw connection
+state and protocol observables required by the current detectors. Records are
+stable-sorted by event time. For several protocol rows sharing one UID, it
+keeps the earliest event-time row as the compatibility scalar, reports
+`transaction_count`, and preserves every physical source row in the matching
+`dns_transactions`, `tls_transactions`, or `http_transactions` array. Arrays
+remain in source order and carry per-row timestamps and source ordinals.
+Canonical output independently retains all DNS/TLS/HTTP rows. Global legacy window features remain off in detector-v2
+because detection computes entity-keyed windows; they can be requested only
+with `--window-features`. In detector-v2, `-o -` streams flushed JSONL to stdout
+and all status/`--stats` text stays on stderr.
+
+For TLS, detector-v2 uses a lossless-derived projection that adds exact source
+`ja4` without changing the frozen legacy `SslRecord`; JA3 and JA3S retain their
+existing exact-source transport. Missing, unset, and empty values become
+`null`, and no fingerprint is derived from another fingerprint, SNI, cipher,
+version, addresses, or ports. Standard mode emits none, JA4 mode emits only
+JA4, and full mode emits source JA3/JA3S/JA4 when the handshake supports them.
+The frozen `#fields` evidence lives under `tests/fixtures/runtime_headers/`.
+The encrypted-malware signature path also requires a trusted local indicator
+feed; no indicators ship by default.
+
+## CanonicalObservation v1 sidecar
+
+Canonical output is opt-in and does not replace or reshape `features.jsonl`:
+
+```bash
+# Normal PCAP mode: hashes the original PCAP and uses fresh deterministic logs.
+.venv/bin/python ingestion/pipeline.py ingestion/pcaps/capture.pcap \
+  -o features.jsonl \
+  --canonical-output canonical_observations.jsonl \
+  --sensor-id 'sensor/site-a'
+
+# Existing-log mode with the original PCAP still available.
+.venv/bin/python ingestion/pipeline.py ingestion/pcaps/capture.pcap --skip-zeek \
+  --keep-logs ingestion/zeek_output -o features.jsonl \
+  --canonical-output canonical_observations.jsonl \
+  --sensor-id 'sensor/site-a'
+
+# Existing-log mode without the PCAP: caller asserts its original SHA-256.
+.venv/bin/python ingestion/pipeline.py --skip-zeek --keep-logs ingestion/zeek_output \
+  -o features.jsonl \
+  --canonical-output canonical_observations.jsonl \
+  --sensor-id 'sensor/site-a' \
+  --input-sha256 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+```
+
+When running inside `ingestion/`, use `../.venv/bin/python pipeline.py ...` instead of `.venv/bin/python ...`.
+
+Canonical mode requires the exact, nonempty `sensor_id`; it is preserved
+without case conversion or trimming because it participates in record identity.
+The original PCAP SHA-256 is authoritative when a readable PCAP is supplied.
+Without it, `--skip-zeek` requires a 64-hex caller assertion. Canonical and
+legacy output paths must differ, and an existing canonical target is rejected.
+In normal canonical mode the PCAP is hashed before Zeek and again immediately
+after Zeek. A mismatch stops before logs are copied and before either legacy or
+canonical output is published; the fresh temporary log workspace is cleaned.
+
+Normal canonical mode writes Zeek logs to a fresh run-scoped workspace, parses
+only that workspace, then copies generated logs into `--keep-logs`. This prevents
+stale optional logs from entering the canonical artifact. The artifact is
+published atomically through a same-directory temporary file and narrow sidecar
+reservation; it is compact UTF-8 JSONL with LF separators in flow, DNS, TLS,
+HTTP type order and physical source-row order within each type. Publication uses
+an atomic same-filesystem no-replace hard-link operation: an existing canonical
+file is never overwritten, there is no force option, and a target created at the
+publication instant wins unchanged. Concurrent writers fail safely. A successful
+zero-observation run publishes a zero-byte file. The destination filesystem must
+support hard links; an unsupported-filesystem error fails before publication and
+leaves no final artifact rather than falling back to overwrite-capable rename.
+
+`--keep-logs` is a **copy destination**, not an exact current-run snapshot.
+Canonical and legacy processing consume only the fresh run-scoped workspace,
+but the requested destination may retain unrelated files or older optional logs.
+The pipeline never deletes those files. If copying a current-run log fails, the
+operation stops before legacy/canonical publication and reports that the keep
+directory may contain a partial set of current-run copies.
+
+Missing optional-log behavior is explicit:
+
+- missing `dns.log` emits zero DNS observations plus a notice;
+- missing `ssl.log` emits zero TLS observations plus a notice;
+- missing `http.log` emits zero HTTP observations plus a notice;
+- external `--skip-zeek` input without `conn.log` fails;
+- protocol logs without `conn.log` are an incomplete-set failure;
+- a successful fresh Zeek run with no supported logs is allowed and publishes
+  empty legacy and canonical JSONL files.
+
+One UTC `observed_at` value is captured for the entire canonical run. Canonical
+counts, bounded redacted row diagnostics, and missing optional-log notices go to
+stderr; the existing legacy success line remains on stdout. If canonical
+publication fails after legacy output succeeds, the valid legacy artifact is
+preserved and the overall dual-output operation fails.
+
+The checked-in non-sensitive E2E fixture is
+`tests/fixtures/pcap/m1d_synthetic.pcap`. It uses only documentation addresses
+and contains UDP DNS, TCP DNS, two HTTP transactions on one connection, and a
+minimal TLS handshake. Regenerate it only with:
+
+```bash
+.venv/bin/python ingestion/scripts/generate_synthetic_pcap.py
+# or from ingestion/: ../.venv/bin/python scripts/generate_synthetic_pcap.py
+```
+
+Its frozen digest is recorded beside the PCAP. Actual Zeek 8.0.10 `#fields`
+evidence is stored in `tests/fixtures/runtime_headers/zeek_8.0.10_m1d_fields.txt`;
+parsers remain header-driven rather than positional.
+
+### Atomic output and stale-lock recovery
+
+For target `canonical.jsonl`, the writer reservation is named exactly
+`.canonical.jsonl.canonical.lock`. Temporary links are named
+`.canonical.jsonl.canonical.<PID>.<SEQUENCE>.tmp` in the same directory. The
+writer fails closed when the lock already exists and never removes an existing
+lock automatically: age alone cannot distinguish a crashed writer from a slow,
+active writer.
+
+After a crash, first verify that no pipeline/writer process is active, inspect
+the final target, and inspect same-directory `.tmp` files. A complete final
+target is authoritative and must not be overwritten. Leftover temporary files
+may be inspected and manually removed only after confirming no writer owns them.
+Remove the sidecar lock manually only after the same confirmation; never remove
+an active writer's lock. A subsequent run will then acquire a new lock normally.
+Use the process supervisor that launched ingestion as the primary ownership
+record. On Linux, corroborate with `ps -ef` and `lsof <lock-path>` when `lsof` is
+available; on Windows, inspect the owning pipeline/service process and open-file
+state with the deployment's process monitor. The lock intentionally contains no
+PID lease and no age-based deletion rule, so an empty or old lock alone is never
+proof that deletion is safe.
+
+On POSIX, the parent directory is synced after the complete artifact appears. If
+that durability confirmation fails, the API reports explicitly that the artifact
+was published completely but durability is unconfirmed; it does not delete the
+complete file or claim that no artifact exists. Windows flushes/syncs the complete
+temporary file before atomic publication but does not currently expose an
+equivalent directory-handle durability sync through this API.
+
+### Pinned Docker M1D replay
+
+With Docker Desktop/Engine available, this single repository-owned command
+regenerates all PCAP fixtures into a temporary directory, compares their bytes,
+runs fresh A/B and renamed-path C replays with the pinned Zeek image, compares
+runtime headers, validates every canonical line against the frozen schema,
+checks data minimization, and qualifies empty, ARP-only, and invalid PCAPs:
+
+```powershell
+pwsh -NoProfile -File tests/test_m1d_docker_e2e.ps1
+```
+
+The expected synthetic result is exactly 4 flow, 2 DNS, 1 TLS, and 2 HTTP
+observations (9 total), with identical UIDs, record IDs, flow links, ordering,
+and fixed-clock bytes across A/B/C.
 
 ## Library usage
 
@@ -65,6 +314,7 @@ from ingestion_core import (
     extract_dns_features, extract_tls_features, extract_http_features,
 )
 
+# requires: .venv/bin/maturin develop --manifest-path ingestion/Cargo.toml
 conn_json = parse_conn_log("zeek_output/conn.log")
 flow_feats = extract_flow_features(conn_json)
 window_feats = extract_window_features(conn_json, window_secs=60.0)
@@ -112,9 +362,10 @@ ML/Python side can evolve without touching the Rust core.
 
 ### Binding layer — `src/lib.rs`
 
-Exposes eight `#[pyfunction]`s: four parsers (file → JSON array of records) and
-four extractors (JSON records → JSON array of feature objects). `maturin develop`
-builds the `ingestion_core` importable module.
+Exposes four parsers, five feature extractors, the streaming SHA-256 helper, and
+the narrow canonical JSONL orchestration binding. `maturin develop` builds the
+`ingestion_core` importable module. Canonical observations are serialized in
+Rust and are never returned to Python as one giant JSON array.
 
 ---
 
@@ -169,12 +420,12 @@ unknown→0.
 | `is_txt` | bool | query was TXT type | **TXT ⇒ tunneling** |
 | `label_count` | int | number of DNS labels | many ⇒ DGA |
 
-### Optional `tls` block (present iff the flow carried JA3/JA3s)
+### Optional `tls` block (present iff the flow had a TLS record)
 
 | field | type | meaning | threat hint |
 |---|---|---|---|
 | `uid` | string | links to flow | |
-| `has_ja3` / `has_ja3s` | bool | client / server hash present | |
+| `has_ja3` / `has_ja3s` | bool | client / server source hash present; true in full mode when the handshake supports it | |
 | `ssl_version_encoded` | int (0–5) | see mapping | old/rare ⇒ suspicious |
 | `cipher_encoded` | int | coarse cipher encoding | **placeholder — needs a real JA3 lookup table** |
 
@@ -240,15 +491,27 @@ unknown→0.
 
 ### Known limitation
 
-If a single connection (`uid`) spans multiple HTTP requests, the `http` block
-contains features for the **last** matching `http.log` row only (same collapse
-applies to DNS/TLS when a uid repeats). For most captures this is one row per
-uid; tighten this if your traffic has many requests per connection.
+In the frozen `legacy-m1d` projection, repeated protocol rows retain the
+historical last-row collapse. `detector-v2` instead chooses the earliest row by
+event time for scalar compatibility, exposes exact `transaction_count`, and
+preserves every row in source-order transaction arrays. Canonical output also
+preserves every row independently.
 
 ---
 
 ## Tests
 
 ```bash
-cargo test
+cargo test --locked --manifest-path ingestion/Cargo.toml
+# Run Python ingestion tests from ingestion/ so local pipeline imports are explicit.
+cd ingestion
+../.venv/bin/python -m pytest pytests -q
+../.venv/bin/python -m pytest tests/test_pipeline_m1d.py tests/test_pipeline_cli_m1d.py tests/test_pipeline_detector_profile.py tests/test_pipeline_dataset_determinism.py -q
+cd ..
+.venv/bin/python -m pytest pcap_dataset/test_ingest.py -q
+./.venv/bin/python pcap_dataset/replay_integrity_docker_e2e.py
+.venv/bin/python ingestion/tests/test_ja4_docker_e2e.py
+.venv/bin/python ingestion/tests/test_tls_fingerprint_docker_e2e.py
+pwsh -NoProfile -File ingestion/tests/test_m1d_docker_e2e.ps1
+pwsh -NoProfile -File contracts/tests/test_contract.ps1
 ```
