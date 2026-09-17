@@ -1,0 +1,5 @@
+{
+  "description": "All TCP flag bits are preserved without interpretation.",
+  "tcp_flags": 255,
+  "protocol": 6
+}
