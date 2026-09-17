@@ -86,6 +86,11 @@ fn format_utc(total_nanoseconds: i128) -> Result<String, ExactTimeError> {
     Ok(timestamp.to_rfc3339_opts(SecondsFormat::AutoSi, true))
 }
 
+/// Format an integer Unix timestamp without passing through floating point.
+pub fn unix_nanoseconds_to_rfc3339(total_nanoseconds: u64) -> Result<String, ExactTimeError> {
+    format_utc(i128::from(total_nanoseconds))
+}
+
 pub fn zeek_timestamp_to_rfc3339(raw: &str) -> Result<String, ExactTimeError> {
     format_utc(parse_decimal_nanoseconds(raw)?)
 }

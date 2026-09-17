@@ -500,6 +500,46 @@ preserves every row independently.
 
 ---
 
+## NetFlow v5 F2/F3 Rust API
+
+`netflow::v5::parse_netflow_v5_datagram` is the stateless, lossless decoder for
+one complete v5 UDP payload. `netflow::normalize::NetFlowV5Normalizer` is a
+separate stateful offline normalizer. It requires an explicit
+`ExportDatagramContext` containing the sensor, artifact SHA-256, stable exporter
+identity, capture/observation time, and physical datagram ordinal. No local path,
+file name, modification time, or current wall clock participates in output.
+
+F3 reconstructs start/end timestamps with checked integer nanosecond arithmetic.
+The default maximum end age and duration is 24 hours; it is a configurable
+normalization policy, not a NetFlow wire constant. Records outside the configured
+limit are skipped individually with diagnostics.
+
+Record identity uses the versioned `co-netflow-v5-id-v1` UUIDv5 algorithm over
+the sensor, input SHA-256, exporter, engine type/ID, flow sequence, datagram
+ordinal, and physical record ordinal. Five-tuples and paths are not identity
+coordinates.
+
+Sequence state is scoped by exporter plus engine type/ID. NetFlow v5 progression
+uses the previous message's record count. A forward discontinuity reports
+missing exported flow records and sets `loss_detected`; it does not claim network,
+capture, or collector packet loss and never populates `missed_content_bytes`.
+Duplicate and regression events are reported without a reorder holdback in F3;
+bounded reorder handling remains a later sequence-hardening milestone. Restart is
+reported only when sequence regression, uptime decrease, and changed boot-epoch
+evidence agree.
+
+Quality precedence is deterministic: invalid/reserved sampling is `unknown`,
+recognized configured sampling (including one-in-one) is `sampled`, and explicit
+mode-zero/interval-zero is `exact`. Sequence loss is an independent
+`loss_detected` flag and does not replace fidelity. Counters are never scaled.
+v5 `dOctets` maps only to `ip_bytes`; reverse counters and application metadata
+are never fabricated.
+
+F3 is Rust-only and offline. It adds no CLI, Python, live UDP, detector-v2,
+NetFlow v9, IPFIX, or sFlow integration.
+
+---
+
 ## Tests
 
 ```bash
