@@ -134,6 +134,32 @@ impl ExportDatagramContext {
         })
     }
 
+    /// Build the same frozen normalization context for an offline PCAP artifact.
+    ///
+    /// The original constructor intentionally remains export-file-only. F4 uses
+    /// this narrow constructor so PCAP provenance is accurate without changing
+    /// any F3 normalization semantics.
+    pub(crate) fn new_pcap(
+        sensor_id: impl Into<String>,
+        input_sha256: impl AsRef<str>,
+        exporter_id: impl Into<String>,
+        transport_source: Option<String>,
+        observed_at: impl Into<String>,
+        datagram_ordinal: u64,
+    ) -> Result<Self, ExportDatagramContextError> {
+        let mut context = Self::new(
+            sensor_id,
+            InputMode::ExportFile,
+            input_sha256,
+            exporter_id,
+            transport_source,
+            observed_at,
+            datagram_ordinal,
+        )?;
+        context.input_mode = InputMode::PcapFile;
+        Ok(context)
+    }
+
     pub fn sensor_id(&self) -> &str {
         &self.sensor_id
     }
