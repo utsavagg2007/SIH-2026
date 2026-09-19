@@ -538,6 +538,57 @@ are never fabricated.
 F3 is Rust-only and offline. It adds no CLI, Python, live UDP, detector-v2,
 NetFlow v9, IPFIX, or sFlow integration.
 
+## NetFlow v5 F4 offline artifact qualification
+
+`netflow::input` adds two offline Rust entry points without changing the F2 wire
+or F3 normalization semantics:
+
+- `process_raw_datagram_file` reads one complete v5 UDP payload, computes and
+  binds SHA-256 from the actual bytes, checks an optional expected digest, and
+  passes the unchanged bytes through F2 and F3. Raw input is bounded to the v5
+  maximum of 1,464 bytes by default.
+- `process_pcap_file` hashes the complete PCAP artifact, streams packet records,
+  extracts configured UDP candidates, requires F2 structural validation, and
+  normalizes accepted datagrams in capture order. A second digest over the bytes
+  consumed during parsing fails closed if the artifact changed between hashing
+  and processing.
+
+The narrow PCAP reader supports classic PCAP 2.4 in either byte order, with
+microsecond or nanosecond timestamp magic, Ethernet link type, optional one-level
+802.1Q VLAN, IPv4, and complete unfragmented UDP datagrams. It does not claim
+PCAPNG, Linux cooked capture, provider/nested VLAN, IPv6 transport, or fragment
+reassembly. Unsupported or malformed packet framing is diagnosed with bounded
+metadata; partial UDP payloads are never passed to F2.
+
+PCAP candidates require an explicit UDP source-port and/or destination-port
+filter. Optional exporter-source and collector-destination IPv4 filters may also
+be configured. The port filter only narrows candidates: F2 version/count/length
+validation determines whether a payload is structurally NetFlow v5. Exporter
+identity remains explicit configuration and is never inferred from the transport
+source.
+
+For PCAP input, `input_sha256` is the complete PCAP SHA-256, `observed_at` is the
+integer-converted packet capture timestamp, and `datagram_ordinal` is the ordinal
+of each structurally valid matching v5 datagram. Physical packet order and v5
+record order are preserved. Paths, filenames, mtimes, and wall clock do not
+participate in output.
+
+PCAP processing holds one captured packet at a time. Defaults bound captured
+packets to 262,144 bytes, retained canonical observations to 100,000, and retained
+diagnostics to 1,000 while reporting the total/dropped diagnostic counts. The
+`write_*_canonical_jsonl` wrappers publish only after successful processing and
+reuse the existing non-overwriting atomic canonical publisher.
+
+The F4 real-input evidence is an exact hex encoding of one 792-byte v5 payload
+produced by Apache-2.0 `nflow-generator` commit
+`b7cd1199871c7ad9a74d8e0efae1768277019d0e`. It is explicitly exporter-simulator
+test evidence, not physical-router or user traffic. Its provenance, privacy
+review, independent decode summary, source SHA, and canonical SHA are frozen
+under `tests/fixtures/export/netflow_v5/real/`.
+
+F4 remains offline and Rust-only. Live UDP, NetFlow v9, IPFIX, sFlow,
+detector-v2/Detection integration, and ML integration are not implemented.
+
 ---
 
 ## Tests
