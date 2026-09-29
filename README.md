@@ -1,4 +1,4 @@
-# AI-Based Detection of Cyber Threats in Unidirectional IP Traffic
+# Non-Intrusive Intrusion Detection for High-Security One-Way IP Gateways
 
 Passive, evidence-first threat detection for receive-only network taps.
 
