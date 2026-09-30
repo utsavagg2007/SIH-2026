@@ -1,0 +1,9 @@
+{
+  "description": "Wire-reported zero counters, interfaces, and AS values remain present zero values.",
+  "packet_count": 0,
+  "octet_count": 0,
+  "input_ifindex": 0,
+  "output_ifindex": 0,
+  "src_as": 0,
+  "dst_as": 0
+}

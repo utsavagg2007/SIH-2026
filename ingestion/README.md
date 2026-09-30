@@ -500,6 +500,118 @@ preserves every row independently.
 
 ---
 
+## NetFlow v5 F2/F3 Rust API
+
+`netflow::v5::parse_netflow_v5_datagram` is the stateless, lossless decoder for
+one complete v5 UDP payload. `netflow::normalize::NetFlowV5Normalizer` is a
+separate stateful offline normalizer. It requires an explicit
+`ExportDatagramContext` containing the sensor, artifact SHA-256, stable exporter
+identity, capture/observation time, and physical datagram ordinal. No local path,
+file name, modification time, or current wall clock participates in output.
+
+F3 reconstructs start/end timestamps with checked integer nanosecond arithmetic.
+The default maximum end age and duration is 24 hours; it is a configurable
+normalization policy, not a NetFlow wire constant. Records outside the configured
+limit are skipped individually with diagnostics.
+
+Ordering is checked before the age limit. A numerically reversed `First/Last`
+or `Last/SysUptime` pair is accepted as one wrap only when its modular forward
+interval is within the configured age limit and strictly below half the u32
+uptime cycle (2,147,483,648 ms). The reconstructed start-to-export interval must
+also be below one complete cycle. Ambiguous/reversed intervals emit
+`FlowTimeOrderingInvalid`, with bounded First, Last, SysUptime, modular duration
+and end-age context. There is zero future-skew tolerance: `Last=SysUptime+1 ms`
+is rejected. The one-second exporter boot-epoch tolerance does not apply to
+record ordering. Ordinary ordered intervals exceeding the configured limit
+still emit `FlowAgeExceeded`. Rejected rows do not supply exporter clock state;
+sequence advancement still accounts for all records in a valid source header.
+
+For IPv4 ICMP (`protocol=1`), the v5 destination-port word encodes
+`type * 256 + code`; F3 maps its high/low bytes to `icmp_type`/`icmp_code` and
+omits generic transport ports. This follows the
+[Cisco v5 representation](https://docs.crossworkassurance.cisco.com/docs/netflow).
+A zero word exposes type 0/code 0; v5 provides no separate presence bit, and F3
+does not infer a different identity from the source-port word or other fields.
+F2 preserves both raw port words unchanged. For interface metadata, zero input
+or output ifIndex maps independently to absence; nonzero N maps to `ifindex:N`.
+
+Record identity uses the versioned `co-netflow-v5-id-v1` UUIDv5 algorithm over
+the sensor, input SHA-256, exporter, engine type/ID, flow sequence, datagram
+ordinal, and physical record ordinal. Five-tuples and paths are not identity
+coordinates.
+
+Sequence state is scoped by exporter plus engine type/ID. NetFlow v5 progression
+uses the previous message's record count. A forward discontinuity reports
+missing exported flow records and sets `loss_detected`; it does not claim network,
+capture, or collector packet loss and never populates `missed_content_bytes`.
+Duplicate and regression events are reported without a reorder holdback in F3;
+bounded reorder handling remains a later sequence-hardening milestone. Restart is
+reported only when sequence regression, uptime decrease, and changed boot-epoch
+evidence agree.
+
+Quality precedence is deterministic: invalid/reserved sampling is `unknown`,
+recognized configured sampling (including one-in-one) is `sampled`, and explicit
+mode-zero/interval-zero is `exact`. Sequence loss is an independent
+`loss_detected` flag and does not replace fidelity. Counters are never scaled.
+v5 `dOctets` maps only to `ip_bytes`; reverse counters and application metadata
+are never fabricated.
+
+F3 is Rust-only and offline. It adds no CLI, Python, live UDP, detector-v2,
+NetFlow v9, IPFIX, or sFlow integration.
+
+## NetFlow v5 F4 offline artifact qualification
+
+`netflow::input` adds two offline Rust entry points without changing the F2 wire
+or F3 normalization semantics:
+
+- `process_raw_datagram_file` reads one complete v5 UDP payload, computes and
+  binds SHA-256 from the actual bytes, checks an optional expected digest, and
+  passes the unchanged bytes through F2 and F3. Raw input is bounded to the v5
+  maximum of 1,464 bytes by default.
+- `process_pcap_file` hashes the complete PCAP artifact, streams packet records,
+  extracts configured UDP candidates, requires F2 structural validation, and
+  normalizes accepted datagrams in capture order. A second digest over the bytes
+  consumed during parsing fails closed if the artifact changed between hashing
+  and processing.
+
+The narrow PCAP reader supports classic PCAP 2.4 in either byte order, with
+microsecond or nanosecond timestamp magic, Ethernet link type, optional one-level
+802.1Q VLAN, IPv4, and complete unfragmented UDP datagrams. It does not claim
+PCAPNG, Linux cooked capture, provider/nested VLAN, IPv6 transport, or fragment
+reassembly. Unsupported or malformed packet framing is diagnosed with bounded
+metadata; partial UDP payloads are never passed to F2.
+
+PCAP candidates require an explicit UDP source-port and/or destination-port
+filter. Optional exporter-source and collector-destination IPv4 filters may also
+be configured. The port filter only narrows candidates: F2 version/count/length
+validation determines whether a payload is structurally NetFlow v5. Exporter
+identity remains explicit configuration and is never inferred from the transport
+source.
+
+For PCAP input, `input_sha256` is the complete PCAP SHA-256, `observed_at` is the
+integer-converted packet capture timestamp, and `datagram_ordinal` is the ordinal
+of each structurally valid matching v5 datagram. Physical packet order and v5
+record order are preserved. Paths, filenames, mtimes, and wall clock do not
+participate in output.
+
+PCAP processing holds one captured packet at a time. Defaults bound captured
+packets to 262,144 bytes, retained canonical observations to 100,000, and retained
+diagnostics to 1,000 while reporting the total/dropped diagnostic counts. The
+`write_*_canonical_jsonl` wrappers publish only after successful processing and
+reuse the existing non-overwriting atomic canonical publisher.
+
+The F4 real-input evidence is an exact hex encoding of one 792-byte v5 payload
+produced by Apache-2.0 `nflow-generator` commit
+`b7cd1199871c7ad9a74d8e0efae1768277019d0e`. It is explicitly exporter-simulator
+test evidence, not physical-router or user traffic. Its provenance, privacy
+review, independent decode summary, source SHA, and canonical SHA are frozen
+under `tests/fixtures/export/netflow_v5/real/`.
+
+F4 remains offline and Rust-only. Live UDP, NetFlow v9, IPFIX, sFlow,
+detector-v2/Detection integration, and ML integration are not implemented.
+
+---
+
 ## Tests
 
 ```bash

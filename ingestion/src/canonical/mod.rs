@@ -23,6 +23,8 @@ pub enum ObservationType {
 #[serde(rename_all = "lowercase")]
 pub enum TelemetrySource {
     Zeek,
+    #[serde(rename = "netflow_v5")]
+    NetFlowV5,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

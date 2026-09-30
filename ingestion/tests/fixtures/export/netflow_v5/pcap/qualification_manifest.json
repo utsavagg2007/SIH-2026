@@ -1,0 +1,13 @@
+{
+  "fixture": "synthetic_mixed_classic_pcap_generated_in_netflow_v5_e2e_tests",
+  "storage": "generated deterministically in the Rust test to avoid committing packet framing as real evidence",
+  "format": "classic PCAP, little-endian, microsecond timestamps",
+  "link_type": "Ethernet",
+  "packets": 5,
+  "candidate_udp_payloads": 3,
+  "valid_netflow_v5_datagrams": 2,
+  "canonical_flow_records": 4,
+  "contains_single_802_1q_vlan": true,
+  "sha256": "489ffca136283afcb4c95d6b737def29c478a69409f80900f8239e5c7f41ce5a",
+  "canonical_sha256": "c03f1713825e13ba84e40d1e8b95379b8e9be43707dca79bf87b1ee466203e99"
+}

@@ -1,0 +1,7 @@
+{
+  "description": "Three deliberately unsorted records proving physical wire order.",
+  "count": 3,
+  "expected_src_addrs_in_order": ["192.0.2.200", "192.0.2.1", "192.0.2.150"],
+  "expected_src_ports_in_order": [60000, 53, 443],
+  "expected_first_values_in_order": [900, 100, 500]
+}

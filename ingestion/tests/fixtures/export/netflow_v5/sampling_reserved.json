@@ -1,0 +1,7 @@
+{
+  "description": "Reserved sampling mode remains decoded and produces a nonfatal diagnostic.",
+  "raw_sampling": 49153,
+  "sampling_mode": 3,
+  "sampling_interval": 1,
+  "diagnostic": "SamplingConfigurationInvalid"
+}

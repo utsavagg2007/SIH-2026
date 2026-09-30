@@ -24,7 +24,7 @@ Conventional inline IDS/IPS assumes two-way visibility and the ability to act, a
 
 A passive detection system that converts a unidirectional traffic feed into evidence-backed threat alerts.
 
-It ingests PCAP or NetFlow/IPFIX records, parses them with Zeek, computes windowed statistical features in a Rust core, and runs seven detectors — six statistical and one machine-learning classifier for algorithmically generated domains. A fusion layer calibrates confidence, removes duplicates, and correlates related alerts into single incidents. Results stream to a live web dashboard alongside an AI analyst that explains each finding in plain language.
+It ingests PCAP through pinned Zeek runtimes, computes windowed statistical features in a Rust core, and runs seven detectors — six statistical and one machine-learning classifier for algorithmically generated domains. A separate offline Rust path currently parses raw NetFlow v5 datagrams or NetFlow v5 carried in classic PCAP into canonical flow observations; it is not yet connected to Detection. NetFlow v9, IPFIX, sFlow, and live flow-export intake are planned rather than implemented. A fusion layer calibrates confidence, removes duplicates, and correlates related alerts into single incidents. Results stream to a live web dashboard alongside an AI analyst that explains each finding in plain language.
 
 The system runs end to end today across nine layers.
 
@@ -46,7 +46,7 @@ The system runs end to end today across nine layers.
 - **Feature Engineering:** Rust, PyO3, Maturin
 - **Database:** PostgreSQL, asyncpg, Supabase
 - **AI/ML:** scikit-learn (RandomForest), NumPy, joblib, Google Gemini API
-- **Network Analysis:** Zeek, JA3/JA3S, JA4+, NetFlow/IPFIX
+- **Network Analysis:** Zeek, JA3/JA3S, JA4+, offline NetFlow v5 (NetFlow v9/IPFIX/sFlow planned)
 - **Cloud:** Vercel, Docker
 - **Hardware:** None (software-only)
 - **Dev Tools:** Git/GitHub, pytest, Vitest, Cargo
@@ -56,7 +56,7 @@ The system runs end to end today across nine layers.
 See [docs/](docs/) for the layer-by-layer documentation.
 
 ```text
-Traffic in (PCAP / live mirror / NetFlow / IPFIX)
+Traffic in (PCAP captured from a one-way mirror)
   |                    one-way, receive-only
   v
 Zeek  (conn, dns, ssl, x509 + JA3/JA3S/JA4)
@@ -76,6 +76,11 @@ Alert Bus  (ThreatAlert v1.1: confidence, evidence, MITRE)
   +----> WebSocket ----> Live Dashboard
   |
   +----> PostgreSQL ---> AI Analyst (RAG, read-only)
+
+Offline NetFlow v5 artifact (raw datagram / classic PCAP)
+  -> Rust parser + normalizer
+  -> CanonicalObservation(flow)
+  -> no Detection handoff yet
 ```
 
 ## 7. Repository Structure

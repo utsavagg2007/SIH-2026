@@ -39,7 +39,7 @@ EXPECTED_CONTRACT_SHA256 = (
     "311a22470f79fd0d339d3fd97512d3fa107d30768e58d428a92dabcbe0416f57"
 )
 EXPECTED_DETECTOR_SOURCE_SHA256 = (
-    "39f27db71cd14c2e63a676554458146006b3e22926426a39623a00781e2cbc1f"
+    "9c61f67a8e6cbbc38b2edd8d0a76e0cc1c9db3a514cb81bdd72f5bf53ad0d7f5"
 )
 FORBIDDEN_FIELDS = {
     "ja4s",
@@ -101,7 +101,10 @@ def source_tree_sha256(root: Path) -> str:
             continue
         digest.update(path.relative_to(root).as_posix().encode("utf-8"))
         digest.update(b"\0")
-        digest.update(hashlib.sha256(path.read_bytes()).digest())
+        source = path.read_bytes()
+        if path.suffix == ".py":
+            source = source.replace(b"\r\n", b"\n")
+        digest.update(hashlib.sha256(source).digest())
     return digest.hexdigest()
 
 

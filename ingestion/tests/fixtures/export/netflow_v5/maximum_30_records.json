@@ -1,0 +1,6 @@
+{
+  "description": "Maximum permitted v5 record count.",
+  "count": 30,
+  "datagram_length": 1464,
+  "expected_ordinals": {"first": 0, "last": 29}
+}

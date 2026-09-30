@@ -3,6 +3,7 @@ use pyo3::types::PyModule;
 
 pub mod canonical;
 pub mod features;
+pub mod netflow;
 pub mod utils;
 pub mod zeek_parser;
 

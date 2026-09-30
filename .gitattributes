@@ -1,0 +1,3 @@
+/ingestion/tests/fixtures/export/netflow_v5/canonical/*.canonical.jsonl text eol=lf
+/ingestion/tests/fixtures/export/netflow_v5/*.sha256 text eol=lf
+/ingestion/tests/fixtures/export/netflow_v5/**/*.sha256 text eol=lf

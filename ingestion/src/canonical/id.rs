@@ -8,6 +8,8 @@ use uuid::Uuid;
 
 pub const ZEEK_ID_ALGORITHM_MARKER: &str = "co-zeek-id-v1";
 pub const ZEEK_ID_NAMESPACE: Uuid = Uuid::from_u128(0x1a055b8571755118b36da7bb3f50c127);
+pub const NETFLOW_V5_ID_ALGORITHM_MARKER: &str = "co-netflow-v5-id-v1";
+pub const NETFLOW_V5_ID_NAMESPACE: Uuid = Uuid::from_u128(0x6f1b86b7eced5e6fa21f0e45fa7394d7);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdentityObservationType {
@@ -51,6 +53,7 @@ impl ZeekLogName {
 pub enum InputIdentityError {
     InvalidSha256,
     EmptySensorId,
+    EmptyExporterId,
     ComponentTooLong { coordinate: &'static str },
     Io(io::Error),
 }
@@ -62,6 +65,7 @@ impl fmt::Display for InputIdentityError {
                 f.write_str("input SHA-256 must contain exactly 64 hexadecimal characters")
             }
             Self::EmptySensorId => f.write_str("sensor_id must be nonempty"),
+            Self::EmptyExporterId => f.write_str("exporter_id must be nonempty"),
             Self::ComponentTooLong { coordinate } => {
                 write!(
                     f,
@@ -148,6 +152,49 @@ pub fn generate_zeek_record_id(
     }
     append_component(&mut encoded, "row_ordinal", &row_ordinal.to_string())?;
     Ok(Uuid::new_v5(&ZEEK_ID_NAMESPACE, &encoded).to_string())
+}
+
+pub struct NetFlowV5IdentityCoordinates<'a> {
+    pub sensor_id: &'a str,
+    pub input_sha256: &'a str,
+    pub exporter_id: &'a str,
+    pub engine_type: u8,
+    pub engine_id: u8,
+    pub flow_sequence: u32,
+    pub datagram_ordinal: u64,
+    pub record_ordinal: u8,
+}
+
+pub fn generate_netflow_v5_record_id(
+    coordinates: &NetFlowV5IdentityCoordinates<'_>,
+) -> Result<String, InputIdentityError> {
+    if coordinates.sensor_id.is_empty() {
+        return Err(InputIdentityError::EmptySensorId);
+    }
+    if coordinates.exporter_id.is_empty() {
+        return Err(InputIdentityError::EmptyExporterId);
+    }
+    let input_sha256 = normalize_sha256(coordinates.input_sha256)?;
+    let engine_type = coordinates.engine_type.to_string();
+    let engine_id = coordinates.engine_id.to_string();
+    let flow_sequence = coordinates.flow_sequence.to_string();
+    let datagram_ordinal = coordinates.datagram_ordinal.to_string();
+    let record_ordinal = coordinates.record_ordinal.to_string();
+    let mut encoded = Vec::new();
+    for (coordinate, component) in [
+        ("algorithm_marker", NETFLOW_V5_ID_ALGORITHM_MARKER),
+        ("sensor_id", coordinates.sensor_id),
+        ("input_sha256", input_sha256.as_str()),
+        ("exporter_id", coordinates.exporter_id),
+        ("engine_type", engine_type.as_str()),
+        ("engine_id", engine_id.as_str()),
+        ("flow_sequence", flow_sequence.as_str()),
+        ("datagram_ordinal", datagram_ordinal.as_str()),
+        ("record_ordinal", record_ordinal.as_str()),
+    ] {
+        append_component(&mut encoded, coordinate, component)?;
+    }
+    Ok(Uuid::new_v5(&NETFLOW_V5_ID_NAMESPACE, &encoded).to_string())
 }
 
 #[cfg(test)]

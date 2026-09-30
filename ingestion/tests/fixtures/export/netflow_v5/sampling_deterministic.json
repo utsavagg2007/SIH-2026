@@ -1,0 +1,8 @@
+{
+  "description": "Sampling mode one with interval 100; counters are not scaled.",
+  "raw_sampling": 16484,
+  "sampling_mode": 1,
+  "sampling_interval": 100,
+  "packet_count": 16909060,
+  "octet_count": 287454020
+}
