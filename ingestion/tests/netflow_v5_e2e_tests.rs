@@ -14,7 +14,9 @@ use ingestion_core::netflow::input::{
     write_raw_datagram_canonical_jsonl, OfflineInputDiagnosticKind, OfflineInputError,
     PcapInputConfig, RawDatagramInputConfig,
 };
-use ingestion_core::netflow::normalize::NetFlowV5NormalizationConfig;
+use ingestion_core::netflow::normalize::{
+    NetFlowV5NormalizationConfig, NetFlowV5NormalizationDiagnosticKind,
+};
 use ingestion_core::netflow::pcap::{ClassicPcapError, PcapPacketDiagnosticKind, PcapUdpFilters};
 use ingestion_core::netflow::v5::{parse_netflow_v5_datagram, NetFlowV5Datagram};
 use sha2::{Digest, Sha256};
@@ -306,6 +308,113 @@ fn mixed_pcap() -> Vec<u8> {
             ),
         ],
     )
+}
+
+#[test]
+fn icmp_and_interface_review_semantics_survive_raw_and_pcap_artifact_paths() {
+    let dir = test_dir("icmp-ifindex-review");
+    for (icmp_type, icmp_code, input_ifindex, output_ifindex) in
+        [(8_u8, 0_u8, 0_u16, 1_u16), (3, 13, u16::MAX, 0)]
+    {
+        let mut payload = fixture("minimal_valid_one_record");
+        payload[4..8].copy_from_slice(&10_000_u32.to_be_bytes());
+        payload[48..52].copy_from_slice(&8_000_u32.to_be_bytes());
+        payload[52..56].copy_from_slice(&9_000_u32.to_be_bytes());
+        payload[36..38].copy_from_slice(&input_ifindex.to_be_bytes());
+        payload[38..40].copy_from_slice(&output_ifindex.to_be_bytes());
+        payload[58..60].copy_from_slice(&[icmp_type, icmp_code]);
+        payload[62] = 1;
+        let raw = dir.join("icmp.bin");
+        fs::write(&raw, &payload).unwrap();
+        let pcap = dir.join("icmp.pcap");
+        fs::write(
+            &pcap,
+            classic_pcap(
+                PcapEncoding::LittleMicroseconds,
+                &[(
+                    1_700_000_000,
+                    0,
+                    ethernet_ipv4_udp(&payload, 50_000, NETFLOW_PORT, false),
+                )],
+            ),
+        )
+        .unwrap();
+        for result in [
+            process_raw_datagram_file(&raw, &raw_config("icmp-review")).unwrap(),
+            process_pcap_file(&pcap, &pcap_config("icmp-review")).unwrap(),
+        ] {
+            assert_eq!(result.observations.len(), 1);
+            assert_eq!(result.diagnostics_total, 0);
+            let serialized = serde_json::to_value(&result.observations[0]).unwrap();
+            let data = &serialized["data"];
+            assert_eq!(data["icmp_type"], icmp_type);
+            assert_eq!(data["icmp_code"], icmp_code);
+            assert!(data.get("src_port").is_none());
+            assert!(data.get("dst_port").is_none());
+            assert_eq!(data.get("ingress_interface").is_some(), input_ifindex != 0);
+            assert_eq!(data.get("egress_interface").is_some(), output_ifindex != 0);
+        }
+    }
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn future_time_diagnostic_and_numeric_context_survive_offline_wrappers() {
+    let dir = test_dir("time-order-review");
+    let mut payload = fixture("minimal_valid_one_record");
+    payload[4..8].copy_from_slice(&10_000_u32.to_be_bytes());
+    payload[48..52].copy_from_slice(&9_000_u32.to_be_bytes());
+    payload[52..56].copy_from_slice(&10_001_u32.to_be_bytes());
+    let raw = dir.join("future.bin");
+    fs::write(&raw, &payload).unwrap();
+    let raw_result = process_raw_datagram_file(&raw, &raw_config("time-review")).unwrap();
+    assert!(raw_result.observations.is_empty());
+    let pcap = dir.join("future.pcap");
+    let sequence = u32::from_be_bytes(payload[16..20].try_into().unwrap());
+    let mut valid = with_sequence(payload.clone(), sequence.wrapping_add(1));
+    valid[52..56].copy_from_slice(&10_000_u32.to_be_bytes());
+    fs::write(
+        &pcap,
+        classic_pcap(
+            PcapEncoding::LittleMicroseconds,
+            &[
+                (
+                    1_700_000_000,
+                    0,
+                    ethernet_ipv4_udp(&payload, 50_000, NETFLOW_PORT, false),
+                ),
+                (
+                    1_700_000_000,
+                    1,
+                    ethernet_ipv4_udp(&valid, 50_000, NETFLOW_PORT, false),
+                ),
+            ],
+        ),
+    )
+    .unwrap();
+    let pcap_result = process_pcap_file(&pcap, &pcap_config("time-review")).unwrap();
+    assert_eq!(pcap_result.observations.len(), 1);
+    assert!(!pcap_result.observations[0].quality.loss_detected);
+    for result in [raw_result, pcap_result] {
+        assert_eq!(result.diagnostics_total, 1);
+        let diagnostic = result.diagnostics[0];
+        assert_eq!(
+            diagnostic.kind,
+            OfflineInputDiagnosticKind::Normalization(
+                NetFlowV5NormalizationDiagnosticKind::FlowTimeOrderingInvalid
+            )
+        );
+        assert_eq!(diagnostic.datagram_ordinal, Some(0));
+        assert_eq!(diagnostic.record_ordinal, Some(0));
+        assert_eq!(diagnostic.limit_ms, Some((1_u64 << 31) - 1));
+        let evidence = diagnostic.flow_time.unwrap();
+        assert_eq!(evidence.first_sys_uptime_ms, 9_000);
+        assert_eq!(evidence.last_sys_uptime_ms, 10_001);
+        assert_eq!(evidence.sys_uptime_ms, 10_000);
+        assert_eq!(evidence.end_age_ms, u64::from(u32::MAX));
+        assert_eq!(evidence.duration_ms, 1_001);
+    }
+    fs::remove_dir_all(dir).unwrap();
 }
 
 #[test]
@@ -874,11 +983,11 @@ fn open_source_exporter_fixture_matches_independent_decode_and_f3_mapping() {
         let expected_egress = format!("ifindex:{}", record.output_ifindex);
         assert_eq!(
             flow.ingress_interface.as_deref(),
-            Some(expected_ingress.as_str())
+            (record.input_ifindex != 0).then_some(expected_ingress.as_str())
         );
         assert_eq!(
             flow.egress_interface.as_deref(),
-            Some(expected_egress.as_str())
+            (record.output_ifindex != 0).then_some(expected_egress.as_str())
         );
         if matches!(record.protocol, 6 | 17 | 132) {
             assert_eq!(flow.src_port, Some(record.src_port));
@@ -886,6 +995,14 @@ fn open_source_exporter_fixture_matches_independent_decode_and_f3_mapping() {
         } else {
             assert_eq!(flow.src_port, None);
             assert_eq!(flow.dst_port, None);
+        }
+        if record.protocol == 1 {
+            let [icmp_type, icmp_code] = record.dst_port.to_be_bytes();
+            assert_eq!(flow.icmp_type, Some(icmp_type));
+            assert_eq!(flow.icmp_code, Some(icmp_code));
+        } else {
+            assert_eq!(flow.icmp_type, None);
+            assert_eq!(flow.icmp_code, None);
         }
     }
     assert_eq!(maximum_end_age_ms, 469);
@@ -902,7 +1019,7 @@ fn open_source_exporter_fixture_matches_independent_decode_and_f3_mapping() {
     let actual_canonical_sha = digest(&expected_jsonl);
     assert_eq!(
         actual_canonical_sha,
-        "ad4e7dc432a3200a89dba1c3c029b49472535c2ac68800c4aeffdc56a75cf60f"
+        "84e753c3ee244dfcafaddfa522c18e0ff22b8090eacde27187b8adbef1f99efe"
     );
     let expected_canonical_sha =
         fs::read_to_string(real_dir.join("nflow_generator_b7cd119_v5.canonical_expected.sha256"))

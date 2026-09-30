@@ -514,6 +514,27 @@ The default maximum end age and duration is 24 hours; it is a configurable
 normalization policy, not a NetFlow wire constant. Records outside the configured
 limit are skipped individually with diagnostics.
 
+Ordering is checked before the age limit. A numerically reversed `First/Last`
+or `Last/SysUptime` pair is accepted as one wrap only when its modular forward
+interval is within the configured age limit and strictly below half the u32
+uptime cycle (2,147,483,648 ms). The reconstructed start-to-export interval must
+also be below one complete cycle. Ambiguous/reversed intervals emit
+`FlowTimeOrderingInvalid`, with bounded First, Last, SysUptime, modular duration
+and end-age context. There is zero future-skew tolerance: `Last=SysUptime+1 ms`
+is rejected. The one-second exporter boot-epoch tolerance does not apply to
+record ordering. Ordinary ordered intervals exceeding the configured limit
+still emit `FlowAgeExceeded`. Rejected rows do not supply exporter clock state;
+sequence advancement still accounts for all records in a valid source header.
+
+For IPv4 ICMP (`protocol=1`), the v5 destination-port word encodes
+`type * 256 + code`; F3 maps its high/low bytes to `icmp_type`/`icmp_code` and
+omits generic transport ports. This follows the
+[Cisco v5 representation](https://docs.crossworkassurance.cisco.com/docs/netflow).
+A zero word exposes type 0/code 0; v5 provides no separate presence bit, and F3
+does not infer a different identity from the source-port word or other fields.
+F2 preserves both raw port words unchanged. For interface metadata, zero input
+or output ifIndex maps independently to absence; nonzero N maps to `ifindex:N`.
+
 Record identity uses the versioned `co-netflow-v5-id-v1` UUIDv5 algorithm over
 the sensor, input SHA-256, exporter, engine type/ID, flow sequence, datagram
 ordinal, and physical record ordinal. Five-tuples and paths are not identity

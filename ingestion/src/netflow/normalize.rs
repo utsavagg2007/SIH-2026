@@ -202,6 +202,7 @@ impl Default for NetFlowV5NormalizationConfig {
 pub enum NetFlowV5NormalizationDiagnosticKind {
     NonzeroPadding,
     SamplingInvalid,
+    FlowTimeOrderingInvalid,
     FlowAgeExceeded,
     TimestampUnderflow,
     TimestampOutOfRange,
@@ -213,6 +214,16 @@ pub enum NetFlowV5NormalizationDiagnosticKind {
     ExporterClockShift,
     ExporterClockRegression,
     UptimeAmbiguous,
+}
+
+/// Bounded wire-time evidence; never contains packet bytes or source strings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NetFlowV5FlowTimeContext {
+    pub first_sys_uptime_ms: u32,
+    pub last_sys_uptime_ms: u32,
+    pub sys_uptime_ms: u32,
+    pub end_age_ms: u64,
+    pub duration_ms: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -227,6 +238,7 @@ pub struct NetFlowV5NormalizationDiagnostic {
     pub missing_records: Option<u32>,
     pub value_ms: Option<u64>,
     pub limit_ms: Option<u64>,
+    pub flow_time: Option<NetFlowV5FlowTimeContext>,
 }
 
 impl NetFlowV5NormalizationDiagnostic {
@@ -246,6 +258,7 @@ impl NetFlowV5NormalizationDiagnostic {
             missing_records: None,
             value_ms: None,
             limit_ms: None,
+            flow_time: None,
         }
     }
 
@@ -414,7 +427,7 @@ impl NetFlowV5Normalizer {
                 Ok(observation) => observations.push(observation),
                 Err(mut diagnostic) => {
                     diagnostic.datagram_ordinal = context.datagram_ordinal;
-                    diagnostics.push(diagnostic);
+                    diagnostics.push(*diagnostic);
                 }
             }
         }
@@ -781,6 +794,7 @@ impl RecordFailure {
             missing_records: None,
             value_ms: self.value_ms,
             limit_ms: self.limit_ms,
+            flow_time: None,
         }
     }
 }
@@ -791,6 +805,44 @@ fn normalized_times(
     max_flow_age_ms: u64,
 ) -> Result<(String, String), RecordFailure> {
     let end_age_ms = u64::from(header.sys_uptime_ms.wrapping_sub(record.last_sys_uptime_ms));
+    let duration_ms = u64::from(
+        record
+            .last_sys_uptime_ms
+            .wrapping_sub(record.first_sys_uptime_ms),
+    );
+    // A numerically reversed pair may represent one uptime wrap, but only
+    // when its forward modular interval is policy-bounded and less than half
+    // the u32 cycle. At/above half a cycle the direction is ambiguous. This
+    // also keeps a future Last=SysUptime+1 invalid with an oversized age limit.
+    // There is no future skew allowance; the boot-epoch tolerance is unrelated.
+    let wrap_limit_ms = max_flow_age_ms.min(SYS_UPTIME_MODULUS_MS / 2 - 1);
+    let invalid_order = if record.last_sys_uptime_ms > header.sys_uptime_ms
+        && end_age_ms > wrap_limit_ms
+    {
+        Some(("end_age_ms", end_age_ms, wrap_limit_ms))
+    } else if record.first_sys_uptime_ms > record.last_sys_uptime_ms && duration_ms > wrap_limit_ms
+    {
+        Some(("duration_ms", duration_ms, wrap_limit_ms))
+    } else if end_age_ms + duration_ms >= SYS_UPTIME_MODULUS_MS {
+        // A start-to-export interval spanning a complete cycle cannot be
+        // resolved from these three u32 values as a single-wrap flow.
+        Some((
+            "start_age_ms",
+            end_age_ms + duration_ms,
+            SYS_UPTIME_MODULUS_MS - 1,
+        ))
+    } else {
+        None
+    };
+    if let Some((field, value_ms, limit_ms)) = invalid_order {
+        return Err(RecordFailure {
+            kind: NetFlowV5NormalizationDiagnosticKind::FlowTimeOrderingInvalid,
+            record_ordinal: record.record_ordinal,
+            field,
+            value_ms: Some(value_ms),
+            limit_ms: Some(limit_ms),
+        });
+    }
     if end_age_ms > max_flow_age_ms {
         return Err(RecordFailure {
             kind: NetFlowV5NormalizationDiagnosticKind::FlowAgeExceeded,
@@ -800,11 +852,6 @@ fn normalized_times(
             limit_ms: Some(max_flow_age_ms),
         });
     }
-    let duration_ms = u64::from(
-        record
-            .last_sys_uptime_ms
-            .wrapping_sub(record.first_sys_uptime_ms),
-    );
     if duration_ms > max_flow_age_ms {
         return Err(RecordFailure {
             kind: NetFlowV5NormalizationDiagnosticKind::FlowAgeExceeded,
@@ -889,9 +936,27 @@ fn canonicalize_record(
     record: &NetFlowV5Record,
     context: &ExportDatagramContext,
     policy: CanonicalizationPolicy,
-) -> Result<CanonicalObservation, NetFlowV5NormalizationDiagnostic> {
-    let (start_time, end_time) = normalized_times(header, record, policy.max_flow_age_ms)
-        .map_err(RecordFailure::into_diagnostic)?;
+) -> Result<CanonicalObservation, Box<NetFlowV5NormalizationDiagnostic>> {
+    let (start_time, end_time) =
+        normalized_times(header, record, policy.max_flow_age_ms).map_err(|failure| {
+            let mut diagnostic = failure.into_diagnostic();
+            if diagnostic.kind == NetFlowV5NormalizationDiagnosticKind::FlowTimeOrderingInvalid {
+                diagnostic.flow_time = Some(NetFlowV5FlowTimeContext {
+                    first_sys_uptime_ms: record.first_sys_uptime_ms,
+                    last_sys_uptime_ms: record.last_sys_uptime_ms,
+                    sys_uptime_ms: header.sys_uptime_ms,
+                    end_age_ms: u64::from(
+                        header.sys_uptime_ms.wrapping_sub(record.last_sys_uptime_ms),
+                    ),
+                    duration_ms: u64::from(
+                        record
+                            .last_sys_uptime_ms
+                            .wrapping_sub(record.first_sys_uptime_ms),
+                    ),
+                });
+            }
+            Box::new(diagnostic)
+        })?;
     let record_id = generate_netflow_v5_record_id(&NetFlowV5IdentityCoordinates {
         sensor_id: &context.sensor_id,
         input_sha256: &context.input_sha256,
@@ -903,15 +968,19 @@ fn canonicalize_record(
         record_ordinal: record.record_ordinal,
     })
     .map_err(|_error: InputIdentityError| {
-        NetFlowV5NormalizationDiagnostic::record(
+        Box::new(NetFlowV5NormalizationDiagnostic::record(
             NetFlowV5NormalizationDiagnosticKind::IdentityFailure,
             context,
             record.record_ordinal,
             "record_id",
-        )
+        ))
     })?;
 
     let has_transport_ports = matches!(record.protocol, 6 | 17 | 132);
+    // NetFlow v5 dstport encodes IPv4 ICMP as (type << 8) | code.
+    // srcport is not a fallback identity source, and neither word is a
+    // canonical transport port for ICMP. A zero word reports type=0, code=0.
+    let icmp_identity = (record.protocol == 1).then(|| record.dst_port.to_be_bytes());
     let flags = (record.protocol == 6).then(|| tcp_flags(record.tcp_flags));
     let flow = FlowData {
         start_time,
@@ -920,8 +989,8 @@ fn canonicalize_record(
         dst_ip: record.dst_addr.to_string(),
         src_port: has_transport_ports.then_some(record.src_port),
         dst_port: has_transport_ports.then_some(record.dst_port),
-        icmp_type: None,
-        icmp_code: None,
+        icmp_type: icmp_identity.map(|[icmp_type, _]| icmp_type),
+        icmp_code: icmp_identity.map(|[_, icmp_code]| icmp_code),
         ip_protocol: record.protocol,
         direction_mode: DirectionMode::Unidirectional,
         service: None,
@@ -929,8 +998,10 @@ fn canonicalize_record(
         connection_history: None,
         tcp_flags: flags,
         end_reason: None,
-        ingress_interface: Some(format!("ifindex:{}", record.input_ifindex)),
-        egress_interface: Some(format!("ifindex:{}", record.output_ifindex)),
+        ingress_interface: (record.input_ifindex != 0)
+            .then(|| format!("ifindex:{}", record.input_ifindex)),
+        egress_interface: (record.output_ifindex != 0)
+            .then(|| format!("ifindex:{}", record.output_ifindex)),
         counters: FlowCounters {
             src_to_dst: DirectionCounters {
                 packets: Some(u64::from(record.packet_count)),

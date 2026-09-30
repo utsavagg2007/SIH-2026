@@ -11,8 +11,9 @@ use crate::canonical::id::{normalize_sha256, sha256_file, InputIdentityError};
 use crate::canonical::output::{write_canonical_observations_jsonl, CanonicalOutputError};
 use crate::canonical::{CanonicalObservation, InputMode};
 use crate::netflow::normalize::{
-    ExportDatagramContext, ExportDatagramContextError, NetFlowV5NormalizationConfig,
-    NetFlowV5NormalizationDiagnosticKind, NetFlowV5Normalizer, NetFlowV5ProcessingError,
+    ExportDatagramContext, ExportDatagramContextError, NetFlowV5FlowTimeContext,
+    NetFlowV5NormalizationConfig, NetFlowV5NormalizationDiagnosticKind, NetFlowV5Normalizer,
+    NetFlowV5ProcessingError,
 };
 use crate::netflow::pcap::{
     extract_udp_candidate, ClassicPcapError, ClassicPcapReader, PcapPacketDiagnosticKind,
@@ -97,6 +98,8 @@ pub struct OfflineInputDiagnostic {
     pub packet_ordinal: Option<u64>,
     pub datagram_ordinal: Option<u64>,
     pub record_ordinal: Option<u8>,
+    pub flow_time: Option<NetFlowV5FlowTimeContext>,
+    pub limit_ms: Option<u64>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -275,6 +278,8 @@ pub fn process_raw_datagram_file(
             packet_ordinal: None,
             datagram_ordinal: Some(0),
             record_ordinal: diagnostic.record_ordinal,
+            flow_time: diagnostic.flow_time,
+            limit_ms: diagnostic.limit_ms,
         })
         .collect::<Vec<_>>();
     let diagnostics_dropped = diagnostics_total.saturating_sub(diagnostics.len() as u64);
@@ -342,6 +347,8 @@ pub fn process_pcap_file(
                             packet_ordinal: Some(diagnostic.packet_ordinal),
                             datagram_ordinal: None,
                             record_ordinal: None,
+                            flow_time: None,
+                            limit_ms: None,
                         },
                     )?;
                     continue;
@@ -362,6 +369,8 @@ pub fn process_pcap_file(
                             packet_ordinal: Some(candidate.packet_ordinal),
                             datagram_ordinal: None,
                             record_ordinal: None,
+                            flow_time: None,
+                            limit_ms: None,
                         },
                     )?;
                     continue;
@@ -398,6 +407,8 @@ pub fn process_pcap_file(
                         packet_ordinal: Some(candidate.packet_ordinal),
                         datagram_ordinal: Some(datagrams_accepted),
                         record_ordinal: diagnostic.record_ordinal,
+                        flow_time: diagnostic.flow_time,
+                        limit_ms: diagnostic.limit_ms,
                     },
                 )?;
             }

@@ -33,6 +33,14 @@ fn parsed_fixture(name: &str) -> NetFlowV5Datagram {
     parse_netflow_v5_datagram(&fixture(name)).expect("fixture must parse")
 }
 
+fn valid_wire_datagram() -> Vec<u8> {
+    let mut bytes = fixture("minimal_valid_one_record");
+    bytes[4..8].copy_from_slice(&10_000_u32.to_be_bytes());
+    bytes[48..52].copy_from_slice(&8_000_u32.to_be_bytes());
+    bytes[52..56].copy_from_slice(&9_000_u32.to_be_bytes());
+    bytes
+}
+
 fn context_with(
     exporter_id: &str,
     input_sha256: &str,
@@ -211,6 +219,165 @@ fn flow_crossing_one_uptime_wrap_is_reconstructed() {
         flow(&observation).end_time.as_deref(),
         Some("2023-11-14T22:13:19.873456789Z")
     );
+}
+
+#[test]
+fn flow_ending_before_uptime_wrap_is_reconstructed() {
+    let mut source = datagram(100, 1, 500, 1_700_000_000, 123_456_789);
+    source.records[0].first_sys_uptime_ms = u32::MAX - 999;
+    source.records[0].last_sys_uptime_ms = u32::MAX - 499;
+    let observation = normalize_one(&source);
+    assert_eq!(
+        flow(&observation).start_time,
+        "2023-11-14T22:13:18.623456789Z"
+    );
+    assert_eq!(
+        flow(&observation).end_time.as_deref(),
+        Some("2023-11-14T22:13:19.123456789Z")
+    );
+}
+
+#[test]
+fn one_ms_future_last_is_diagnosed_and_only_affected_record_is_skipped() {
+    let mut normalizer = NetFlowV5Normalizer::new(NetFlowV5NormalizationConfig::default());
+    normalizer.process_datagram(&datagram(100, 1, 10_000, 1_700_000_000, 0), &context(0));
+    let mut source = datagram(101, 2, 11_000, 1_700_000_001, 0);
+    source.records[0].first_sys_uptime_ms = 10_000;
+    source.records[0].last_sys_uptime_ms = 11_001;
+    let result = normalizer.process_datagram(&source, &context(1));
+    assert_eq!(result.observations.len(), 1);
+    assert!(result.observations[0]
+        .source_record_id
+        .as_deref()
+        .unwrap()
+        .ends_with("/1/1"));
+    let diagnostic = result
+        .diagnostics
+        .iter()
+        .find(|item| item.kind == NetFlowV5NormalizationDiagnosticKind::FlowTimeOrderingInvalid)
+        .expect("dedicated future/order diagnostic");
+    assert_eq!(diagnostic.datagram_ordinal, 1);
+    assert_eq!(diagnostic.record_ordinal, Some(0));
+    assert_eq!(diagnostic.field, "end_age_ms");
+    assert_eq!(diagnostic.value_ms, Some(u64::from(u32::MAX)));
+    assert_eq!(diagnostic.limit_ms, Some(DEFAULT_MAX_FLOW_AGE_MS));
+    let evidence = diagnostic.flow_time.expect("bounded wire-time context");
+    assert_eq!(evidence.first_sys_uptime_ms, 10_000);
+    assert_eq!(evidence.last_sys_uptime_ms, 11_001);
+    assert_eq!(evidence.sys_uptime_ms, 11_000);
+    assert_eq!(evidence.end_age_ms, u64::from(u32::MAX));
+    assert_eq!(evidence.duration_ms, 1_001);
+    assert!(!result
+        .diagnostics
+        .iter()
+        .any(|item| item.kind == NetFlowV5NormalizationDiagnosticKind::FlowAgeExceeded));
+    // Sequence advancement follows the structurally valid header's count,
+    // including rejected records; invalid row times never replace header time.
+    let next =
+        normalizer.process_datagram(&datagram(103, 1, 12_000, 1_700_000_002, 0), &context(2));
+    assert_eq!(next.sequence_status, SequenceStatus::InOrder);
+    assert_eq!(next.clock_status, ExporterClockStatus::InOrder);
+    assert!(!next.observations[0].quality.loss_detected);
+    assert!(next.diagnostics.is_empty());
+}
+
+#[test]
+fn all_ordering_rejections_keep_trusted_header_sequence_state() {
+    let mut normalizer = NetFlowV5Normalizer::new(NetFlowV5NormalizationConfig::default());
+    let mut source = datagram(100, 1, 10_000, 1_700_000_000, 0);
+    source.records[0].last_sys_uptime_ms = 10_001;
+    assert!(normalizer
+        .process_datagram(&source, &context(0))
+        .observations
+        .is_empty());
+    let next =
+        normalizer.process_datagram(&datagram(101, 1, 11_000, 1_700_000_001, 0), &context(1));
+    assert_eq!(next.sequence_status, SequenceStatus::InOrder);
+    assert_eq!(next.clock_status, ExporterClockStatus::InOrder);
+    assert_eq!(next.observations.len(), 1);
+    assert!(next.diagnostics.is_empty());
+}
+
+#[test]
+fn gross_first_last_inversions_are_order_failures_even_when_end_age_also_exceeds_limit() {
+    for (first, last, limit) in [(10_001, 9_000, 2_000), (20_000, 5_000, 500)] {
+        let mut source = datagram(100, 1, 10_000, 1_700_000_000, 0);
+        source.records[0].first_sys_uptime_ms = first;
+        source.records[0].last_sys_uptime_ms = last;
+        let result = NetFlowV5Normalizer::new(NetFlowV5NormalizationConfig {
+            max_flow_age_ms: limit,
+        })
+        .process_datagram(&source, &context(0));
+        assert!(result.observations.is_empty());
+        let diagnostic = result
+            .diagnostics
+            .iter()
+            .find(|item| item.kind == NetFlowV5NormalizationDiagnosticKind::FlowTimeOrderingInvalid)
+            .expect("ordering diagnostic takes precedence");
+        assert_eq!(diagnostic.field, "duration_ms");
+        assert_eq!(
+            diagnostic.value_ms,
+            Some(u64::from(last.wrapping_sub(first)))
+        );
+        assert_eq!(diagnostic.flow_time.unwrap().first_sys_uptime_ms, first);
+        assert!(!result
+            .diagnostics
+            .iter()
+            .any(|item| item.kind == NetFlowV5NormalizationDiagnosticKind::FlowAgeExceeded));
+    }
+}
+
+#[test]
+fn oversized_age_policy_does_not_allow_future_or_half_cycle_ambiguous_times() {
+    for (first, last, expected_field) in [
+        (9_000, 10_001, "end_age_ms"),
+        (10_001, 9_000, "duration_ms"),
+        (1_u32 << 31, 0, "duration_ms"),
+        (10_000, 10_000_u32.wrapping_add(1 << 31), "end_age_ms"),
+        (1_000, 4_000_000_000, "start_age_ms"),
+    ] {
+        let mut source = datagram(100, 1, 1_000, 1_700_000_000, 0);
+        if expected_field != "start_age_ms" {
+            source.header.sys_uptime_ms = 10_000;
+        }
+        source.records[0].first_sys_uptime_ms = first;
+        source.records[0].last_sys_uptime_ms = last;
+        let result = NetFlowV5Normalizer::new(NetFlowV5NormalizationConfig {
+            max_flow_age_ms: u64::MAX,
+        })
+        .process_datagram(&source, &context(0));
+        assert!(result.observations.is_empty());
+        assert!(
+            result.diagnostics.iter().any(|item| {
+                item.kind == NetFlowV5NormalizationDiagnosticKind::FlowTimeOrderingInvalid
+                    && item.field == expected_field
+            }),
+            "{:?}",
+            result.diagnostics
+        );
+    }
+}
+
+#[test]
+fn modular_wrap_policy_boundary_is_inclusive() {
+    for (age, accepted) in [(1_000_u32, true), (1_001, false)] {
+        let mut source = datagram(100, 1, 500, 1_700_000_000, 0);
+        source.records[0].last_sys_uptime_ms = 500_u32.wrapping_sub(age);
+        source.records[0].first_sys_uptime_ms = source.records[0].last_sys_uptime_ms;
+        let result = NetFlowV5Normalizer::new(NetFlowV5NormalizationConfig {
+            max_flow_age_ms: 1_000,
+        })
+        .process_datagram(&source, &context(0));
+        assert_eq!(result.observations.len(), usize::from(accepted));
+        assert_eq!(
+            result
+                .diagnostics
+                .iter()
+                .any(|item| item.kind
+                    == NetFlowV5NormalizationDiagnosticKind::FlowTimeOrderingInvalid),
+            !accepted
+        );
+    }
 }
 
 #[test]
@@ -539,6 +706,8 @@ fn canonical_tcp_udp_icmp_mapping_obeys_semantics() {
     let tcp_flow = flow(&tcp);
     assert_eq!(tcp_flow.src_port, Some(12_345));
     assert_eq!(tcp_flow.dst_port, Some(443));
+    assert_eq!(tcp_flow.icmp_type, None);
+    assert_eq!(tcp_flow.icmp_code, None);
     assert_eq!(
         tcp_flow.tcp_flags.as_deref(),
         Some(&[TcpFlag::Fin, TcpFlag::Syn, TcpFlag::Psh, TcpFlag::Ack][..])
@@ -550,6 +719,8 @@ fn canonical_tcp_udp_icmp_mapping_obeys_semantics() {
     let udp = normalize_one(&udp_source);
     assert_eq!(flow(&udp).src_port, Some(12_345));
     assert_eq!(flow(&udp).dst_port, Some(443));
+    assert_eq!(flow(&udp).icmp_type, None);
+    assert_eq!(flow(&udp).icmp_code, None);
     assert_eq!(flow(&udp).tcp_flags, None);
 
     let mut sctp_source = udp_source;
@@ -560,12 +731,104 @@ fn canonical_tcp_udp_icmp_mapping_obeys_semantics() {
 
     let mut icmp_source = tcp_source;
     icmp_source.records[0].protocol = 1;
+    icmp_source.records[0].dst_port = 0x0800;
     let icmp = normalize_one(&icmp_source);
     assert_eq!(flow(&icmp).src_port, None);
     assert_eq!(flow(&icmp).dst_port, None);
-    assert_eq!(flow(&icmp).icmp_type, None);
-    assert_eq!(flow(&icmp).icmp_code, None);
+    assert_eq!(flow(&icmp).icmp_type, Some(8));
+    assert_eq!(flow(&icmp).icmp_code, Some(0));
     assert_eq!(flow(&icmp).tcp_flags, None);
+}
+
+fn assert_icmp_wire_identity(icmp_type: u8, icmp_code: u8) {
+    let mut bytes = valid_wire_datagram();
+    bytes[62] = 1;
+    bytes[56..58].copy_from_slice(&0xdead_u16.to_be_bytes());
+    bytes[58..60].copy_from_slice(&[icmp_type, icmp_code]);
+    let parsed = parse_netflow_v5_datagram(&bytes).expect("F2 ICMP wire decode");
+    assert_eq!(parsed.records[0].src_port, 0xdead);
+    assert_eq!(
+        parsed.records[0].dst_port,
+        u16::from_be_bytes([icmp_type, icmp_code])
+    );
+    let result = NetFlowV5Normalizer::new(NetFlowV5NormalizationConfig::default())
+        .process_bytes(&bytes, &context(0))
+        .unwrap();
+    assert_eq!(result.observations.len(), 1);
+    let data = flow(&result.observations[0]);
+    assert_eq!(data.icmp_type, Some(icmp_type));
+    assert_eq!(data.icmp_code, Some(icmp_code));
+    assert_eq!(data.src_port, None);
+    assert_eq!(data.dst_port, None);
+    assert_eq!(data.tcp_flags, None);
+    let serialized = serde_json::to_value(&result.observations[0]).unwrap();
+    assert!(serialized["data"].get("src_port").is_none());
+    assert!(serialized["data"].get("dst_port").is_none());
+    assert_eq!(serialized["data"]["icmp_type"], icmp_type);
+    assert_eq!(serialized["data"]["icmp_code"], icmp_code);
+}
+
+#[test]
+fn icmp_echo_request_preserves_type_eight_code_zero_from_wire() {
+    assert_icmp_wire_identity(8, 0);
+}
+
+#[test]
+fn icmp_destination_unreachable_preserves_nonzero_code_from_wire() {
+    assert_icmp_wire_identity(3, 13);
+}
+
+#[test]
+fn icmp_zero_and_maximum_words_are_preserved_without_source_port_fallback() {
+    assert_icmp_wire_identity(0, 0);
+    assert_icmp_wire_identity(255, 255);
+}
+
+#[test]
+fn non_port_bearing_non_icmp_protocols_do_not_fabricate_ports_or_icmp() {
+    for protocol in [47, 50, 89] {
+        let mut source = datagram(100, 1, 10_000, 1_700_000_000, 0);
+        source.records[0].protocol = protocol;
+        source.records[0].dst_port = 0x0800;
+        let observation = normalize_one(&source);
+        let data = flow(&observation);
+        assert_eq!(
+            (data.src_port, data.dst_port, data.icmp_type, data.icmp_code),
+            (None, None, None, None)
+        );
+    }
+}
+
+#[test]
+fn interface_index_zero_and_nonzero_are_independent_and_raw_u16_values_stay_lossless() {
+    for input in [0_u16, 1, u16::MAX] {
+        for output in [0_u16, 1, u16::MAX] {
+            let mut bytes = valid_wire_datagram();
+            bytes[36..38].copy_from_slice(&input.to_be_bytes());
+            bytes[38..40].copy_from_slice(&output.to_be_bytes());
+            let parsed = parse_netflow_v5_datagram(&bytes).unwrap();
+            assert_eq!(parsed.records[0].input_ifindex, input);
+            assert_eq!(parsed.records[0].output_ifindex, output);
+            let observation = normalize_one(&parsed);
+            assert_eq!(
+                flow(&observation).ingress_interface,
+                (input != 0).then(|| format!("ifindex:{input}"))
+            );
+            assert_eq!(
+                flow(&observation).egress_interface,
+                (output != 0).then(|| format!("ifindex:{output}"))
+            );
+            let serialized = serde_json::to_value(&observation).unwrap();
+            assert_eq!(
+                serialized["data"].get("ingress_interface").is_some(),
+                input != 0
+            );
+            assert_eq!(
+                serialized["data"].get("egress_interface").is_some(),
+                output != 0
+            );
+        }
+    }
 }
 
 #[test]
