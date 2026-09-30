@@ -610,6 +610,176 @@ under `tests/fixtures/export/netflow_v5/real/`.
 F4 remains offline and Rust-only. Live UDP, NetFlow v9, IPFIX, sFlow,
 detector-v2/Detection integration, and ML integration are not implemented.
 
+## F5 shared bounded template registry (Rust API only)
+
+`netflow::template` implements deterministic schema/state infrastructure shared
+by future NetFlow v9 and IPFIX decoders. It parses **no packet bytes**, emits no
+canonical records, and adds no Python/CLI/runtime integration. NetFlow v9 wire
+parsing/data decoding, IPFIX wire parsing/data decoding, live export collection,
+Detection/ML integration, and sFlow are **not implemented** by F5.
+
+### Identity and exact layout
+
+`TemplateKey` has four distinct coordinates: `TemplateProtocol` (`NetFlowV9` or
+`Ipfix`), `TransportSessionKey`, `observation_scope_id: u32`, and
+`template_id: u16`. The scope means v9 Source ID or IPFIX Observation Domain ID
+at the future adapter boundary. Both protocols reserve template IDs below 256;
+the registry accepts 256 through 65535, including options templates. This follows
+[RFC 3954 section 5.2](https://www.rfc-editor.org/rfc/rfc3954#section-5.2) and
+[RFC 7011 section 3.4](https://www.rfc-editor.org/rfc/rfc7011#section-3.4).
+
+`TemplateTimelineKey` contains protocol, transport/session, and observation scope
+only. `TemplateKey::timeline()` returns that structured key; template ID is
+excluded so multiple templates in one timeline share a monotonic source clock.
+
+`TransportSessionKey` separates `exporter_id` and caller-supplied `session_id`
+without concatenation or content hashing. Both are nonempty, case-sensitive ASCII
+labels with the existing exporter alphabet: letters, digits, `.`, `_`, `:`, `-`.
+Each string is validated before allocating and revalidated against the registry's
+own byte bound on every keyed operation. The caller must supply a complete,
+deterministic namespace covering the exporter, sensor/collector context,
+transport endpoints and connection/restart epoch as appropriate. A path, wall
+clock, source IP alone, or template contents are not a complete session key.
+F5 does not infer or authenticate identity; epoch derivation belongs to F6/F8.
+
+`TemplateDefinition` stores `TemplateKind::{Data, Options}`, an explicit
+`scope_field_count: u16`, and an exact-sized ordered boxed field slice. Data
+templates require scope count zero; Options require 1 through total field count.
+The first N fields are scope fields; v9 adapters must later translate their scope
+definition byte length into a count. Field order and duplicate identifiers are
+preserved. Scope count is part of definition equality/replacement, not key
+identity. Data and Options share one key namespace and never coexist at one key.
+
+`TemplateFieldSpecifier` preserves `field_id: u16`, `encoded_length: u16`, and
+`enterprise_number: Option<u32>`. IPFIX adapters later remove the enterprise flag
+from the logical IE ID and populate the PEN; v9 adapters preserve their field
+type without a PEN. No IE lookup, sorting, deduplication, length normalization,
+canonical interpretation, or variable-length decoding happens here. In particular
+65535 and optional PEN values are preserved per
+[RFC 7011 section 3.2](https://www.rfc-editor.org/rfc/rfc7011#section-3.2).
+Protocol-specific validation remains the decoder's job, including legality of
+zero-length/unknown fields and enterprise flags. Empty active definitions are
+rejected; wire withdrawal records must call the explicit withdrawal API later.
+
+### Human-approved configurable deployment policy defaults
+
+`TemplateRegistryConfig::default()` returns the final human-approved F5 policy:
+
+| Policy | Named constant | Default |
+|---|---|---|
+| TTL | `DEFAULT_TEMPLATE_TTL_SECONDS` | 1800 seconds |
+| Registry entries | `DEFAULT_MAX_TEMPLATE_ENTRIES` | 4096 |
+| Fields per template | `DEFAULT_MAX_FIELDS_PER_TEMPLATE` | 256 |
+| Bytes per exporter/session identity component | `DEFAULT_MAX_TEMPLATE_IDENTITY_BYTES` | 256 |
+
+These are configurable deployment safety defaults, **not protocol limits**.
+`DEFAULT_TEMPLATE_TTL_NS` is the same TTL in integer nanoseconds. Explicit
+`TemplateRegistryConfig::new(max_entries, max_fields_per_template,
+max_identity_bytes)` overrides the resource bounds and `with_ttl_ns` overrides
+TTL. All four values must be positive. Field count remains at most 65535 (the
+common u16 count space); the approved 256-field policy is overrideable within
+that representation. Template IDs, scope IDs, field IDs, encoded lengths, and
+optional enterprise numbers retain their original u16/u32 representations.
+
+Checked budget arithmetic rejects unrepresentable configurations, including
+duplicated bounded identity storage for timeline keys. Maps grow incrementally,
+never preallocated from configuration. Definitions validate borrowed field
+counts before copying; exact-sized boxed slices/strings prevent retention of
+oversized caller buffer capacities. Registry insertion revalidates definitions
+constructed using a different, larger limit.
+
+Retained state is bounded by max entries times bounded fields, bounded template
+and timeline identity strings, and bounded BTreeMap/allocator overhead. The
+ordered timeline-watermark map has exactly one entry per represented retained
+template timeline, therefore at most the number of retained templates and at
+most max_entries. There are no empty-timeline watermark tombstones, auxiliary
+per-key generation histories, expired-key tombstones, unknown-data buffers, or
+retained diagnostic lists.
+Caller-owned inputs, caller-retained clones, allocator failure/OOM, and future
+decoder allocations are outside the registry's ownership/resource guarantee;
+decoders must enforce bounds before building their own field buffers.
+
+### Source-time lifecycle and atomic failures
+
+All timed APIs take caller-supplied `u64` integer source/event nanoseconds, with
+independent clocks per protocol/session/observation-scope timeline. F5 performs
+no conversion through floats and reads no wall clock, file metadata, IO, RNG,
+threads, or timers. The unit matches existing v5 integer-nanosecond processing;
+a future adapter chooses the source event time.
+
+- A new active key starts generation 1 with first/last seen equal to source time.
+- An identical active definition refresh keeps generation and first seen, updates
+  last seen, and extends expiry to checked `source_time + TTL`.
+- A changed active definition (including kind, scope count, lengths, PEN, order,
+  or duplicates) replaces the definition and increments generation with checked
+  arithmetic, preserving the active lifetime's first seen.
+- `expires_at <= source_time` is expired, including the exact boundary.
+- Generations reset to 1 after expiry or withdrawal: they identify versions only
+  within an active lifetime. No unbounded generation tombstones are retained.
+  Later decoded-record identity must also carry source/session and physical
+  template/message coordinates; generation alone is not a durable identity.
+
+Successful insert, lookup, withdrawal, or timeline expiry updates only the
+relevant retained timeline's watermark. Equal times are valid; lower time within
+that timeline returns `SourceTimeRegression` without changing any state. All
+template IDs in that timeline share its watermark, but other protocols,
+sessions/exporters, and observation domains advance independently. For example,
+exporter A at time 5000 followed by exporter B at time 3000 is valid.
+
+Unknown lookups/withdrawals advance the watermark only if that timeline already
+retains templates. Operations on empty timelines return Unknown (or zero for
+expiry) without storing auxiliary state. Removing a timeline's final retained
+template via withdrawal, expired lookup, or explicit expiry removes its
+watermark. Reinsertion into an empty timeline begins a new lifetime and may use
+an earlier timestamp. Partial removal preserves the shared watermark while any
+template remains, including expired-but-not-yet-pruned templates. This bounded,
+lifetime-local monotonicity is the approved F5 policy; no persistent clock or
+generation tombstones are retained.
+
+`insert` returns `TemplateTransition` with Inserted/Refreshed/Replaced,
+generation and expired-pruned count. It validates identity/layout, time, expiry
+addition, generation and prospective retained capacity before mutating anything.
+Expired entries in the insertion's own timeline are accounted for before
+capacity rejection and physically pruned only on successful insertion. One
+timeline's timestamp cannot prune unrelated clocks: those retained templates
+still consume capacity until explicitly expired using their own timeline time.
+Capacity failure never evicts live state; every error preserves both complete
+maps and all watermarks, even expired neighbors.
+
+`lookup(key, source_time)` returns Found (a borrowed immutable entry), Unknown,
+or Expired with bounded metadata. Expired lookup removes that key; subsequent
+lookup returns Unknown. Lookup does not refresh TTL or last seen. Expired vs
+unknown can only be distinguished before pruning; no expiry history is stored.
+`withdraw` similarly returns Withdrawn, Unknown, or Expired and removes only the
+specified key. Future decoders—not F5—decide whether wire withdrawal is legal.
+`expire_timeline(timeline, source_time)` removes only that timeline's expired
+entries and returns a count. The old global `expire` API is removed; no shared
+collector/capture time is assumed. No background processing is required.
+
+Read-only entry getters expose definition, generation, first seen, last seen,
+and expiry. `entries()` is a borrowed BTreeMap-ordered audit view of retained
+entries, including any expired but not yet pruned entries; use timed lookup for
+decoding, not timeless introspection. `len`, `is_empty`, configuration,
+`timeline_count`, and `timeline_last_source_time_ns(timeline)` are available
+without exposing mutable internals. There is no global time accessor. Errors
+contain only static/numeric bounded context, not exporter strings or packet/field
+dumps.
+
+### F5 qualification
+
+`template_registry_tests` covers the lifecycle, full isolation matrix, exact TTL
+boundary, bounded capacity/identity/layout/watermarks, approved defaults and
+overrides, error atomicity, deterministic multi-timeline replay, an independent
+scalar state model, and adversarial/max-value inputs. An internal
+unit test constructs generation overflow without exposing a production mutation
+API. F2/F3/F4, full Rust, contracts, Python regression, Windows Pass A, detached
+Pass B and a clean Linux-container pass must remain green before freeze.
+
+```bash
+cargo test --locked --manifest-path ingestion/Cargo.toml --test template_registry_tests
+cargo test --locked --manifest-path ingestion/Cargo.toml --lib netflow::template::tests
+```
+
 ---
 
 ## Tests
