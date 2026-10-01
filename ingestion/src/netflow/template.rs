@@ -350,7 +350,9 @@ impl TemplateKey {
     }
 }
 
-/// Exact physical layout. For Options the first N fields are scope fields.
+/// Protocol-neutral, nonempty physical layout. For Options the first N fields
+/// are scope fields; N may be zero through the total field count. Wire adapters
+/// enforce protocol-specific scope legality before construction/insertion.
 /// V9 adapters later convert scope-definition byte lengths to this field count.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TemplateDefinition {
@@ -378,7 +380,7 @@ fn validate_definition(
     }
     let valid_scope = match kind {
         TemplateKind::Data => scope_field_count == 0,
-        TemplateKind::Options => scope_field_count > 0 && usize::from(scope_field_count) <= count,
+        TemplateKind::Options => usize::from(scope_field_count) <= count,
     };
     if !valid_scope {
         return Err(TemplateRegistryError::InvalidScopeFieldCount {

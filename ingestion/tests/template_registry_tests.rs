@@ -277,18 +277,380 @@ fn scope_boundary_change_is_a_replacement() {
 }
 
 #[test]
-fn options_require_a_nonzero_in_range_scope_count() {
-    for count in [0, 3, u16::MAX] {
+fn options_require_an_in_range_scope_count() {
+    for count in [3, u16::MAX] {
         assert!(matches!(
             TemplateDefinition::new(TemplateKind::Options, count, &[field(1), field(2)], 8),
             Err(TemplateRegistryError::InvalidScopeFieldCount { .. })
         ));
     }
-    assert!(TemplateDefinition::new(TemplateKind::Options, 2, &[field(1), field(2)], 8).is_ok());
+    for count in [0, 1, 2] {
+        assert!(
+            TemplateDefinition::new(TemplateKind::Options, count, &[field(1), field(2)], 8).is_ok()
+        );
+    }
     assert!(matches!(
         TemplateDefinition::new(TemplateKind::Data, 1, &[field(1)], 8),
         Err(TemplateRegistryError::InvalidScopeFieldCount { .. })
     ));
+}
+
+fn zero_scope_options(fields: &[TemplateFieldSpecifier]) -> TemplateDefinition {
+    TemplateDefinition::new(TemplateKind::Options, 0, fields, 8).unwrap()
+}
+
+#[test]
+fn zero_scope_options_with_one_field_preserve_options_kind() {
+    let d = zero_scope_options(&[field(1)]);
+    assert_eq!(d.kind(), TemplateKind::Options);
+    assert_eq!(d.scope_field_count(), 0);
+    assert_eq!(d.fields(), &[field(1)]);
+}
+
+#[test]
+fn zero_scope_options_with_multiple_fields_preserve_order_and_duplicates() {
+    let fields = [field(2), field(1), field(2)];
+    let d = zero_scope_options(&fields);
+    assert_eq!(d.kind(), TemplateKind::Options);
+    assert_eq!(d.scope_field_count(), 0);
+    assert_eq!(d.fields(), &fields);
+}
+
+#[test]
+fn options_scope_count_equal_to_total_fields_is_valid() {
+    let fields = [field(1), field(2)];
+    let d = TemplateDefinition::new(TemplateKind::Options, 2, &fields, 8).unwrap();
+    assert_eq!(d.kind(), TemplateKind::Options);
+    assert_eq!(d.scope_field_count(), 2);
+    assert_eq!(d.fields(), &fields);
+}
+
+#[test]
+fn options_scope_count_above_total_fields_is_rejected() {
+    for count in [3, u16::MAX] {
+        assert_eq!(
+            TemplateDefinition::new(TemplateKind::Options, count, &[field(1), field(2)], 8),
+            Err(TemplateRegistryError::InvalidScopeFieldCount {
+                kind: TemplateKind::Options,
+                count,
+                total: 2,
+            })
+        );
+    }
+}
+
+#[test]
+fn empty_options_definitions_remain_rejected_for_zero_and_nonzero_scope() {
+    for count in [0, 1, u16::MAX] {
+        assert_eq!(
+            TemplateDefinition::new(TemplateKind::Options, count, &[], 8),
+            Err(TemplateRegistryError::EmptyDefinition)
+        );
+    }
+}
+
+#[test]
+fn nonempty_data_definition_with_zero_scope_remains_valid() {
+    let d = TemplateDefinition::new(TemplateKind::Data, 0, &[field(1)], 8).unwrap();
+    assert_eq!(d.kind(), TemplateKind::Data);
+    assert_eq!(d.scope_field_count(), 0);
+    assert_eq!(d.fields(), &[field(1)]);
+}
+
+#[test]
+fn data_definition_with_nonzero_scope_remains_rejected() {
+    for count in [1, 2, u16::MAX] {
+        assert_eq!(
+            TemplateDefinition::new(TemplateKind::Data, count, &[field(1), field(2)], 8),
+            Err(TemplateRegistryError::InvalidScopeFieldCount {
+                kind: TemplateKind::Data,
+                count,
+                total: 2,
+            })
+        );
+    }
+}
+
+#[test]
+fn zero_scope_options_identical_refresh_keeps_generation_and_extends_ttl() {
+    let k = key_for(TemplateProtocol::NetFlowV9, "e", "s", 1, 300);
+    let d = zero_scope_options(&[field(1), field(2)]);
+    let mut r = registry();
+    assert_eq!(r.insert(k.clone(), d.clone(), 100).unwrap().generation, 1);
+    let transition = r.insert(k.clone(), d.clone(), 105).unwrap();
+    assert_eq!(
+        transition,
+        TemplateTransition {
+            kind: TemplateTransitionKind::Refreshed,
+            generation: 1,
+            expired_pruned: 0,
+        }
+    );
+    let e = found(&mut r, &k, 106);
+    assert_eq!(e.definition(), &d);
+    assert_eq!(
+        (e.first_seen_ns(), e.last_seen_ns(), e.expires_at_ns()),
+        (100, 105, 115)
+    );
+    assert_eq!(r.len(), 1);
+    assert_timeline_bound(&r);
+}
+
+#[test]
+fn zero_scope_options_changed_definition_increments_generation() {
+    let k = key_for(TemplateProtocol::NetFlowV9, "e", "s", 1, 300);
+    let mut r = registry();
+    r.insert(k.clone(), zero_scope_options(&[field(1)]), 100)
+        .unwrap();
+    for (time, fields, generation) in [(101, vec![field(2)], 2), (102, vec![field(2), field(1)], 3)]
+    {
+        let d = zero_scope_options(&fields);
+        let transition = r.insert(k.clone(), d.clone(), time).unwrap();
+        assert_eq!(
+            (transition.kind, transition.generation),
+            (TemplateTransitionKind::Replaced, generation)
+        );
+        let e = found(&mut r, &k, time);
+        assert_eq!(e.definition(), &d);
+        assert_eq!(e.first_seen_ns(), 100);
+        assert_eq!(e.last_seen_ns(), time);
+        assert_eq!(e.expires_at_ns(), time + 10);
+    }
+    assert_eq!(r.len(), 1);
+    assert_timeline_bound(&r);
+}
+
+#[test]
+fn zero_scope_options_withdrawal_reinsert_resets_lifetime_and_watermark() {
+    let k = key_for(TemplateProtocol::NetFlowV9, "e", "s", 1, 300);
+    let mut r = registry();
+    r.insert(k.clone(), zero_scope_options(&[field(1)]), 100)
+        .unwrap();
+    r.insert(k.clone(), zero_scope_options(&[field(2)]), 101)
+        .unwrap();
+    assert_eq!(
+        r.withdraw(&k, 102).unwrap(),
+        TemplateWithdrawal::Withdrawn { generation: 2 }
+    );
+    assert!(r.is_empty());
+    assert_eq!(r.timeline_count(), 0);
+    assert_eq!(r.timeline_last_source_time_ns(k.timeline()), None);
+    let d = zero_scope_options(&[field(3)]);
+    let transition = r.insert(k.clone(), d.clone(), 10).unwrap();
+    assert_eq!(
+        (transition.kind, transition.generation),
+        (TemplateTransitionKind::Inserted, 1)
+    );
+    let e = found(&mut r, &k, 10);
+    assert_eq!(e.definition(), &d);
+    assert_eq!(
+        (e.first_seen_ns(), e.last_seen_ns(), e.expires_at_ns()),
+        (10, 10, 20)
+    );
+    assert_timeline_bound(&r);
+}
+
+#[test]
+fn zero_scope_options_expire_at_exact_boundary_without_tombstones() {
+    let k = key_for(TemplateProtocol::NetFlowV9, "e", "s", 1, 300);
+    let mut r = registry();
+    r.insert(k.clone(), zero_scope_options(&[field(1)]), 100)
+        .unwrap();
+    assert_eq!(found(&mut r, &k, 109).expires_at_ns(), 110);
+    assert_eq!(
+        r.lookup(&k, 110).unwrap(),
+        TemplateLookup::Expired {
+            generation: 1,
+            expires_at_ns: 110,
+        }
+    );
+    assert!(r.is_empty());
+    assert_eq!(r.timeline_count(), 0);
+    assert_eq!(r.lookup(&k, 111).unwrap(), TemplateLookup::Unknown);
+    assert_eq!(r.timeline_count(), 0);
+    assert_eq!(
+        r.insert(k.clone(), zero_scope_options(&[field(2)]), 50)
+            .unwrap()
+            .generation,
+        1
+    );
+    assert_eq!(found(&mut r, &k, 50).first_seen_ns(), 50);
+    assert_timeline_bound(&r);
+}
+
+#[test]
+fn zero_scope_options_storage_is_protocol_neutral_with_isolated_namespaces() {
+    // Storage acceptance here does not assert IPFIX wire-template legality.
+    let a = key_for(TemplateProtocol::NetFlowV9, "e", "s", 1, 300);
+    let b = key_for(TemplateProtocol::Ipfix, "e", "s", 1, 300);
+    let mut r = registry();
+    let original = zero_scope_options(&[field(1)]);
+    r.insert(a.clone(), original.clone(), 100).unwrap();
+    r.insert(b.clone(), original.clone(), 1).unwrap();
+    r.insert(a.clone(), zero_scope_options(&[field(2)]), 101)
+        .unwrap();
+    assert_eq!(found(&mut r, &a, 101).generation(), 2);
+    let e = found(&mut r, &b, 1);
+    assert_eq!(e.definition(), &original);
+    assert_eq!(e.generation(), 1);
+    assert_eq!(e.expires_at_ns(), 11);
+    assert_eq!(r.timeline_last_source_time_ns(b.timeline()), Some(1));
+    assert_eq!(r.len(), 2);
+    assert_timeline_bound(&r);
+}
+
+#[test]
+fn v9_zero_scope_options_do_not_modify_existing_ipfix_definition_or_timeline() {
+    let v9 = key_for(TemplateProtocol::NetFlowV9, "e", "s", 1, 300);
+    let ipfix = key_for(TemplateProtocol::Ipfix, "e", "s", 1, 300);
+    let ipfix_definition =
+        TemplateDefinition::new(TemplateKind::Options, 1, &[field(1), field(2)], 8).unwrap();
+    let mut r = registry();
+    r.insert(ipfix.clone(), ipfix_definition, 1).unwrap();
+    let before = found(&mut r, &ipfix, 1);
+    r.insert(v9.clone(), zero_scope_options(&[field(3)]), 5000)
+        .unwrap();
+    assert_eq!(found(&mut r, &ipfix, 1), before);
+    r.withdraw(&v9, 5001).unwrap();
+    assert_eq!(found(&mut r, &ipfix, 1), before);
+    assert_eq!(r.timeline_last_source_time_ns(ipfix.timeline()), Some(1));
+    assert_eq!(r.len(), 1);
+    assert_timeline_bound(&r);
+}
+
+#[test]
+fn zero_scope_options_registry_revalidates_field_bound_before_any_mutation() {
+    let mut r = TemplateRegistry::new(
+        TemplateRegistryConfig::new(2, 1, 64)
+            .unwrap()
+            .with_ttl_ns(10)
+            .unwrap(),
+    );
+    let a = key_for(TemplateProtocol::NetFlowV9, "e", "s", 1, 300);
+    let b = key_for(TemplateProtocol::NetFlowV9, "e", "s", 1, 301);
+    r.insert(a, zero_scope_options(&[field(1)]), 0).unwrap();
+    let before = r.clone();
+    assert_eq!(
+        r.insert(b, zero_scope_options(&[field(1), field(2)]), 10),
+        Err(TemplateRegistryError::TooManyFields { count: 2, limit: 1 })
+    );
+    assert_eq!(r, before);
+}
+
+#[test]
+fn zero_scope_options_capacity_failure_is_atomic_without_eviction() {
+    let mut r = TemplateRegistry::new(
+        TemplateRegistryConfig::new(1, 8, 64)
+            .unwrap()
+            .with_ttl_ns(10)
+            .unwrap(),
+    );
+    let a = key_for(TemplateProtocol::NetFlowV9, "e", "s", 1, 300);
+    let b = key_for(TemplateProtocol::NetFlowV9, "e", "s", 1, 301);
+    let d = zero_scope_options(&[field(1)]);
+    r.insert(a.clone(), d.clone(), 100).unwrap();
+    let before = r.clone();
+    assert_eq!(
+        r.insert(b, zero_scope_options(&[field(2)]), 101),
+        Err(TemplateRegistryError::CapacityExceeded { limit: 1 })
+    );
+    assert_eq!(r, before);
+    assert_eq!(
+        r.insert(a, d, 101).unwrap().kind,
+        TemplateTransitionKind::Refreshed
+    );
+    assert_timeline_bound(&r);
+}
+
+#[test]
+fn zero_scope_options_time_regression_on_all_operations_is_atomic() {
+    let k = key_for(TemplateProtocol::NetFlowV9, "e", "s", 1, 300);
+    let mut r = registry();
+    let d = zero_scope_options(&[field(1)]);
+    r.insert(k.clone(), d.clone(), 100).unwrap();
+    let before = r.clone();
+    let expected = TemplateRegistryError::SourceTimeRegression {
+        previous_ns: 100,
+        provided_ns: 99,
+    };
+    assert_eq!(r.insert(k.clone(), d, 99), Err(expected.clone()));
+    assert_eq!(r, before);
+    assert_eq!(r.lookup(&k, 99), Err(expected.clone()));
+    assert_eq!(r, before);
+    assert_eq!(r.withdraw(&k, 99), Err(expected.clone()));
+    assert_eq!(r, before);
+    assert_eq!(r.expire_timeline(k.timeline(), 99), Err(expected));
+    assert_eq!(r, before);
+}
+
+#[test]
+fn zero_scope_options_identity_bound_is_revalidated_before_insertion() {
+    let mut r = TemplateRegistry::new(TemplateRegistryConfig::new(2, 8, 3).unwrap());
+    let a = key_for(TemplateProtocol::NetFlowV9, "e", "s", 1, 300);
+    r.insert(a, zero_scope_options(&[field(1)]), 0).unwrap();
+    let invalid = key_for(TemplateProtocol::NetFlowV9, "long-exporter", "s", 1, 301);
+    let before = r.clone();
+    assert_eq!(
+        r.insert(invalid, zero_scope_options(&[field(2)]), u64::MAX),
+        Err(TemplateRegistryError::InvalidIdentity {
+            field: "exporter_id",
+            kind: IdentityErrorKind::TooLong { limit_bytes: 3 },
+        })
+    );
+    assert_eq!(r, before);
+}
+
+#[test]
+fn zero_scope_options_expiry_overflow_on_insert_and_replacement_is_atomic() {
+    let a = key_for(TemplateProtocol::NetFlowV9, "e", "s", 1, 300);
+    let b = key_for(TemplateProtocol::NetFlowV9, "e", "s", 1, 301);
+    let mut r = registry();
+    r.insert(a.clone(), zero_scope_options(&[field(1)]), 100)
+        .unwrap();
+    let before = r.clone();
+    for k in [a, b] {
+        assert_eq!(
+            r.insert(k, zero_scope_options(&[field(2)]), u64::MAX),
+            Err(TemplateRegistryError::ExpiryOverflow)
+        );
+        assert_eq!(r, before);
+    }
+}
+
+#[test]
+fn zero_scope_options_scope_changes_and_refresh_replay_deterministically() {
+    fn run() -> (Vec<TemplateTransition>, TemplateRegistry) {
+        let k = key_for(TemplateProtocol::NetFlowV9, "e", "s", 1, 300);
+        let mut r = registry();
+        let mut events = Vec::new();
+        for (time, scope, generation) in [(10, 0, 1), (11, 1, 2), (12, 2, 3), (13, 0, 4)] {
+            let d = TemplateDefinition::new(TemplateKind::Options, scope, &[field(1), field(2)], 8)
+                .unwrap();
+            let transition = r.insert(k.clone(), d, time).unwrap();
+            assert_eq!(transition.generation, generation);
+            events.push(transition);
+        }
+        let refresh = r
+            .insert(k.clone(), zero_scope_options(&[field(1), field(2)]), 14)
+            .unwrap();
+        assert_eq!(
+            (refresh.kind, refresh.generation),
+            (TemplateTransitionKind::Refreshed, 4)
+        );
+        events.push(refresh);
+        let e = found(&mut r, &k, 14);
+        assert_eq!(e.definition().scope_field_count(), 0);
+        assert_eq!(
+            (e.first_seen_ns(), e.last_seen_ns(), e.expires_at_ns()),
+            (10, 14, 24)
+        );
+        assert_timeline_bound(&r);
+        (events, r)
+    }
+    let expected = run();
+    for _ in 0..20 {
+        assert_eq!(run(), expected);
+    }
 }
 
 #[test]

@@ -640,15 +640,26 @@ own byte bound on every keyed operation. The caller must supply a complete,
 deterministic namespace covering the exporter, sensor/collector context,
 transport endpoints and connection/restart epoch as appropriate. A path, wall
 clock, source IP alone, or template contents are not a complete session key.
-F5 does not infer or authenticate identity; epoch derivation belongs to F6/F8.
+F5 does not infer or authenticate identity; epoch derivation belongs to callers
+and input architecture, not the F6/F8 wire parsers.
 
 `TemplateDefinition` stores `TemplateKind::{Data, Options}`, an explicit
 `scope_field_count: u16`, and an exact-sized ordered boxed field slice. Data
-templates require scope count zero; Options require 1 through total field count.
+templates require scope count zero; Options allow 0 through total field count.
 The first N fields are scope fields; v9 adapters must later translate their scope
 definition byte length into a count. Field order and duplicate identifiers are
 preserved. Scope count is part of definition equality/replacement, not key
 identity. Data and Options share one key namespace and never coexist at one key.
+
+F5 definitions are **protocol-neutral structural storage**, not proof of wire
+legality. Every active definition remains nonempty. Nonempty zero-scope Options
+definitions retain `TemplateKind::Options`; all-fields-as-scope layouts remain
+representable, and scope counts above the field count remain invalid. F6 must
+validate NetFlow v9 layouts before F5 insertion and may supply zero-scope Options
+definitions. Future F8 must enforce IPFIX-specific Options Template scope rules
+before construction/insertion, including its nonzero-scope requirement. Neither
+wire parser is implemented by this registry amendment; storage acceptance under
+an `Ipfix` key does not establish IPFIX wire legality.
 
 `TemplateFieldSpecifier` preserves `field_id: u16`, `encoded_length: u16`, and
 `enterprise_number: Option<u32>`. IPFIX adapters later remove the enterprise flag
@@ -779,6 +790,63 @@ Pass B and a clean Linux-container pass must remain green before freeze.
 cargo test --locked --manifest-path ingestion/Cargo.toml --test template_registry_tests
 cargo test --locked --manifest-path ingestion/Cargo.toml --lib netflow::template::tests
 ```
+
+### F6 human-approved parser policy closure (design only)
+
+The prerequisite amendment closes zero-scope Options representation only. The
+NetFlow v9 parser, parser tests, input wrappers, and fixtures are not implemented
+by this amendment. The following F6 policies are human-approved; numeric limits
+are configurable deployment defaults, not protocol constants:
+
+| Parser policy | Approved value |
+|---|---|
+| Retained diagnostics per datagram | 128; zero retention allowed |
+| Input datagram bytes | 65535 |
+| FlowSets per datagram | 1024 |
+| Template/Options Template records | 512 per FlowSet; 2048 per datagram |
+| Decoded Data Records | 4096 per FlowSet; 16384 per datagram |
+
+- Lifecycle time is header UNIX seconds converted with checked integer
+  multiplication to nanoseconds, identical for every F5 operation in a datagram.
+  No capture/processing/file/wall-clock substitution or regression clamping is
+  allowed. SysUptime stays raw; explicit restart/session epochs belong to callers.
+- Initial padding accepts only a distinguishable 0..3-byte all-zero terminal
+  suffix, shorter than the decoded record length for data. A complete all-zero
+  record is never stripped. Safely framed unaligned FlowSets may warn; nonzero or
+  longer suffixes are outside this initial profile, not blanket RFC prohibitions.
+- Complete outer framing/resource preflight precedes mutation. Later stateful
+  errors retain successful earlier transitions and expose partial effects;
+  ordinary `Result::Err` must not conceal mutations. Count mismatch flags rather
+  than rolls back valid earlier transitions; no whole-registry clone is required.
+- Diagnostic totals/dropped counts use checked arithmetic. Suppression never
+  changes decoding, state, completion, reset requirements, or count status.
+- Enforce byte and FlowSet bounds at the parser boundary/preflight; future
+  wrappers should also bound artifact retention. Never inherit the v5 raw limit.
+  Enforce F5's configured field bound before temporary descriptor allocation.
+- An over-limit Data FlowSet loses its decoded output as a unit. A datagram-total
+  data limit returns `StoppedAtLimit` after the processed prefix, with no later
+  FlowSets processed and prior transitions visible.
+- Preserve zero-width descriptors but reject their templates as
+  `UnsupportedTemplateLayout` in the initial F6 profile. Do not install/decode
+  them or claim that v9 universally forbids zero widths.
+- Support v9 `scope_length == 0`, `option_length > 0` as Options with scope count
+  zero. Both-zero descriptor portions remain unsupported empty definitions.
+- A rejected newer template with trustworthy key/boundary triggers exact-key
+  **local invalidation**, explicitly reported, leaving unrelated keys intact.
+  Later data is Unknown until a supported template arrives; old-layout fallback
+  is forbidden. Unsafe/failed invalidation or untrustworthy key/boundary stops
+  stateful processing with `ResetRequired`; callers must quarantine/use a new
+  epoch. This is not a v9 wire withdrawal; no unbounded taint map is added.
+- Unknown-template data is skipped with bounded raw view/diagnostic: no guessing,
+  buffering, cross-key fallback, or retroactive decode. Expired data similarly
+  emits `ExpiredTemplate`, never resurrects state, and adds no expiry tombstones.
+- Strict physical order applies to templates and data: A/data/B/data binds each
+  data segment to its then-active definition. Data before its template stays
+  skipped; no second pass is allowed.
+- Preserve raw Count. It totals Template, Options Template, Data, and Options
+  Data Records. Emit Match/Mismatch only when a reliable total is established;
+  unresolved/malformed/limit-stopped content yields Inconclusive. Count is never
+  an allocation bound, FlowSet count, or v5 fixed-size packet formula.
 
 ---
 
