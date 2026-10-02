@@ -791,7 +791,9 @@ cargo test --locked --manifest-path ingestion/Cargo.toml --test template_registr
 cargo test --locked --manifest-path ingestion/Cargo.toml --lib netflow::template::tests
 ```
 
-### F6 bounded lossless NetFlow v9 parser (implemented; pending human freeze)
+### F6 bounded lossless NetFlow v9 parser (frozen and committed)
+
+F6 is frozen at commit `beb56a6020c8cdc8207c4758f93780bc7d6d4227`.
 
 The separate F5 prerequisite amendment closes protocol-neutral zero-scope
 Options representation. F6 now implements the Rust-only bounded lossless v9
@@ -906,10 +908,11 @@ descriptor allocation; configuration validates representational/owned budgets.
 Implemented: header/FlowSets, ordinary/Options templates, v9 zero-scope Options,
 fixed-width Data/Options Data structure, F5 lifecycle integration, bounded
 diagnostics, physical ordering, generation binding and no-buffer unknown data.
-NOT implemented: CanonicalObservation/v9 normalization, F7 field semantics,
-address/port/counter interpretation, timestamp reconstruction, sampling
-normalization, loss/reordering/restart classification, UUIDs, Detection/ML,
-IPFIX parser, sFlow or live collection. All v5, PCAP and legacy paths are unchanged.
+F6 itself does not perform canonical normalization or IE value interpretation;
+the separate F7 module below adds the approved initial flow semantics. Sampling
+association/scaling, loss/reordering/restart classification, Detection/ML,
+IPFIX parsing, sFlow and live collection remain unimplemented. Frozen F6, v5,
+PCAP and legacy production paths are unchanged.
 
 Qualification fixtures have `.bin`, `.sha256` and independent expected `.json`
 sidecars in `tests/fixtures/export/netflow_v9/{valid,malformed,stateful,real}`.
@@ -937,6 +940,133 @@ python ingestion/tests/netflow_v9_fixture_oracle.py
 ```
 
 ---
+
+## F7: bounded NetFlow v9 canonical flow normalization
+
+F7 is implemented and qualified, pending final human freeze, commit and PR.
+The NetFlow PR is not yet merged; IPFIX work has not started.
+
+`netflow::v9_normalize::normalize_netflow_v9` accepts an already-created F6
+`NetFlowV9ParseOutcome`, a validated `NetFlowV9SourceContext`, and validated
+`NetFlowV9NormalizationConfig`. It emits only CanonicalObservation v1 `flow`
+records with `telemetry_source="netflow_v9"`. The serialized schema is unchanged.
+It never reparses wire framing or looks up mutable F5 templates: field values
+are interpreted using each Decoded Data FlowSet's immutable F6 snapshot.
+
+Initial supported IE profile: 1,2,4,6,7,8,10,11,12,14,21,22,27,28,32,60.
+Both selected endpoints, PROTOCOL, FIRST_SWITCHED, LAST_SWITCHED, and at least
+one usable forward counter are required. Ports/details/interfaces are optional.
+IE60 explicitly selects IPv4/IPv6; absent IE60 accepts only unambiguous IPv4.
+IPv6-only/both-family/mixed-family records without a defensible selector fail
+closed. One physical eligible Data Record yields one flow, in wire order; no
+five-tuple deduplication or reverse-flow joining occurs.
+
+TCP/UDP ports are supported and zero remains zero. ICMPv4 IE32 uses high-byte
+type/low-byte code; no ICMP port fallback. SCTP protocol values remain available
+but ports are omitted. ICMPv6 details and vendor IE139 are not interpreted.
+TCP flags use the eight reported bits (no invented NS); reported zero yields
+`[]`. Interface widths 2..8 decode unsigned; zero is absent, nonzero `ifindex:N`.
+Equivalent semantic duplicates map once with one bounded notice per record;
+conflicting duplicates or malformed active supported fields reject the record.
+Unknown/deferred fields are not serialized and do not cause diagnostic floods.
+
+IE2 maps unchanged to `src_to_dst.packets`; widths 1..8 and u64::MAX are valid.
+IE1 maps unchanged to `src_to_dst.ip_bytes` ONLY when the caller explicitly selects
+`NetFlowV9ByteBasisProfile::VerifiedIpLayer`. `Unknown` defers IE1, including its
+semantic width checks, and IE1 then cannot satisfy the required-counter rule.
+Exporter names/templates never auto-select a byte basis. No payload/L2 fallback,
+OUT-counter summation/fallback, sampling multiplication, or rounding occurs.
+Every flow is unidirectional and `dst_to_src` is absent. DIRECTION does not swap
+endpoints. TOS/masks/AS/next-hop/MAC/VLAN/MPLS/export totals and vendor IE136 remain
+opaque F6 evidence; no service, connection state/history, or end reason is guessed.
+
+Timestamp reconstruction uses checked integer arithmetic: export seconds minus
+bounded modular end age gives end_time; subtracting bounded duration gives
+start_time. Default maximum end age AND duration is 86,400,000 ms separately;
+their sum may reach 48 hours. Configured maximum is 0..=2^31-1 ms. Gross inversion,
+half-cycle ambiguity, full-cycle ambiguity, underflow and future LAST=U+1 fail
+closed. Small defensible uptime rollover is allowed. Neither missing timing IE
+is replaced with export/capture/receipt time. There is no serialized flow
+event_time or duration. The whole-second export anchor does not establish
+millisecond wall-clock accuracy or uniquely recover historical multiple wraps.
+
+Quality is always unknown, truncated=false, loss_detected=false. Sampling rate,
+probability and missed_content_bytes are absent. These booleans do not promise
+unsampled/lossless original traffic. Options Data emits zero flows and creates
+ZERO persistent F7 sampler/Options entries. Association, scaling, sequence/loss/
+reordering/restart confidence and cross-source quality policy remain F10.
+
+The must-use batch result preserves CountValidation (including declared/parsed
+mismatch), ParseCompletion, SessionDisposition, decoded count, retained parser
+diagnostics and total/dropped counts. Individually eligible Decoded records may
+survive mismatch/inconclusive or a trustworthy prefix before limit/reset. Never
+recover SkippedUnknown/SkippedExpired/Rejected/Unprocessed suffix bytes.
+ResetRequired stays ResetRequired: callers MUST quarantine/reset the session
+epoch before subsequent use. F7 does not implement that session manager.
+
+Limits default to 16,384 inspected records, 16,384 observations, 128 retained
+normalization diagnostics, and 16,384 audit entries. Non-diagnostic caps must be
+positive; diagnostic retention may be zero. Record/observation/audit exhaustion
+stops before the next record with explicit F7 StoppedAtLimit; exact-cap completion
+is not a stop. Counters use checked arithmetic and vectors grow incrementally.
+Only one primary rejection and at most two aggregated notices occur per record.
+Audit entries hold bounded numeric coordinates, template ID/generation and
+action; parser state never enters serialized provenance. Metadata binding checks
+do not constitute telemetry authentication. Diagnostics contain no payload,
+pathname or raw identity dumps.
+
+Source context supports export_file/pcap_file only. Sensor ID is nonempty and
+<=256 UTF-8 bytes; observed_at is caller-supplied valid UTC Z and <=64 bytes;
+optional capture interface is nonempty and <=256 bytes. F6 exporter/session
+identities must fit the supported 256-byte profile. SHA-256 is validated and
+lowercased. Callers must bind it to actual input content: a single raw artifact
+or original whole PCAP with stable datagram coordinates. F7 reads no clock and
+accepts no filesystem path. Receipt time is not flow time. Golden replay pins
+observed_at explicitly. Live collection/persistence is not implemented.
+
+Frozen UUIDv5 marker: `co-netflow-v9-id-v1`. Namespace
+`5a4b3750-4220-5f0e-b506-8f6080b3828c` is UUIDv5(URL namespace, UTF-8
+`https://utsavagg2007.github.io/SIH-2026/contracts/co-netflow-v9-id-v1`). Name
+components are marker, sensor, lowercase input SHA, exporter, session, Source ID,
+raw sequence, datagram ordinal, FlowSet ordinal, record ordinal, each prefixed by
+u32 big-endian UTF-8 byte length. Numbers are unsigned decimal without padding.
+Template ID/generation, tuple, path, observed_at and input mode are excluded.
+The 175-byte frozen vector produces `3a5978ca-df78-52f8-97f8-9e47e3af8dde`.
+Source correlation is `netflow_v9/exporter/session_fingerprint/domain/sequence/
+datagram/flowset/record`, <=512 bytes. Fingerprint is SHA-256 of length-prefixed
+`co-netflow-v9-session-v1`, exporter and session. Raw session is not exposed.
+UUID is an opaque replay identifier, not an authenticity/security proof.
+
+Separate F7 evidence lives in `tests/fixtures/export/netflow_v9_canonical`:
+reviewable ASCII `.hex` wire storage (SHA identifies decoded datagram bytes),
+exact compact UTF-8 LF JSONL goldens plus SHA sidecars, and explicit independent
+metadata/context/status expectations. Empty negative output is a zero-byte file.
+F7-only `.gitattributes` rules preserve LF bytes for wire storage, metadata,
+goldens and SHA sidecars across Windows checkout; frozen-source rules are unchanged.
+The stdlib oracle independently calculates mappings, time, identities,
+correlation fingerprints and exact bytes; default mode never writes. Its explicit
+`--emit-patch` mode only prints an apply_patch document. Goldens are checked
+against Rust output AND the unchanged Draft 2020-12 schema/semantic harness.
+Typed production construction is fail-closed, not a generic JSON Schema engine.
+
+Frozen `softflowd_000.bin` remains NEGATIVE F7 timing evidence: zero emitted,
+eight ordinary timing rejections, one ignored Options record, CountMismatch
+8 versus 14 preserved. Original input packets are from November 2023 while the
+export header anchors October 2026. Do not widen policy or rewrite that artifact
+to claim positive chronology. Independent packet inspection establishes IE1's
+IP-layer basis for this pinned software producer/sample only, not all exporters.
+Fresh positive real-exporter evidence and Linux qualification require an
+available external runtime; synthetic evidence is not hardware/vendor fleet proof.
+
+Not implemented in F7: Detection/ML adapters, dataset/CLI/PyO3 v9 orchestration,
+IPFIX, sFlow, live collector/session management, sampler association, counter
+scaling, loss analysis, reverse reconstruction, SCTP ports, ICMPv6 type/code.
+
+```bash
+cargo test --locked --manifest-path ingestion/Cargo.toml --test netflow_v9_normalization_tests
+python ingestion/tests/netflow_v9_normalization_oracle.py
+pwsh -NoProfile -File ingestion/tests/test_netflow_v9_canonical_goldens.ps1
+```
 
 ## Tests
 

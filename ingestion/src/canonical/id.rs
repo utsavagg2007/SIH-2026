@@ -10,6 +10,9 @@ pub const ZEEK_ID_ALGORITHM_MARKER: &str = "co-zeek-id-v1";
 pub const ZEEK_ID_NAMESPACE: Uuid = Uuid::from_u128(0x1a055b8571755118b36da7bb3f50c127);
 pub const NETFLOW_V5_ID_ALGORITHM_MARKER: &str = "co-netflow-v5-id-v1";
 pub const NETFLOW_V5_ID_NAMESPACE: Uuid = Uuid::from_u128(0x6f1b86b7eced5e6fa21f0e45fa7394d7);
+pub const NETFLOW_V9_ID_ALGORITHM_MARKER: &str = "co-netflow-v9-id-v1";
+/// UUIDv5(URL namespace, UTF-8 project URI ending in co-netflow-v9-id-v1).
+pub const NETFLOW_V9_ID_NAMESPACE: Uuid = Uuid::from_u128(0x5a4b375042205f0eb5068f6080b3828c);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdentityObservationType {
@@ -54,6 +57,7 @@ pub enum InputIdentityError {
     InvalidSha256,
     EmptySensorId,
     EmptyExporterId,
+    EmptySessionId,
     ComponentTooLong { coordinate: &'static str },
     Io(io::Error),
 }
@@ -66,6 +70,7 @@ impl fmt::Display for InputIdentityError {
             }
             Self::EmptySensorId => f.write_str("sensor_id must be nonempty"),
             Self::EmptyExporterId => f.write_str("exporter_id must be nonempty"),
+            Self::EmptySessionId => f.write_str("session_id must be nonempty"),
             Self::ComponentTooLong { coordinate } => {
                 write!(
                     f,
@@ -195,6 +200,77 @@ pub fn generate_netflow_v5_record_id(
         append_component(&mut encoded, coordinate, component)?;
     }
     Ok(Uuid::new_v5(&NETFLOW_V5_ID_NAMESPACE, &encoded).to_string())
+}
+
+/// Physical evidence coordinates. Template ID/generation and processing times
+/// intentionally do not participate in the frozen v9 identity algorithm.
+pub struct NetFlowV9IdentityCoordinates<'a> {
+    pub sensor_id: &'a str,
+    pub input_sha256: &'a str,
+    pub exporter_id: &'a str,
+    pub session_id: &'a str,
+    pub source_id: u32,
+    pub sequence_number: u32,
+    pub datagram_ordinal: u64,
+    pub flowset_ordinal: u32,
+    pub record_ordinal: u32,
+}
+
+pub fn generate_netflow_v9_record_id(
+    coordinates: &NetFlowV9IdentityCoordinates<'_>,
+) -> Result<String, InputIdentityError> {
+    if coordinates.sensor_id.is_empty() {
+        return Err(InputIdentityError::EmptySensorId);
+    }
+    if coordinates.exporter_id.is_empty() {
+        return Err(InputIdentityError::EmptyExporterId);
+    }
+    if coordinates.session_id.is_empty() {
+        return Err(InputIdentityError::EmptySessionId);
+    }
+    let hash = normalize_sha256(coordinates.input_sha256)?;
+    let source = coordinates.source_id.to_string();
+    let sequence = coordinates.sequence_number.to_string();
+    let datagram = coordinates.datagram_ordinal.to_string();
+    let flowset = coordinates.flowset_ordinal.to_string();
+    let record = coordinates.record_ordinal.to_string();
+    let mut encoded = Vec::new();
+    for (label, value) in [
+        ("algorithm_marker", NETFLOW_V9_ID_ALGORITHM_MARKER),
+        ("sensor_id", coordinates.sensor_id),
+        ("input_sha256", hash.as_str()),
+        ("exporter_id", coordinates.exporter_id),
+        ("session_id", coordinates.session_id),
+        ("source_id", source.as_str()),
+        ("sequence_number", sequence.as_str()),
+        ("datagram_ordinal", datagram.as_str()),
+        ("flowset_ordinal", flowset.as_str()),
+        ("record_ordinal", record.as_str()),
+    ] {
+        append_component(&mut encoded, label, value)?;
+    }
+    Ok(Uuid::new_v5(&NETFLOW_V9_ID_NAMESPACE, &encoded).to_string())
+}
+
+pub fn generate_netflow_v9_session_fingerprint(
+    exporter_id: &str,
+    session_id: &str,
+) -> Result<String, InputIdentityError> {
+    if exporter_id.is_empty() {
+        return Err(InputIdentityError::EmptyExporterId);
+    }
+    if session_id.is_empty() {
+        return Err(InputIdentityError::EmptySessionId);
+    }
+    let mut encoded = Vec::new();
+    for (label, value) in [
+        ("algorithm_marker", "co-netflow-v9-session-v1"),
+        ("exporter_id", exporter_id),
+        ("session_id", session_id),
+    ] {
+        append_component(&mut encoded, label, value)?;
+    }
+    Ok(format!("{:x}", Sha256::digest(encoded)))
 }
 
 #[cfg(test)]
