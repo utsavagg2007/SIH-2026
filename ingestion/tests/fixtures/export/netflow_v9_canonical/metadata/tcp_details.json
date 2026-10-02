@@ -1,0 +1,37 @@
+{
+  "name": "tcp_details",
+  "evidence_kind": "synthetic independently specified",
+  "wire_format": "ASCII hex -> decoded datagram bytes",
+  "existing_wire": null,
+  "wire_sha256": "3db509aa0f6fff8321483b2c2247c9831f478876b62e7a17bc03a19298f0fda1",
+  "source_context": {
+    "sensor_id": "sensor-v9-a",
+    "exporter_id": "exporter-a",
+    "session_id": "collector-a.udp.epoch-1",
+    "input_sha256": "3db509aa0f6fff8321483b2c2247c9831f478876b62e7a17bc03a19298f0fda1"
+  },
+  "observed_at": "2026-10-03T00:00:00Z",
+  "input_mode": "export_file",
+  "byte_basis_profile": "Unknown",
+  "max_flow_age_ms": 86400000,
+  "parser_count": "Match",
+  "declared_count": 2,
+  "parsed_count": 2,
+  "parser_completion": "Complete",
+  "session_disposition": "Continue",
+  "records_inspected": 1,
+  "records_emitted": 1,
+  "records_rejected": 0,
+  "options_records_ignored": 0,
+  "diagnostics": [],
+  "coordinates": [
+    {
+      "flowset_ordinal": 1,
+      "record_ordinal": 0,
+      "template_id": 256
+    }
+  ],
+  "normalization_status": "Complete",
+  "golden_sha256": "0e9d930e600659d91cfd2213c8e35a8c49b7e38ddbe876e8d84f6a9e0f3453eb",
+  "newline_policy": "UTF-8 without BOM; LF after every record; zero-output file empty"
+}

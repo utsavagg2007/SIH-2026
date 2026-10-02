@@ -1,0 +1,11 @@
+{
+  "expected": {
+    "error": "MissingFlowSets"
+  },
+  "provenance": {
+    "command": "python ingestion/tests/netflow_v9_fixture_oracle.py --generate",
+    "producer": "independent Python struct/manual synthetic builder",
+    "sensitive_data": false
+  },
+  "sha256": "7a095687dfe416d9afedb3d9c6fd7d49dc43ff2ff7777609d77b3d19628400cc"
+}

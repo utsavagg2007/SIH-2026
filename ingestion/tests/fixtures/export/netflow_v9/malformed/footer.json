@@ -1,0 +1,11 @@
+{
+  "expected": {
+    "error": "TrailingPacketBytes"
+  },
+  "provenance": {
+    "command": "python ingestion/tests/netflow_v9_fixture_oracle.py --generate",
+    "producer": "independent Python struct/manual synthetic builder",
+    "sensitive_data": false
+  },
+  "sha256": "95eaa501e3e4053866f86c73bb019afa47913949203804a76acd4da4ef34ecc7"
+}

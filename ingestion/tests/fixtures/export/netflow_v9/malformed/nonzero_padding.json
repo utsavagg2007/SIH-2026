@@ -1,0 +1,62 @@
+{
+  "expected": {
+    "count": "Inconclusive",
+    "flowsets": [
+      {
+        "id": 0,
+        "kind": "templates",
+        "length": 12,
+        "offset": 20,
+        "ordinal": 0,
+        "padding": "",
+        "processed": true,
+        "raw": "0190000100010005",
+        "records": [
+          {
+            "count": 1,
+            "fields": [
+              [
+                1,
+                5
+              ]
+            ],
+            "id": 400,
+            "offset": 24,
+            "ordinal": 0,
+            "raw": "0190000100010005",
+            "scope": 0,
+            "state": "Applied"
+          }
+        ]
+      },
+      {
+        "id": 400,
+        "kind": "data",
+        "length": 10,
+        "offset": 32,
+        "ordinal": 1,
+        "padding": "01",
+        "processed": true,
+        "raw": "616263646501",
+        "records": [],
+        "state": "Rejected"
+      }
+    ],
+    "header": [
+      9,
+      2,
+      9000,
+      100,
+      123,
+      42
+    ],
+    "parsed_count": null,
+    "reset": false
+  },
+  "provenance": {
+    "command": "python ingestion/tests/netflow_v9_fixture_oracle.py --generate",
+    "producer": "independent Python struct/manual synthetic builder",
+    "sensitive_data": false
+  },
+  "sha256": "bc7fc262b22c5d32ae21fb93b30e590c4009523be786c8ea7c5c3bbd5f750199"
+}

@@ -1,0 +1,149 @@
+{
+  "expected": {
+    "count": "Match",
+    "flowsets": [
+      {
+        "id": 0,
+        "kind": "templates",
+        "length": 20,
+        "offset": 20,
+        "ordinal": 0,
+        "padding": "",
+        "processed": true,
+        "raw": "01000003000800048001000200080001",
+        "records": [
+          {
+            "count": 3,
+            "fields": [
+              [
+                8,
+                4
+              ],
+              [
+                32769,
+                2
+              ],
+              [
+                8,
+                1
+              ]
+            ],
+            "id": 256,
+            "offset": 24,
+            "ordinal": 0,
+            "raw": "01000003000800048001000200080001",
+            "scope": 0,
+            "state": "Applied"
+          }
+        ]
+      },
+      {
+        "id": 256,
+        "kind": "data",
+        "length": 11,
+        "offset": 40,
+        "ordinal": 1,
+        "padding": "",
+        "processed": true,
+        "raw": "00010203040506",
+        "records": [
+          {
+            "fields": [
+              [
+                8,
+                4,
+                "Data",
+                "00010203"
+              ],
+              [
+                32769,
+                2,
+                "Data",
+                "0405"
+              ],
+              [
+                8,
+                1,
+                "Data",
+                "06"
+              ]
+            ],
+            "offset": 44,
+            "ordinal": 0,
+            "raw": "00010203040506"
+          }
+        ],
+        "state": "Decoded"
+      },
+      {
+        "id": 0,
+        "kind": "templates",
+        "length": 12,
+        "offset": 51,
+        "ordinal": 2,
+        "padding": "",
+        "processed": true,
+        "raw": "0100000103e70003",
+        "records": [
+          {
+            "count": 1,
+            "fields": [
+              [
+                999,
+                3
+              ]
+            ],
+            "id": 256,
+            "offset": 55,
+            "ordinal": 0,
+            "raw": "0100000103e70003",
+            "scope": 0,
+            "state": "Applied"
+          }
+        ]
+      },
+      {
+        "id": 256,
+        "kind": "data",
+        "length": 7,
+        "offset": 63,
+        "ordinal": 3,
+        "padding": "",
+        "processed": true,
+        "raw": "616263",
+        "records": [
+          {
+            "fields": [
+              [
+                999,
+                3,
+                "Data",
+                "616263"
+              ]
+            ],
+            "offset": 67,
+            "ordinal": 0,
+            "raw": "616263"
+          }
+        ],
+        "state": "Decoded"
+      }
+    ],
+    "header": [
+      9,
+      4,
+      9000,
+      100,
+      123,
+      42
+    ],
+    "parsed_count": 4,
+    "reset": false
+  },
+  "provenance": {
+    "command": "python ingestion/tests/netflow_v9_fixture_oracle.py --generate",
+    "producer": "independent Python struct/manual synthetic builder",
+    "sensitive_data": false
+  },
+  "sha256": "a0ee08dcecd4e36dd3d93e79d9174ee12036574e0611f78fbff5ef92e291098c"
+}

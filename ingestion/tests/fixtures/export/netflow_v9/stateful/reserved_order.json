@@ -1,0 +1,85 @@
+{
+  "expected": {
+    "count": "Inconclusive",
+    "flowsets": [
+      {
+        "id": 2,
+        "kind": "reserved",
+        "length": 7,
+        "offset": 20,
+        "ordinal": 0,
+        "processed": true,
+        "raw": "726177"
+      },
+      {
+        "id": 0,
+        "kind": "templates",
+        "length": 12,
+        "offset": 27,
+        "ordinal": 1,
+        "padding": "",
+        "processed": true,
+        "raw": "0100000103e70003",
+        "records": [
+          {
+            "count": 1,
+            "fields": [
+              [
+                999,
+                3
+              ]
+            ],
+            "id": 256,
+            "offset": 31,
+            "ordinal": 0,
+            "raw": "0100000103e70003",
+            "scope": 0,
+            "state": "Applied"
+          }
+        ]
+      },
+      {
+        "id": 256,
+        "kind": "data",
+        "length": 7,
+        "offset": 39,
+        "ordinal": 2,
+        "padding": "",
+        "processed": true,
+        "raw": "616263",
+        "records": [
+          {
+            "fields": [
+              [
+                999,
+                3,
+                "Data",
+                "616263"
+              ]
+            ],
+            "offset": 43,
+            "ordinal": 0,
+            "raw": "616263"
+          }
+        ],
+        "state": "Decoded"
+      }
+    ],
+    "header": [
+      9,
+      2,
+      9000,
+      100,
+      123,
+      42
+    ],
+    "parsed_count": null,
+    "reset": false
+  },
+  "provenance": {
+    "command": "python ingestion/tests/netflow_v9_fixture_oracle.py --generate",
+    "producer": "independent Python struct/manual synthetic builder",
+    "sensitive_data": false
+  },
+  "sha256": "10ea588f530219df7f2d55ba3bcdc7b427e56fb13eb9cf8825254c215b7ba023"
+}

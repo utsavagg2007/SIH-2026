@@ -1,0 +1,11 @@
+{
+  "expected": {
+    "error": "InvalidFlowSetLength"
+  },
+  "provenance": {
+    "command": "python ingestion/tests/netflow_v9_fixture_oracle.py --generate",
+    "producer": "independent Python struct/manual synthetic builder",
+    "sensitive_data": false
+  },
+  "sha256": "a287e3b636170c836524bf439a875dbd01c09c15bd50c007ae6884f4e055b271"
+}
