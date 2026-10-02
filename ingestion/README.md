@@ -791,12 +791,14 @@ cargo test --locked --manifest-path ingestion/Cargo.toml --test template_registr
 cargo test --locked --manifest-path ingestion/Cargo.toml --lib netflow::template::tests
 ```
 
-### F6 human-approved parser policy closure (design only)
+### F6 bounded lossless NetFlow v9 parser (implemented; pending human freeze)
 
-The prerequisite amendment closes zero-scope Options representation only. The
-NetFlow v9 parser, parser tests, input wrappers, and fixtures are not implemented
-by this amendment. The following F6 policies are human-approved; numeric limits
-are configurable deployment defaults, not protocol constants:
+The separate F5 prerequisite amendment closes protocol-neutral zero-scope
+Options representation. F6 now implements the Rust-only bounded lossless v9
+parser in `src/netflow/v9.rs`, its tests, and independent binary fixtures. No v9
+input wrapper/CLI, canonical normalizer or detector hook is added. The following
+F6 policies are human-approved; numeric limits are configurable deployment
+defaults, not protocol constants:
 
 | Parser policy | Approved value |
 |---|---|
@@ -847,6 +849,92 @@ are configurable deployment defaults, not protocol constants:
   Data Records. Emit Match/Mismatch only when a reliable total is established;
   unresolved/malformed/limit-stopped content yields Inconclusive. Count is never
   an allocation bound, FlowSet count, or v5 fixed-size packet formula.
+
+`parse_netflow_v9_wire(bytes, config)` performs pure checked header/complete outer
+framing and template-record resource preflight, with privately constructed wire
+views. `resolve_netflow_v9(wire, context, &mut registry)` revalidates the complete
+caller-supplied session identity against F5's bound, prechecks the relevant
+timeline and resolves physical wire order. `parse_netflow_v9` combines the two.
+The context contains `TransportSessionKey` and an unchanged caller datagram
+ordinal; it does not infer sensor, endpoints, transport or restart/session epoch.
+Header Source ID is the separate F5 observation-scope coordinate.
+
+Each decoded Data FlowSet owns one immutable bounded definition/generation/key
+snapshot. Records and field values borrow the original bytes; no per-field owned
+value buffers, registry references, unknown-data queue or second decoding pass
+exist. `records()` binds fields to that exact snapshot. Ordered descriptors,
+duplicate/unknown/high-bit IDs and literal widths are preserved without a PEN or
+IPFIX enterprise-bit/variable-length interpretation. Options roles are Scope
+then Option, including zero scopes and nonempty scope-only definitions.
+
+Results expose Complete / CompleteWithDiagnostics / StoppedAtLimit /
+StoppedForReset, Continue / ResetRequired, Match / Mismatch / Inconclusive,
+per-record template transitions/local invalidation and per-FlowSet data states.
+Physical later views remain explicitly Unprocessed after stopping. Every ordinary
+Err is pre-mutation; its `session_disposition()` tells callers to quarantine a
+rejected source session whose hidden layout change cannot be excluded. Caller
+configuration/identity errors are not source resets. ResetRequired outcomes do
+not automatically clear F5 or infer epochs: callers must quarantine/use a fresh
+explicit epoch before further resolution. Successful earlier effects remain
+visible, including a current Data FlowSet's timed lookup at a total-record stop.
+Defensively rejecting an unsupported externally populated F5 layout reports its
+exact-key local invalidation on the Data FlowSet, too.
+
+A header-only export is rejected as MissingFlowSets in pure preflight. Empty or
+padding-only Template/Options Template FlowSets stop for reset with explicit
+prior effects. Known Data FlowSets containing no complete record are Rejected,
+not represented as valid empty records or given Count Match. These minimum
+structure checks follow RFC 3954's packet/FlowSet definitions; full-zero complete
+records remain records, as required by the padding policy.
+
+Padding is only the remainder after complete fixed-width records. Zero bytes of
+length >= R are indistinguishable from legitimate complete zero records: they
+are NOT stripped or guessed to be padding. Count may reveal a discrepancy, but
+cannot identify exporter intent; a matching Count does not prove intent either.
+This is the necessary clarification of test-matrix item 43, consistent with the
+approved never-strip-complete-zero-record policy. Template/Options suffix errors
+stop for reset with earlier applied transitions explicit, not silently rolled
+back. Unsupported template records with proven extents can recover at their
+exact boundaries after exact-key invalidation; unproven extents cannot.
+
+Diagnostics retain at most the configured cap (including zero), with checked
+total/dropped counters and typed numeric/static context only. They never include
+arbitrary raw payload/identity strings. Raw payloads are available only in the
+bounded current result's borrowed views. Field-limit checks precede temporary
+descriptor allocation; configuration validates representational/owned budgets.
+
+Implemented: header/FlowSets, ordinary/Options templates, v9 zero-scope Options,
+fixed-width Data/Options Data structure, F5 lifecycle integration, bounded
+diagnostics, physical ordering, generation binding and no-buffer unknown data.
+NOT implemented: CanonicalObservation/v9 normalization, F7 field semantics,
+address/port/counter interpretation, timestamp reconstruction, sampling
+normalization, loss/reordering/restart classification, UUIDs, Detection/ML,
+IPFIX parser, sFlow or live collection. All v5, PCAP and legacy paths are unchanged.
+
+Qualification fixtures have `.bin`, `.sha256` and independent expected `.json`
+sidecars in `tests/fixtures/export/netflow_v9/{valid,malformed,stateful,real}`.
+`tests/netflow_v9_fixture_oracle.py` uses Python stdlib struct/manual operations,
+not Rust/PyO3. Default mode is read-only; `--generate` explicitly builds synthetic
+fixtures and refuses replacement of differing evidence. Capture mode is a
+test-only bounded loopback collector, not a production collection feature.
+
+Genuine exporter evidence: softflowd v1.1.1, upstream commit
+`8f83c2c4a784a72bf6eb2604e73d4029b21b7925`, independently built from the pinned
+archive (SHA-256 `111c4b2c841c7143552d77fc7bbe5ab7d7f4604bc1d7acf522afb0ce8e00fccb`).
+Only the existing non-sensitive `m1d_synthetic.pcap` was replayed. The 688-byte
+capture SHA-256 is `31cc964436b85c9f8a82e825956c3fa2ea13c47d35374050ac8f13bb769e2cb2`.
+`real/softflowd_000.json` records the exact generation command, source URL, PCAP
+hash, producer version, complete upstream license/notices and independent decode.
+This exporter declares Count 8 but emits 14 records: four ordinary templates,
+one Options Template, eight flow records and one Options Data record. F6
+deliberately reports CountMismatch (8 vs 14), not a relaxed Count rule. Structural
+record slicing agrees with the independent oracle. This is one synthetic-traffic
+software-exporter capture, not hardware/vendor fleet or live-operation evidence.
+
+```bash
+cargo test --locked --manifest-path ingestion/Cargo.toml --test netflow_v9_parser_tests
+python ingestion/tests/netflow_v9_fixture_oracle.py
+```
 
 ---
 

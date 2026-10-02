@@ -1,0 +1,115 @@
+{
+  "expected": {
+    "count": "Inconclusive",
+    "flowsets": [
+      {
+        "id": 0,
+        "kind": "templates",
+        "length": 12,
+        "offset": 20,
+        "ordinal": 0,
+        "padding": "",
+        "processed": true,
+        "raw": "0100000103e70003",
+        "records": [
+          {
+            "count": 1,
+            "fields": [
+              [
+                999,
+                3
+              ]
+            ],
+            "id": 256,
+            "offset": 24,
+            "ordinal": 0,
+            "raw": "0100000103e70003",
+            "scope": 0,
+            "state": "Applied"
+          }
+        ]
+      },
+      {
+        "id": 256,
+        "kind": "data",
+        "length": 7,
+        "offset": 32,
+        "ordinal": 1,
+        "padding": "",
+        "processed": true,
+        "raw": "616263",
+        "records": [
+          {
+            "fields": [
+              [
+                999,
+                3,
+                "Data",
+                "616263"
+              ]
+            ],
+            "offset": 36,
+            "ordinal": 0,
+            "raw": "616263"
+          }
+        ],
+        "state": "Decoded"
+      },
+      {
+        "id": 0,
+        "kind": "templates",
+        "length": 12,
+        "offset": 39,
+        "ordinal": 2,
+        "padding": "",
+        "processed": true,
+        "raw": "0100000100010000",
+        "records": [
+          {
+            "count": 1,
+            "fields": [
+              [
+                1,
+                0
+              ]
+            ],
+            "id": 256,
+            "offset": 43,
+            "ordinal": 0,
+            "raw": "0100000100010000",
+            "scope": 0,
+            "state": "Rejected"
+          }
+        ]
+      },
+      {
+        "id": 256,
+        "kind": "data",
+        "length": 7,
+        "offset": 51,
+        "ordinal": 3,
+        "padding": "",
+        "processed": true,
+        "raw": "646566",
+        "records": [],
+        "state": "SkippedUnknown"
+      }
+    ],
+    "header": [
+      9,
+      3,
+      9000,
+      100,
+      123,
+      42
+    ],
+    "parsed_count": null,
+    "reset": false
+  },
+  "provenance": {
+    "command": "python ingestion/tests/netflow_v9_fixture_oracle.py --generate",
+    "producer": "independent Python struct/manual synthetic builder",
+    "sensitive_data": false
+  },
+  "sha256": "038534fdeb343111a4fd777c0c0fee24f0150be7ba6dc55b50795925f50cd407"
+}
