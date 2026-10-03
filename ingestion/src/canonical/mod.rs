@@ -25,6 +25,8 @@ pub enum TelemetrySource {
     Zeek,
     #[serde(rename = "netflow_v5")]
     NetFlowV5,
+    #[serde(rename = "netflow_v9")]
+    NetFlowV9,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

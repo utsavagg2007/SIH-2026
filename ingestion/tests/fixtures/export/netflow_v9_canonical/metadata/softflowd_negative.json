@@ -1,0 +1,86 @@
+{
+  "name": "softflowd_negative",
+  "evidence_kind": "frozen real negative",
+  "wire_format": "existing binary",
+  "existing_wire": "ingestion/tests/fixtures/export/netflow_v9/real/softflowd_000.bin",
+  "wire_sha256": "31cc964436b85c9f8a82e825956c3fa2ea13c47d35374050ac8f13bb769e2cb2",
+  "source_context": {
+    "sensor_id": "sensor-v9-a",
+    "exporter_id": "exporter-a",
+    "session_id": "collector-a.udp.epoch-1",
+    "input_sha256": "31cc964436b85c9f8a82e825956c3fa2ea13c47d35374050ac8f13bb769e2cb2"
+  },
+  "observed_at": "2026-10-03T00:00:00Z",
+  "input_mode": "export_file",
+  "byte_basis_profile": "VerifiedIpLayer",
+  "max_flow_age_ms": 86400000,
+  "parser_count": "Mismatch",
+  "declared_count": 8,
+  "parsed_count": 14,
+  "parser_completion": "CompleteWithDiagnostics",
+  "session_disposition": "Continue",
+  "records_inspected": 9,
+  "records_emitted": 0,
+  "records_rejected": 8,
+  "options_records_ignored": 1,
+  "diagnostics": [
+    "FlowTimeOrderingInvalid",
+    "FlowTimeOrderingInvalid",
+    "FlowTimeOrderingInvalid",
+    "FlowTimeOrderingInvalid",
+    "FlowTimeOrderingInvalid",
+    "FlowTimeOrderingInvalid",
+    "FlowTimeOrderingInvalid",
+    "FlowTimeOrderingInvalid"
+  ],
+  "coordinates": [
+    {
+      "flowset_ordinal": 5,
+      "record_ordinal": 0,
+      "template_id": 256
+    },
+    {
+      "flowset_ordinal": 6,
+      "record_ordinal": 0,
+      "template_id": 1024
+    },
+    {
+      "flowset_ordinal": 6,
+      "record_ordinal": 1,
+      "template_id": 1024
+    },
+    {
+      "flowset_ordinal": 6,
+      "record_ordinal": 2,
+      "template_id": 1024
+    },
+    {
+      "flowset_ordinal": 6,
+      "record_ordinal": 3,
+      "template_id": 1024
+    },
+    {
+      "flowset_ordinal": 6,
+      "record_ordinal": 4,
+      "template_id": 1024
+    },
+    {
+      "flowset_ordinal": 6,
+      "record_ordinal": 5,
+      "template_id": 1024
+    },
+    {
+      "flowset_ordinal": 6,
+      "record_ordinal": 6,
+      "template_id": 1024
+    },
+    {
+      "flowset_ordinal": 6,
+      "record_ordinal": 7,
+      "template_id": 1024
+    }
+  ],
+  "normalization_status": "CompleteWithRejectionsOrWarnings",
+  "golden_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "newline_policy": "UTF-8 without BOM; LF after every record; zero-output file empty"
+}
