@@ -427,6 +427,12 @@ touches the DGA model. From the same run at 0.75: `port_scan` 1.000/1.000,
 figure identical to the pre-change run. `c2_beaconing` remains the weak
 detector and is out of scope here.
 
+> **`c2_beaconing` 0.241 is now stale** — it predates `c2_beaconing` 0.2.0
+> (commit `245e18d`). Re-run of the same harness on 2026-10-04 reads precision
+> **0.571** / recall 1.000; the other five non-DGA figures above reproduce
+> exactly. It is still the weakest detector, and still out of scope here. See
+> the amended note in [`ML_E2E.md`](ML_E2E.md).
+
 ### Full pipeline, single capture
 
 ```
