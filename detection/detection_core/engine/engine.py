@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 
 from ..schemas import FlowEvent, ThreatAlert
 from .detector import Detector
+from ..compatibility import canonical_skip_reason
+from ..schemas.canonical_flow import CanonicalFlowEvent
 
 __all__ = ["DetectionEngine", "EngineStats"]
 
@@ -40,12 +42,16 @@ class EngineStats:
     #: thrown once has already missed traffic, and quietly promoting it back
     #: to "online" would hide that. Reset with the rest of the counters.
     errored_detectors: set[str] = field(default_factory=set)
+    detector_invocations: dict[str, int] = field(default_factory=dict)
+    detector_skips: dict[str, dict[str, int]] = field(default_factory=dict)
 
     def reset(self) -> None:
         self.flows_processed = 0
         self.alerts_emitted = 0
         self.detector_errors = 0
         self.errored_detectors = set()
+        self.detector_invocations.clear()
+        self.detector_skips.clear()
 
 
 class DetectionEngine:
@@ -88,7 +94,28 @@ class DetectionEngine:
         """Send one flow to every detector and collect their alerts."""
         alerts: list[ThreatAlert] = []
         for detector in self._detectors:
-            alerts.extend(self._invoke(detector, "process", flow))
+            if isinstance(flow, CanonicalFlowEvent):
+                reason = canonical_skip_reason(detector, flow)
+                if reason is not None:
+                    reasons = self.stats.detector_skips.setdefault(detector.name, {})
+                    reasons[reason] = reasons.get(reason, 0) + 1
+                    continue
+            self.stats.detector_invocations[detector.name] = (
+                self.stats.detector_invocations.get(detector.name, 0) + 1
+            )
+            produced = self._invoke(detector, "process", flow)
+            if isinstance(flow, CanonicalFlowEvent):
+                # Aggregate alerts identify the trigger, NOT every contributing
+                # window flow. The streamed run trace supplies all input IDs.
+                correlation = {k: flow.canonical[k] for k in (
+                    "record_id", "telemetry_source", "sensor_id", "quality", "provenance"
+                )}
+                if "source_record_id" in flow.canonical:
+                    correlation["source_record_id"] = flow.canonical["source_record_id"]
+                produced = [a.model_copy(update={"evidence": {
+                    **a.evidence, "canonical_trigger": correlation,
+                }}) for a in produced]
+            alerts.extend(produced)
         self.stats.flows_processed += 1
         self.stats.alerts_emitted += len(alerts)
         return alerts

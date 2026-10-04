@@ -4,6 +4,11 @@ Rust + PyO3 library that parses Zeek logs (`conn.log`, `dns.log`, `ssl.log`,
 `http.log`) into structured records and extracts security-relevant features for
 the passive threat-detection pipeline.
 
+NetFlow v5/v9 also has an additional offline canonical-to-Detection command;
+see [NetFlow E2E setup, status and source/model limitations](../docs/NETFLOW_E2E.md).
+It reuses the frozen NetFlow stack and canonical JSONL publisher, without
+replacing the legacy Zeek feature path. IPFIX/sFlow/F10 are not implemented.
+
 ## Layout
 
 - `src/zeek_parser/` — header-aware parsers for each Zeek log type

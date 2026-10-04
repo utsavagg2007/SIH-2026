@@ -118,10 +118,10 @@ class FlowObservation:
     dst_port: int | None = None
     proto: str | None = None
     src_ip: str | None = None
-    orig_packets: int = 0
-    orig_bytes: int = 0
+    orig_packets: int | None = 0
+    orig_bytes: int | None = 0
     #: Responder-side volume. Context only - see the class docstring.
-    resp_bytes: int = 0
+    resp_bytes: int | None = 0
     #: Zeek connection state, or None when ingestion did not supply one.
     conn_state: str | None = None
 
@@ -197,6 +197,11 @@ class ActivityWindow:
         self._orig_packets_total = 0
         self._orig_bytes_total = 0
         self._resp_bytes_total = 0
+        # A subtotal is not a measurement of the whole window. Missing-aware
+        # canonical input must never turn unavailable bytes/replies into zero.
+        self._orig_packets_missing = 0
+        self._orig_bytes_missing = 0
+        self._resp_bytes_missing = 0
         # Responder-engagement counters. Like every other aggregate here they
         # are maintained on entry and reversed on expiry, so a read is O(1)
         # and always equals what a full scan of the deque would return.
@@ -282,9 +287,7 @@ class ActivityWindow:
 
     def _add(self, observation: FlowObservation) -> None:
         """Fold one observation into every aggregate."""
-        self._orig_packets_total += observation.orig_packets
-        self._orig_bytes_total += observation.orig_bytes
-        self._resp_bytes_total += observation.resp_bytes
+        self._counter_update(observation, 1)
         # Only a *classified* state counts as covered. An OTH / unrecognised
         # / empty state is the absence of a verdict, and must leave the window
         # looking uncovered so the caller falls back rather than concluding
@@ -293,7 +296,8 @@ class ActivityWindow:
             self._conn_state_known += 1
             if observation.conn_state in INCOMPLETE_CONN_STATES:
                 self._incomplete_total += 1
-        established = observation.resp_bytes >= self.established_resp_bytes
+        established = (observation.resp_bytes is not None
+                       and observation.resp_bytes >= self.established_resp_bytes)
         if established:
             self._established_total += 1
 
@@ -332,20 +336,20 @@ class ActivityWindow:
 
         sequence = self._added
         self._added += 1
-        self._max_orig_bytes.push(sequence, observation.orig_bytes)
+        if observation.orig_bytes is not None:
+            self._max_orig_bytes.push(sequence, observation.orig_bytes)
         self._min_timestamp.push(sequence, observation.timestamp)
         self._max_timestamp.push(sequence, observation.timestamp)
 
     def _remove(self, observation: FlowObservation) -> None:
         """Exactly reverse :meth:`_add` for an observation that has expired."""
-        self._orig_packets_total -= observation.orig_packets
-        self._orig_bytes_total -= observation.orig_bytes
-        self._resp_bytes_total -= observation.resp_bytes
+        self._counter_update(observation, -1)
         if observation.conn_state in CLASSIFIED_CONN_STATES:
             self._conn_state_known -= 1
             if observation.conn_state in INCOMPLETE_CONN_STATES:
                 self._incomplete_total -= 1
-        established = observation.resp_bytes >= self.established_resp_bytes
+        established = (observation.resp_bytes is not None
+                       and observation.resp_bytes >= self.established_resp_bytes)
         if established:
             self._established_total -= 1
 
@@ -387,6 +391,14 @@ class ActivityWindow:
         self._max_orig_bytes.pop(sequence)
         self._min_timestamp.pop(sequence)
         self._max_timestamp.pop(sequence)
+
+    def _counter_update(self, observation: FlowObservation, sign: int) -> None:
+        for attr, value in (("orig_packets", observation.orig_packets),
+                            ("orig_bytes", observation.orig_bytes),
+                            ("resp_bytes", observation.resp_bytes)):
+            suffix = "missing" if value is None else "total"
+            name = f"_{attr}_{suffix}"
+            setattr(self, name, getattr(self, name) + sign * (1 if value is None else value))
 
     def observe(self, observation: FlowObservation) -> None:
         """Record an observation and drop anything it pushed out of the window."""
@@ -481,16 +493,15 @@ class ActivityWindow:
             return 0.0
         return self._incomplete_total / len(self._events)
 
-    def established_fraction(self) -> float:
+    def established_fraction(self) -> float | None:
         """Share of the window where the responder returned real payload.
 
-        The direction-safe stand-in for ``conn_state`` while ingestion still
-        drops ``S0``. A scan gets nothing back; a browsing session gets pages
-        back. **On a genuinely unidirectional capture this is 0.0 for every
-        window**, because no responder bytes exist to count - which is exactly
-        the reading that cannot suppress anything, so a detector gating on it
-        degrades to its unfiltered behaviour rather than going quiet.
+        None if any responder measurement is unavailable. Zero bytes that
+        were actually measured remain zero; an absent reverse direction is
+        not evidence that the responder did not answer.
         """
+        if self._resp_bytes_missing:
+            return None
         if not self._events:
             return 0.0
         return self._established_total / len(self._events)
@@ -499,11 +510,11 @@ class ActivityWindow:
         """Distinct ``(dst_ip, dst_port)`` endpoints in the window."""
         return len(self._endpoint_counts)
 
-    def established_endpoint_count(self) -> int:
+    def established_endpoint_count(self) -> int | None:
         """Distinct endpoints the responder answered with real payload."""
-        return len(self._established_endpoints)
+        return None if self._resp_bytes_missing else len(self._established_endpoints)
 
-    def endpoint_established_fraction(self) -> float:
+    def endpoint_established_fraction(self) -> float | None:
         """Share of distinct **endpoints** that answered, not of flows.
 
         This is the responder-engagement measure a scan detector wants, and
@@ -520,9 +531,10 @@ class ActivityWindow:
         place. The measure therefore moves with the scan evidence rather than
         with traffic volume that has nothing to do with it.
 
-        **Fail-open.** 0.0 on an empty window, and 0.0 on any capture with no
-        responder bytes at all - the reading that cannot suppress anything.
+        None on any missing responder measurement; 0.0 on an empty window.
         """
+        if self._resp_bytes_missing:
+            return None
         if not self._endpoint_counts:
             return 0.0
         return len(self._established_endpoints) / len(self._endpoint_counts)
@@ -626,19 +638,19 @@ class ActivityWindow:
         """
         return {port: set(hosts) for port, hosts in self._hosts_by_port.items()}
 
-    def total_orig_packets(self) -> int:
+    def total_orig_packets(self) -> int | None:
         """Originator-side packets across every flow still in the window.
 
         Keyed by destination, this is the packet volume *arriving at* that
         host - not what it sent back. See :class:`FlowObservation`.
         """
-        return self._orig_packets_total
+        return None if self._orig_packets_missing else self._orig_packets_total
 
-    def total_orig_bytes(self) -> int:
+    def total_orig_bytes(self) -> int | None:
         """Originator-side bytes across every flow still in the window."""
-        return self._orig_bytes_total
+        return None if self._orig_bytes_missing else self._orig_bytes_total
 
-    def max_orig_bytes(self) -> int:
+    def max_orig_bytes(self) -> int | None:
         """Largest single flow's originator-side bytes, 0 when empty.
 
         One huge transfer and the same volume dribbled across many small
@@ -649,17 +661,19 @@ class ActivityWindow:
         a :class:`WindowExtreme` - amortized O(1), with no rescan when the
         largest value expires.
         """
+        if self._orig_bytes_missing:
+            return None
         largest = self._max_orig_bytes.value
         return 0 if largest is None else int(largest)
 
-    def total_resp_bytes(self) -> int:
+    def total_resp_bytes(self) -> int | None:
         """Responder-side bytes across the window - **context only**.
 
         Deliberately separate from :meth:`total_orig_bytes` and never
         summed into it. A 500 MB download must never read as 500 MB of
         outbound data; see :class:`FlowObservation`.
         """
-        return self._resp_bytes_total
+        return None if self._resp_bytes_missing else self._resp_bytes_total
 
     def protocols(self) -> set[str]:
         return set(self._proto_counts)
