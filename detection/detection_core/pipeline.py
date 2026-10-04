@@ -28,7 +28,7 @@ import queue
 import threading
 import time
 import urllib.parse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Any, Iterable, Iterator, NamedTuple, Protocol, runtime_checkable
 
@@ -975,6 +975,9 @@ class RunStats:
     #: could not keep up. Both mean the backend does not have the alert, and
     #: any local sink does.
     alerts_dropped: int = 0
+    # Bounded by the registered consumer set and fixed compatibility reasons.
+    detector_invocations: dict[str, int] = field(default_factory=dict)
+    detector_skips: dict[str, dict[str, int]] = field(default_factory=dict)
 
 
 class _RateWindow:
@@ -988,6 +991,11 @@ class _RateWindow:
         self.octets = 0
 
     def add(self, flow: FlowEvent) -> None:
+        from .schemas.canonical_flow import CanonicalFlowEvent
+        if isinstance(flow, CanonicalFlowEvent):
+            # The current backend rate schema has no missing-value mask.
+            # Refuse rather than publishing absent payload/reverse counters as 0.
+            raise ValueError("canonical flows do not support legacy throughput telemetry")
         self.flows += 1
         self.packets += (flow.orig_pkts or 0) + (flow.resp_pkts or 0)
         self.octets += (flow.orig_bytes or 0) + (flow.resp_bytes or 0)
@@ -1103,6 +1111,8 @@ def run_detection(
     _settle_deferred(sink, stats)
 
     stats.detector_errors = engine.stats.detector_errors
+    stats.detector_invocations = dict(engine.stats.detector_invocations)
+    stats.detector_skips = {name: dict(reasons) for name, reasons in engine.stats.detector_skips.items()}
     if stats.detector_errors:
         log.warning(
             "%d detector error(s) during the run; see the log above",
