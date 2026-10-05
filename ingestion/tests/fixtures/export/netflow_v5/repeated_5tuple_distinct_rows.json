@@ -1,0 +1,8 @@
+{
+  "description": "Three identical 5-tuples remain three physical records with distinct ordinals and source counters/times.",
+  "count": 3,
+  "tuple": {"src_addr": "192.0.2.10", "dst_addr": "198.51.100.20", "src_port": 12345, "dst_port": 443, "protocol": 6},
+  "ordinals": [0, 1, 2],
+  "packet_counts": [1, 2, 3],
+  "first_values": [100, 300, 500]
+}

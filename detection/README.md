@@ -11,9 +11,14 @@ ingestion output (features.jsonl)
     -> standardized ThreatAlert v1.1
 ```
 
-This package **never imports `ingestion_core`** and never touches Zeek logs,
-PCAPs, Docker or Rust. Its ingestion boundary is the JSONL feature format, and
-that format-specific knowledge is confined to `detection_core/adapters/`.
+The detector core **never imports `ingestion_core`** or parses Zeek/NetFlow
+wire data. Its legacy boundary remains the JSONL feature format, with format
+knowledge confined to `detection_core/adapters/`. An additional offline
+`python -m detection_core.netflow_run` command invokes the Rust exporter,
+consumes CanonicalObservation v1 JSONL and gates consumers by audited feature
+availability. See [NetFlow E2E commands and limitations](../docs/NETFLOW_E2E.md).
+Only compatible consumers run; missing payload/reverse/protocol telemetry is
+never invented. The legacy command and required FlowEvent fields are unchanged.
 
 ## Status
 

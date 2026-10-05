@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import type { Alert, Incident, Metrics } from "../lib/types";
 import { fmtEndpoints, fmtUptime } from "../lib/format";
 import { SEV } from "../lib/tokens";
-import { api } from "../lib/api";
+import { api, WS_URL } from "../lib/api";
 
 /**
  * The live feed, against the real backend.
@@ -35,10 +35,10 @@ import { api } from "../lib/api";
  * and the Wire's buffers held in refs so its rAF loop never triggers a render.
  */
 
-/** Same origin: the Vite proxy forwards /ws to the API in development, and the
- *  backend serves the built bundle itself in production, so this is correct in
- *  both without a build-time switch. */
-const WS_PATH = "/ws/alerts";
+/** Defined once in lib/api.ts. This file used to build the same same-origin
+ *  URL independently, which meant a split-origin deploy (bundle on Vercel, API
+ *  on Render) could be pointed at the right socket in one place and still be
+ *  hardwired to the wrong one here. */
 
 const RING_CAPACITY = 500;
 /**
@@ -215,8 +215,7 @@ export function useFeed() {
 
     function connect() {
       if (closed) return;
-      const url = `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}${WS_PATH}`;
-      const ws = new WebSocket(url);
+      const ws = new WebSocket(WS_URL);
       wsRef.current = ws;
 
       ws.onopen = () => setMetrics((m) => ({ ...m, connected: true }));

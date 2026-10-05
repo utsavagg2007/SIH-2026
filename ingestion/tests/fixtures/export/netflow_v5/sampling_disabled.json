@@ -1,0 +1,7 @@
+{
+  "description": "Sampling mode zero and interval zero.",
+  "raw_sampling": 0,
+  "sampling_mode": 0,
+  "sampling_interval": 0,
+  "diagnostics": []
+}

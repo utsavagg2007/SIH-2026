@@ -1,0 +1,6 @@
+{
+  "description": "Nonzero padding remains losslessly decoded and produces one bounded diagnostic per field.",
+  "pad1": 127,
+  "pad2": 48879,
+  "diagnostics": [{"kind": "NonzeroPadding", "byte_offset": 60, "record_ordinal": 0, "field": "pad1"}, {"kind": "NonzeroPadding", "byte_offset": 70, "record_ordinal": 0, "field": "pad2"}]
+}

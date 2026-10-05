@@ -1,0 +1,6 @@
+{
+  "description": "Sampling mode two with the maximum 14-bit interval.",
+  "raw_sampling": 49151,
+  "sampling_mode": 2,
+  "sampling_interval": 16383
+}

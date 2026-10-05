@@ -1,0 +1,96 @@
+{
+  "expected": {
+    "count": "Match",
+    "flowsets": [
+      {
+        "id": 1,
+        "kind": "templates",
+        "length": 22,
+        "offset": 20,
+        "ordinal": 0,
+        "padding": "",
+        "processed": true,
+        "raw": "012c00040008000100040030000100310002",
+        "records": [
+          {
+            "count": 3,
+            "fields": [
+              [
+                1,
+                4
+              ],
+              [
+                48,
+                1
+              ],
+              [
+                49,
+                2
+              ]
+            ],
+            "id": 300,
+            "offset": 24,
+            "ordinal": 0,
+            "raw": "012c00040008000100040030000100310002",
+            "scope": 1,
+            "state": "Applied"
+          }
+        ]
+      },
+      {
+        "id": 300,
+        "kind": "data",
+        "length": 12,
+        "offset": 42,
+        "ordinal": 1,
+        "padding": "00",
+        "processed": true,
+        "raw": "0102030405060700",
+        "records": [
+          {
+            "fields": [
+              [
+                1,
+                4,
+                "Scope",
+                "01020304"
+              ],
+              [
+                48,
+                1,
+                "Option",
+                "05"
+              ],
+              [
+                49,
+                2,
+                "Option",
+                "0607"
+              ]
+            ],
+            "offset": 46,
+            "ordinal": 0,
+            "raw": "01020304050607"
+          }
+        ],
+        "state": "Decoded"
+      }
+    ],
+    "header": [
+      9,
+      2,
+      9000,
+      100,
+      123,
+      42
+    ],
+    "parsed_count": 2,
+    "reset": false
+  },
+  "provenance": {
+    "command": "python ingestion/tests/netflow_v9_fixture_oracle.py --generate",
+    "producer": "independent Python struct/manual synthetic builder",
+    "sensitive_data": false
+  },
+  "sha256": "fe086d53f6b36b3793cc1bc53d3872c76b66e3921965851d7898fc594ddbec85"
+}

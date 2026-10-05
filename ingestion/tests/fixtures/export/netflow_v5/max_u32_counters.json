@@ -1,0 +1,5 @@
+{
+  "description": "Unsigned maxima remain unsigned and do not overflow.",
+  "u32_fields": {"sys_uptime_ms": 4294967295, "flow_sequence": 4294967295, "packet_count": 4294967295, "octet_count": 4294967295, "first_sys_uptime_ms": 4294967295, "last_sys_uptime_ms": 4294967295},
+  "u16_fields": {"input_ifindex": 65535, "output_ifindex": 65535, "src_port": 65535, "dst_port": 65535, "src_as": 65535, "dst_as": 65535}
+}

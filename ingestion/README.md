@@ -4,6 +4,11 @@ Rust + PyO3 library that parses Zeek logs (`conn.log`, `dns.log`, `ssl.log`,
 `http.log`) into structured records and extracts security-relevant features for
 the passive threat-detection pipeline.
 
+NetFlow v5/v9 also has an additional offline canonical-to-Detection command;
+see [NetFlow E2E setup, status and source/model limitations](../docs/NETFLOW_E2E.md).
+It reuses the frozen NetFlow stack and canonical JSONL publisher, without
+replacing the legacy Zeek feature path. IPFIX/sFlow/F10 are not implemented.
+
 ## Layout
 
 - `src/zeek_parser/` — header-aware parsers for each Zeek log type
@@ -63,9 +68,10 @@ docker images --digests | grep -E "73e80|sih-zeek"   # pinned fingerprint images
 Notes: group membership is evaluated at login, which is why a fresh shell can
 still fail right after `usermod` (compare `groups` vs `getent group docker`).
 Membership in `docker` is root-equivalent by design — accepted tradeoff for a
-dev box, never for shared/production hosts. The VM walkthrough lives in
-`DEPLOYMENT.md` §5a; fingerprint images additionally need their explicit build
-scripts before `--ja4` or `--tls-fingerprints` runs.
+dev box, never for shared/production hosts. Ingestion runs on the machine
+watching the traffic and is not part of the deploy — see `DEPLOYMENT.md` §1.
+Fingerprint images additionally need their explicit build scripts before
+`--ja4` or `--tls-fingerprints` runs.
 
 The supported official runtime is frozen to:
 
@@ -498,6 +504,574 @@ preserves every row in source-order transaction arrays. Canonical output also
 preserves every row independently.
 
 ---
+
+## NetFlow v5 F2/F3 Rust API
+
+`netflow::v5::parse_netflow_v5_datagram` is the stateless, lossless decoder for
+one complete v5 UDP payload. `netflow::normalize::NetFlowV5Normalizer` is a
+separate stateful offline normalizer. It requires an explicit
+`ExportDatagramContext` containing the sensor, artifact SHA-256, stable exporter
+identity, capture/observation time, and physical datagram ordinal. No local path,
+file name, modification time, or current wall clock participates in output.
+
+F3 reconstructs start/end timestamps with checked integer nanosecond arithmetic.
+The default maximum end age and duration is 24 hours; it is a configurable
+normalization policy, not a NetFlow wire constant. Records outside the configured
+limit are skipped individually with diagnostics.
+
+Ordering is checked before the age limit. A numerically reversed `First/Last`
+or `Last/SysUptime` pair is accepted as one wrap only when its modular forward
+interval is within the configured age limit and strictly below half the u32
+uptime cycle (2,147,483,648 ms). The reconstructed start-to-export interval must
+also be below one complete cycle. Ambiguous/reversed intervals emit
+`FlowTimeOrderingInvalid`, with bounded First, Last, SysUptime, modular duration
+and end-age context. There is zero future-skew tolerance: `Last=SysUptime+1 ms`
+is rejected. The one-second exporter boot-epoch tolerance does not apply to
+record ordering. Ordinary ordered intervals exceeding the configured limit
+still emit `FlowAgeExceeded`. Rejected rows do not supply exporter clock state;
+sequence advancement still accounts for all records in a valid source header.
+
+For IPv4 ICMP (`protocol=1`), the v5 destination-port word encodes
+`type * 256 + code`; F3 maps its high/low bytes to `icmp_type`/`icmp_code` and
+omits generic transport ports. This follows the
+[Cisco v5 representation](https://docs.crossworkassurance.cisco.com/docs/netflow).
+A zero word exposes type 0/code 0; v5 provides no separate presence bit, and F3
+does not infer a different identity from the source-port word or other fields.
+F2 preserves both raw port words unchanged. For interface metadata, zero input
+or output ifIndex maps independently to absence; nonzero N maps to `ifindex:N`.
+
+Record identity uses the versioned `co-netflow-v5-id-v1` UUIDv5 algorithm over
+the sensor, input SHA-256, exporter, engine type/ID, flow sequence, datagram
+ordinal, and physical record ordinal. Five-tuples and paths are not identity
+coordinates.
+
+Sequence state is scoped by exporter plus engine type/ID. NetFlow v5 progression
+uses the previous message's record count. A forward discontinuity reports
+missing exported flow records and sets `loss_detected`; it does not claim network,
+capture, or collector packet loss and never populates `missed_content_bytes`.
+Duplicate and regression events are reported without a reorder holdback in F3;
+bounded reorder handling remains a later sequence-hardening milestone. Restart is
+reported only when sequence regression, uptime decrease, and changed boot-epoch
+evidence agree.
+
+Quality precedence is deterministic: invalid/reserved sampling is `unknown`,
+recognized configured sampling (including one-in-one) is `sampled`, and explicit
+mode-zero/interval-zero is `exact`. Sequence loss is an independent
+`loss_detected` flag and does not replace fidelity. Counters are never scaled.
+v5 `dOctets` maps only to `ip_bytes`; reverse counters and application metadata
+are never fabricated.
+
+F3 is Rust-only and offline. It adds no CLI, Python, live UDP, detector-v2,
+NetFlow v9, IPFIX, or sFlow integration.
+
+## NetFlow v5 F4 offline artifact qualification
+
+`netflow::input` adds two offline Rust entry points without changing the F2 wire
+or F3 normalization semantics:
+
+- `process_raw_datagram_file` reads one complete v5 UDP payload, computes and
+  binds SHA-256 from the actual bytes, checks an optional expected digest, and
+  passes the unchanged bytes through F2 and F3. Raw input is bounded to the v5
+  maximum of 1,464 bytes by default.
+- `process_pcap_file` hashes the complete PCAP artifact, streams packet records,
+  extracts configured UDP candidates, requires F2 structural validation, and
+  normalizes accepted datagrams in capture order. A second digest over the bytes
+  consumed during parsing fails closed if the artifact changed between hashing
+  and processing.
+
+The narrow PCAP reader supports classic PCAP 2.4 in either byte order, with
+microsecond or nanosecond timestamp magic, Ethernet link type, optional one-level
+802.1Q VLAN, IPv4, and complete unfragmented UDP datagrams. It does not claim
+PCAPNG, Linux cooked capture, provider/nested VLAN, IPv6 transport, or fragment
+reassembly. Unsupported or malformed packet framing is diagnosed with bounded
+metadata; partial UDP payloads are never passed to F2.
+
+PCAP candidates require an explicit UDP source-port and/or destination-port
+filter. Optional exporter-source and collector-destination IPv4 filters may also
+be configured. The port filter only narrows candidates: F2 version/count/length
+validation determines whether a payload is structurally NetFlow v5. Exporter
+identity remains explicit configuration and is never inferred from the transport
+source.
+
+For PCAP input, `input_sha256` is the complete PCAP SHA-256, `observed_at` is the
+integer-converted packet capture timestamp, and `datagram_ordinal` is the ordinal
+of each structurally valid matching v5 datagram. Physical packet order and v5
+record order are preserved. Paths, filenames, mtimes, and wall clock do not
+participate in output.
+
+PCAP processing holds one captured packet at a time. Defaults bound captured
+packets to 262,144 bytes, retained canonical observations to 100,000, and retained
+diagnostics to 1,000 while reporting the total/dropped diagnostic counts. The
+`write_*_canonical_jsonl` wrappers publish only after successful processing and
+reuse the existing non-overwriting atomic canonical publisher.
+
+The F4 real-input evidence is an exact hex encoding of one 792-byte v5 payload
+produced by Apache-2.0 `nflow-generator` commit
+`b7cd1199871c7ad9a74d8e0efae1768277019d0e`. It is explicitly exporter-simulator
+test evidence, not physical-router or user traffic. Its provenance, privacy
+review, independent decode summary, source SHA, and canonical SHA are frozen
+under `tests/fixtures/export/netflow_v5/real/`.
+
+F4 remains offline and Rust-only. Live UDP, NetFlow v9, IPFIX, sFlow,
+detector-v2/Detection integration, and ML integration are not implemented.
+
+## F5 shared bounded template registry (Rust API only)
+
+`netflow::template` implements deterministic schema/state infrastructure shared
+by future NetFlow v9 and IPFIX decoders. It parses **no packet bytes**, emits no
+canonical records, and adds no Python/CLI/runtime integration. NetFlow v9 wire
+parsing/data decoding, IPFIX wire parsing/data decoding, live export collection,
+Detection/ML integration, and sFlow are **not implemented** by F5.
+
+### Identity and exact layout
+
+`TemplateKey` has four distinct coordinates: `TemplateProtocol` (`NetFlowV9` or
+`Ipfix`), `TransportSessionKey`, `observation_scope_id: u32`, and
+`template_id: u16`. The scope means v9 Source ID or IPFIX Observation Domain ID
+at the future adapter boundary. Both protocols reserve template IDs below 256;
+the registry accepts 256 through 65535, including options templates. This follows
+[RFC 3954 section 5.2](https://www.rfc-editor.org/rfc/rfc3954#section-5.2) and
+[RFC 7011 section 3.4](https://www.rfc-editor.org/rfc/rfc7011#section-3.4).
+
+`TemplateTimelineKey` contains protocol, transport/session, and observation scope
+only. `TemplateKey::timeline()` returns that structured key; template ID is
+excluded so multiple templates in one timeline share a monotonic source clock.
+
+`TransportSessionKey` separates `exporter_id` and caller-supplied `session_id`
+without concatenation or content hashing. Both are nonempty, case-sensitive ASCII
+labels with the existing exporter alphabet: letters, digits, `.`, `_`, `:`, `-`.
+Each string is validated before allocating and revalidated against the registry's
+own byte bound on every keyed operation. The caller must supply a complete,
+deterministic namespace covering the exporter, sensor/collector context,
+transport endpoints and connection/restart epoch as appropriate. A path, wall
+clock, source IP alone, or template contents are not a complete session key.
+F5 does not infer or authenticate identity; epoch derivation belongs to callers
+and input architecture, not the F6/F8 wire parsers.
+
+`TemplateDefinition` stores `TemplateKind::{Data, Options}`, an explicit
+`scope_field_count: u16`, and an exact-sized ordered boxed field slice. Data
+templates require scope count zero; Options allow 0 through total field count.
+The first N fields are scope fields; v9 adapters must later translate their scope
+definition byte length into a count. Field order and duplicate identifiers are
+preserved. Scope count is part of definition equality/replacement, not key
+identity. Data and Options share one key namespace and never coexist at one key.
+
+F5 definitions are **protocol-neutral structural storage**, not proof of wire
+legality. Every active definition remains nonempty. Nonempty zero-scope Options
+definitions retain `TemplateKind::Options`; all-fields-as-scope layouts remain
+representable, and scope counts above the field count remain invalid. F6 must
+validate NetFlow v9 layouts before F5 insertion and may supply zero-scope Options
+definitions. Future F8 must enforce IPFIX-specific Options Template scope rules
+before construction/insertion, including its nonzero-scope requirement. Neither
+wire parser is implemented by this registry amendment; storage acceptance under
+an `Ipfix` key does not establish IPFIX wire legality.
+
+`TemplateFieldSpecifier` preserves `field_id: u16`, `encoded_length: u16`, and
+`enterprise_number: Option<u32>`. IPFIX adapters later remove the enterprise flag
+from the logical IE ID and populate the PEN; v9 adapters preserve their field
+type without a PEN. No IE lookup, sorting, deduplication, length normalization,
+canonical interpretation, or variable-length decoding happens here. In particular
+65535 and optional PEN values are preserved per
+[RFC 7011 section 3.2](https://www.rfc-editor.org/rfc/rfc7011#section-3.2).
+Protocol-specific validation remains the decoder's job, including legality of
+zero-length/unknown fields and enterprise flags. Empty active definitions are
+rejected; wire withdrawal records must call the explicit withdrawal API later.
+
+### Human-approved configurable deployment policy defaults
+
+`TemplateRegistryConfig::default()` returns the final human-approved F5 policy:
+
+| Policy | Named constant | Default |
+|---|---|---|
+| TTL | `DEFAULT_TEMPLATE_TTL_SECONDS` | 1800 seconds |
+| Registry entries | `DEFAULT_MAX_TEMPLATE_ENTRIES` | 4096 |
+| Fields per template | `DEFAULT_MAX_FIELDS_PER_TEMPLATE` | 256 |
+| Bytes per exporter/session identity component | `DEFAULT_MAX_TEMPLATE_IDENTITY_BYTES` | 256 |
+
+These are configurable deployment safety defaults, **not protocol limits**.
+`DEFAULT_TEMPLATE_TTL_NS` is the same TTL in integer nanoseconds. Explicit
+`TemplateRegistryConfig::new(max_entries, max_fields_per_template,
+max_identity_bytes)` overrides the resource bounds and `with_ttl_ns` overrides
+TTL. All four values must be positive. Field count remains at most 65535 (the
+common u16 count space); the approved 256-field policy is overrideable within
+that representation. Template IDs, scope IDs, field IDs, encoded lengths, and
+optional enterprise numbers retain their original u16/u32 representations.
+
+Checked budget arithmetic rejects unrepresentable configurations, including
+duplicated bounded identity storage for timeline keys. Maps grow incrementally,
+never preallocated from configuration. Definitions validate borrowed field
+counts before copying; exact-sized boxed slices/strings prevent retention of
+oversized caller buffer capacities. Registry insertion revalidates definitions
+constructed using a different, larger limit.
+
+Retained state is bounded by max entries times bounded fields, bounded template
+and timeline identity strings, and bounded BTreeMap/allocator overhead. The
+ordered timeline-watermark map has exactly one entry per represented retained
+template timeline, therefore at most the number of retained templates and at
+most max_entries. There are no empty-timeline watermark tombstones, auxiliary
+per-key generation histories, expired-key tombstones, unknown-data buffers, or
+retained diagnostic lists.
+Caller-owned inputs, caller-retained clones, allocator failure/OOM, and future
+decoder allocations are outside the registry's ownership/resource guarantee;
+decoders must enforce bounds before building their own field buffers.
+
+### Source-time lifecycle and atomic failures
+
+All timed APIs take caller-supplied `u64` integer source/event nanoseconds, with
+independent clocks per protocol/session/observation-scope timeline. F5 performs
+no conversion through floats and reads no wall clock, file metadata, IO, RNG,
+threads, or timers. The unit matches existing v5 integer-nanosecond processing;
+a future adapter chooses the source event time.
+
+- A new active key starts generation 1 with first/last seen equal to source time.
+- An identical active definition refresh keeps generation and first seen, updates
+  last seen, and extends expiry to checked `source_time + TTL`.
+- A changed active definition (including kind, scope count, lengths, PEN, order,
+  or duplicates) replaces the definition and increments generation with checked
+  arithmetic, preserving the active lifetime's first seen.
+- `expires_at <= source_time` is expired, including the exact boundary.
+- Generations reset to 1 after expiry or withdrawal: they identify versions only
+  within an active lifetime. No unbounded generation tombstones are retained.
+  Later decoded-record identity must also carry source/session and physical
+  template/message coordinates; generation alone is not a durable identity.
+
+Successful insert, lookup, withdrawal, or timeline expiry updates only the
+relevant retained timeline's watermark. Equal times are valid; lower time within
+that timeline returns `SourceTimeRegression` without changing any state. All
+template IDs in that timeline share its watermark, but other protocols,
+sessions/exporters, and observation domains advance independently. For example,
+exporter A at time 5000 followed by exporter B at time 3000 is valid.
+
+Unknown lookups/withdrawals advance the watermark only if that timeline already
+retains templates. Operations on empty timelines return Unknown (or zero for
+expiry) without storing auxiliary state. Removing a timeline's final retained
+template via withdrawal, expired lookup, or explicit expiry removes its
+watermark. Reinsertion into an empty timeline begins a new lifetime and may use
+an earlier timestamp. Partial removal preserves the shared watermark while any
+template remains, including expired-but-not-yet-pruned templates. This bounded,
+lifetime-local monotonicity is the approved F5 policy; no persistent clock or
+generation tombstones are retained.
+
+`insert` returns `TemplateTransition` with Inserted/Refreshed/Replaced,
+generation and expired-pruned count. It validates identity/layout, time, expiry
+addition, generation and prospective retained capacity before mutating anything.
+Expired entries in the insertion's own timeline are accounted for before
+capacity rejection and physically pruned only on successful insertion. One
+timeline's timestamp cannot prune unrelated clocks: those retained templates
+still consume capacity until explicitly expired using their own timeline time.
+Capacity failure never evicts live state; every error preserves both complete
+maps and all watermarks, even expired neighbors.
+
+`lookup(key, source_time)` returns Found (a borrowed immutable entry), Unknown,
+or Expired with bounded metadata. Expired lookup removes that key; subsequent
+lookup returns Unknown. Lookup does not refresh TTL or last seen. Expired vs
+unknown can only be distinguished before pruning; no expiry history is stored.
+`withdraw` similarly returns Withdrawn, Unknown, or Expired and removes only the
+specified key. Future decoders—not F5—decide whether wire withdrawal is legal.
+`expire_timeline(timeline, source_time)` removes only that timeline's expired
+entries and returns a count. The old global `expire` API is removed; no shared
+collector/capture time is assumed. No background processing is required.
+
+Read-only entry getters expose definition, generation, first seen, last seen,
+and expiry. `entries()` is a borrowed BTreeMap-ordered audit view of retained
+entries, including any expired but not yet pruned entries; use timed lookup for
+decoding, not timeless introspection. `len`, `is_empty`, configuration,
+`timeline_count`, and `timeline_last_source_time_ns(timeline)` are available
+without exposing mutable internals. There is no global time accessor. Errors
+contain only static/numeric bounded context, not exporter strings or packet/field
+dumps.
+
+### F5 qualification
+
+`template_registry_tests` covers the lifecycle, full isolation matrix, exact TTL
+boundary, bounded capacity/identity/layout/watermarks, approved defaults and
+overrides, error atomicity, deterministic multi-timeline replay, an independent
+scalar state model, and adversarial/max-value inputs. An internal
+unit test constructs generation overflow without exposing a production mutation
+API. F2/F3/F4, full Rust, contracts, Python regression, Windows Pass A, detached
+Pass B and a clean Linux-container pass must remain green before freeze.
+
+```bash
+cargo test --locked --manifest-path ingestion/Cargo.toml --test template_registry_tests
+cargo test --locked --manifest-path ingestion/Cargo.toml --lib netflow::template::tests
+```
+
+### F6 bounded lossless NetFlow v9 parser (frozen and committed)
+
+F6 is frozen at commit `beb56a6020c8cdc8207c4758f93780bc7d6d4227`.
+
+The separate F5 prerequisite amendment closes protocol-neutral zero-scope
+Options representation. F6 now implements the Rust-only bounded lossless v9
+parser in `src/netflow/v9.rs`, its tests, and independent binary fixtures. No v9
+input wrapper/CLI, canonical normalizer or detector hook is added. The following
+F6 policies are human-approved; numeric limits are configurable deployment
+defaults, not protocol constants:
+
+| Parser policy | Approved value |
+|---|---|
+| Retained diagnostics per datagram | 128; zero retention allowed |
+| Input datagram bytes | 65535 |
+| FlowSets per datagram | 1024 |
+| Template/Options Template records | 512 per FlowSet; 2048 per datagram |
+| Decoded Data Records | 4096 per FlowSet; 16384 per datagram |
+
+- Lifecycle time is header UNIX seconds converted with checked integer
+  multiplication to nanoseconds, identical for every F5 operation in a datagram.
+  No capture/processing/file/wall-clock substitution or regression clamping is
+  allowed. SysUptime stays raw; explicit restart/session epochs belong to callers.
+- Initial padding accepts only a distinguishable 0..3-byte all-zero terminal
+  suffix, shorter than the decoded record length for data. A complete all-zero
+  record is never stripped. Safely framed unaligned FlowSets may warn; nonzero or
+  longer suffixes are outside this initial profile, not blanket RFC prohibitions.
+- Complete outer framing/resource preflight precedes mutation. Later stateful
+  errors retain successful earlier transitions and expose partial effects;
+  ordinary `Result::Err` must not conceal mutations. Count mismatch flags rather
+  than rolls back valid earlier transitions; no whole-registry clone is required.
+- Diagnostic totals/dropped counts use checked arithmetic. Suppression never
+  changes decoding, state, completion, reset requirements, or count status.
+- Enforce byte and FlowSet bounds at the parser boundary/preflight; future
+  wrappers should also bound artifact retention. Never inherit the v5 raw limit.
+  Enforce F5's configured field bound before temporary descriptor allocation.
+- An over-limit Data FlowSet loses its decoded output as a unit. A datagram-total
+  data limit returns `StoppedAtLimit` after the processed prefix, with no later
+  FlowSets processed and prior transitions visible.
+- Preserve zero-width descriptors but reject their templates as
+  `UnsupportedTemplateLayout` in the initial F6 profile. Do not install/decode
+  them or claim that v9 universally forbids zero widths.
+- Support v9 `scope_length == 0`, `option_length > 0` as Options with scope count
+  zero. Both-zero descriptor portions remain unsupported empty definitions.
+- A rejected newer template with trustworthy key/boundary triggers exact-key
+  **local invalidation**, explicitly reported, leaving unrelated keys intact.
+  Later data is Unknown until a supported template arrives; old-layout fallback
+  is forbidden. Unsafe/failed invalidation or untrustworthy key/boundary stops
+  stateful processing with `ResetRequired`; callers must quarantine/use a new
+  epoch. This is not a v9 wire withdrawal; no unbounded taint map is added.
+- Unknown-template data is skipped with bounded raw view/diagnostic: no guessing,
+  buffering, cross-key fallback, or retroactive decode. Expired data similarly
+  emits `ExpiredTemplate`, never resurrects state, and adds no expiry tombstones.
+- Strict physical order applies to templates and data: A/data/B/data binds each
+  data segment to its then-active definition. Data before its template stays
+  skipped; no second pass is allowed.
+- Preserve raw Count. It totals Template, Options Template, Data, and Options
+  Data Records. Emit Match/Mismatch only when a reliable total is established;
+  unresolved/malformed/limit-stopped content yields Inconclusive. Count is never
+  an allocation bound, FlowSet count, or v5 fixed-size packet formula.
+
+`parse_netflow_v9_wire(bytes, config)` performs pure checked header/complete outer
+framing and template-record resource preflight, with privately constructed wire
+views. `resolve_netflow_v9(wire, context, &mut registry)` revalidates the complete
+caller-supplied session identity against F5's bound, prechecks the relevant
+timeline and resolves physical wire order. `parse_netflow_v9` combines the two.
+The context contains `TransportSessionKey` and an unchanged caller datagram
+ordinal; it does not infer sensor, endpoints, transport or restart/session epoch.
+Header Source ID is the separate F5 observation-scope coordinate.
+
+Each decoded Data FlowSet owns one immutable bounded definition/generation/key
+snapshot. Records and field values borrow the original bytes; no per-field owned
+value buffers, registry references, unknown-data queue or second decoding pass
+exist. `records()` binds fields to that exact snapshot. Ordered descriptors,
+duplicate/unknown/high-bit IDs and literal widths are preserved without a PEN or
+IPFIX enterprise-bit/variable-length interpretation. Options roles are Scope
+then Option, including zero scopes and nonempty scope-only definitions.
+
+Results expose Complete / CompleteWithDiagnostics / StoppedAtLimit /
+StoppedForReset, Continue / ResetRequired, Match / Mismatch / Inconclusive,
+per-record template transitions/local invalidation and per-FlowSet data states.
+Physical later views remain explicitly Unprocessed after stopping. Every ordinary
+Err is pre-mutation; its `session_disposition()` tells callers to quarantine a
+rejected source session whose hidden layout change cannot be excluded. Caller
+configuration/identity errors are not source resets. ResetRequired outcomes do
+not automatically clear F5 or infer epochs: callers must quarantine/use a fresh
+explicit epoch before further resolution. Successful earlier effects remain
+visible, including a current Data FlowSet's timed lookup at a total-record stop.
+Defensively rejecting an unsupported externally populated F5 layout reports its
+exact-key local invalidation on the Data FlowSet, too.
+
+A header-only export is rejected as MissingFlowSets in pure preflight. Empty or
+padding-only Template/Options Template FlowSets stop for reset with explicit
+prior effects. Known Data FlowSets containing no complete record are Rejected,
+not represented as valid empty records or given Count Match. These minimum
+structure checks follow RFC 3954's packet/FlowSet definitions; full-zero complete
+records remain records, as required by the padding policy.
+
+Padding is only the remainder after complete fixed-width records. Zero bytes of
+length >= R are indistinguishable from legitimate complete zero records: they
+are NOT stripped or guessed to be padding. Count may reveal a discrepancy, but
+cannot identify exporter intent; a matching Count does not prove intent either.
+This is the necessary clarification of test-matrix item 43, consistent with the
+approved never-strip-complete-zero-record policy. Template/Options suffix errors
+stop for reset with earlier applied transitions explicit, not silently rolled
+back. Unsupported template records with proven extents can recover at their
+exact boundaries after exact-key invalidation; unproven extents cannot.
+
+Diagnostics retain at most the configured cap (including zero), with checked
+total/dropped counters and typed numeric/static context only. They never include
+arbitrary raw payload/identity strings. Raw payloads are available only in the
+bounded current result's borrowed views. Field-limit checks precede temporary
+descriptor allocation; configuration validates representational/owned budgets.
+
+Implemented: header/FlowSets, ordinary/Options templates, v9 zero-scope Options,
+fixed-width Data/Options Data structure, F5 lifecycle integration, bounded
+diagnostics, physical ordering, generation binding and no-buffer unknown data.
+F6 itself does not perform canonical normalization or IE value interpretation;
+the separate F7 module below adds the approved initial flow semantics. Sampling
+association/scaling, loss/reordering/restart classification, Detection/ML,
+IPFIX parsing, sFlow and live collection remain unimplemented. Frozen F6, v5,
+PCAP and legacy production paths are unchanged.
+
+Qualification fixtures have `.bin`, `.sha256` and independent expected `.json`
+sidecars in `tests/fixtures/export/netflow_v9/{valid,malformed,stateful,real}`.
+`tests/netflow_v9_fixture_oracle.py` uses Python stdlib struct/manual operations,
+not Rust/PyO3. Default mode is read-only; `--generate` explicitly builds synthetic
+fixtures and refuses replacement of differing evidence. Capture mode is a
+test-only bounded loopback collector, not a production collection feature.
+
+Genuine exporter evidence: softflowd v1.1.1, upstream commit
+`8f83c2c4a784a72bf6eb2604e73d4029b21b7925`, independently built from the pinned
+archive (SHA-256 `111c4b2c841c7143552d77fc7bbe5ab7d7f4604bc1d7acf522afb0ce8e00fccb`).
+Only the existing non-sensitive `m1d_synthetic.pcap` was replayed. The 688-byte
+capture SHA-256 is `31cc964436b85c9f8a82e825956c3fa2ea13c47d35374050ac8f13bb769e2cb2`.
+`real/softflowd_000.json` records the exact generation command, source URL, PCAP
+hash, producer version, complete upstream license/notices and independent decode.
+This exporter declares Count 8 but emits 14 records: four ordinary templates,
+one Options Template, eight flow records and one Options Data record. F6
+deliberately reports CountMismatch (8 vs 14), not a relaxed Count rule. Structural
+record slicing agrees with the independent oracle. This is one synthetic-traffic
+software-exporter capture, not hardware/vendor fleet or live-operation evidence.
+
+```bash
+cargo test --locked --manifest-path ingestion/Cargo.toml --test netflow_v9_parser_tests
+python ingestion/tests/netflow_v9_fixture_oracle.py
+```
+
+---
+
+## F7: bounded NetFlow v9 canonical flow normalization
+
+F7 is implemented and qualified, pending final human freeze, commit and PR.
+The NetFlow PR is not yet merged; IPFIX work has not started.
+
+`netflow::v9_normalize::normalize_netflow_v9` accepts an already-created F6
+`NetFlowV9ParseOutcome`, a validated `NetFlowV9SourceContext`, and validated
+`NetFlowV9NormalizationConfig`. It emits only CanonicalObservation v1 `flow`
+records with `telemetry_source="netflow_v9"`. The serialized schema is unchanged.
+It never reparses wire framing or looks up mutable F5 templates: field values
+are interpreted using each Decoded Data FlowSet's immutable F6 snapshot.
+
+Initial supported IE profile: 1,2,4,6,7,8,10,11,12,14,21,22,27,28,32,60.
+Both selected endpoints, PROTOCOL, FIRST_SWITCHED, LAST_SWITCHED, and at least
+one usable forward counter are required. Ports/details/interfaces are optional.
+IE60 explicitly selects IPv4/IPv6; absent IE60 accepts only unambiguous IPv4.
+IPv6-only/both-family/mixed-family records without a defensible selector fail
+closed. One physical eligible Data Record yields one flow, in wire order; no
+five-tuple deduplication or reverse-flow joining occurs.
+
+TCP/UDP ports are supported and zero remains zero. ICMPv4 IE32 uses high-byte
+type/low-byte code; no ICMP port fallback. SCTP protocol values remain available
+but ports are omitted. ICMPv6 details and vendor IE139 are not interpreted.
+TCP flags use the eight reported bits (no invented NS); reported zero yields
+`[]`. Interface widths 2..8 decode unsigned; zero is absent, nonzero `ifindex:N`.
+Equivalent semantic duplicates map once with one bounded notice per record;
+conflicting duplicates or malformed active supported fields reject the record.
+Unknown/deferred fields are not serialized and do not cause diagnostic floods.
+
+IE2 maps unchanged to `src_to_dst.packets`; widths 1..8 and u64::MAX are valid.
+IE1 maps unchanged to `src_to_dst.ip_bytes` ONLY when the caller explicitly selects
+`NetFlowV9ByteBasisProfile::VerifiedIpLayer`. `Unknown` defers IE1, including its
+semantic width checks, and IE1 then cannot satisfy the required-counter rule.
+Exporter names/templates never auto-select a byte basis. No payload/L2 fallback,
+OUT-counter summation/fallback, sampling multiplication, or rounding occurs.
+Every flow is unidirectional and `dst_to_src` is absent. DIRECTION does not swap
+endpoints. TOS/masks/AS/next-hop/MAC/VLAN/MPLS/export totals and vendor IE136 remain
+opaque F6 evidence; no service, connection state/history, or end reason is guessed.
+
+Timestamp reconstruction uses checked integer arithmetic: export seconds minus
+bounded modular end age gives end_time; subtracting bounded duration gives
+start_time. Default maximum end age AND duration is 86,400,000 ms separately;
+their sum may reach 48 hours. Configured maximum is 0..=2^31-1 ms. Gross inversion,
+half-cycle ambiguity, full-cycle ambiguity, underflow and future LAST=U+1 fail
+closed. Small defensible uptime rollover is allowed. Neither missing timing IE
+is replaced with export/capture/receipt time. There is no serialized flow
+event_time or duration. The whole-second export anchor does not establish
+millisecond wall-clock accuracy or uniquely recover historical multiple wraps.
+
+Quality is always unknown, truncated=false, loss_detected=false. Sampling rate,
+probability and missed_content_bytes are absent. These booleans do not promise
+unsampled/lossless original traffic. Options Data emits zero flows and creates
+ZERO persistent F7 sampler/Options entries. Association, scaling, sequence/loss/
+reordering/restart confidence and cross-source quality policy remain F10.
+
+The must-use batch result preserves CountValidation (including declared/parsed
+mismatch), ParseCompletion, SessionDisposition, decoded count, retained parser
+diagnostics and total/dropped counts. Individually eligible Decoded records may
+survive mismatch/inconclusive or a trustworthy prefix before limit/reset. Never
+recover SkippedUnknown/SkippedExpired/Rejected/Unprocessed suffix bytes.
+ResetRequired stays ResetRequired: callers MUST quarantine/reset the session
+epoch before subsequent use. F7 does not implement that session manager.
+
+Limits default to 16,384 inspected records, 16,384 observations, 128 retained
+normalization diagnostics, and 16,384 audit entries. Non-diagnostic caps must be
+positive; diagnostic retention may be zero. Record/observation/audit exhaustion
+stops before the next record with explicit F7 StoppedAtLimit; exact-cap completion
+is not a stop. Counters use checked arithmetic and vectors grow incrementally.
+Only one primary rejection and at most two aggregated notices occur per record.
+Audit entries hold bounded numeric coordinates, template ID/generation and
+action; parser state never enters serialized provenance. Metadata binding checks
+do not constitute telemetry authentication. Diagnostics contain no payload,
+pathname or raw identity dumps.
+
+Source context supports export_file/pcap_file only. Sensor ID is nonempty and
+<=256 UTF-8 bytes; observed_at is caller-supplied valid UTC Z and <=64 bytes;
+optional capture interface is nonempty and <=256 bytes. F6 exporter/session
+identities must fit the supported 256-byte profile. SHA-256 is validated and
+lowercased. Callers must bind it to actual input content: a single raw artifact
+or original whole PCAP with stable datagram coordinates. F7 reads no clock and
+accepts no filesystem path. Receipt time is not flow time. Golden replay pins
+observed_at explicitly. Live collection/persistence is not implemented.
+
+Frozen UUIDv5 marker: `co-netflow-v9-id-v1`. Namespace
+`5a4b3750-4220-5f0e-b506-8f6080b3828c` is UUIDv5(URL namespace, UTF-8
+`https://utsavagg2007.github.io/SIH-2026/contracts/co-netflow-v9-id-v1`). Name
+components are marker, sensor, lowercase input SHA, exporter, session, Source ID,
+raw sequence, datagram ordinal, FlowSet ordinal, record ordinal, each prefixed by
+u32 big-endian UTF-8 byte length. Numbers are unsigned decimal without padding.
+Template ID/generation, tuple, path, observed_at and input mode are excluded.
+The 175-byte frozen vector produces `3a5978ca-df78-52f8-97f8-9e47e3af8dde`.
+Source correlation is `netflow_v9/exporter/session_fingerprint/domain/sequence/
+datagram/flowset/record`, <=512 bytes. Fingerprint is SHA-256 of length-prefixed
+`co-netflow-v9-session-v1`, exporter and session. Raw session is not exposed.
+UUID is an opaque replay identifier, not an authenticity/security proof.
+
+Separate F7 evidence lives in `tests/fixtures/export/netflow_v9_canonical`:
+reviewable ASCII `.hex` wire storage (SHA identifies decoded datagram bytes),
+exact compact UTF-8 LF JSONL goldens plus SHA sidecars, and explicit independent
+metadata/context/status expectations. Empty negative output is a zero-byte file.
+F7-only `.gitattributes` rules preserve LF bytes for wire storage, metadata,
+goldens and SHA sidecars across Windows checkout; frozen-source rules are unchanged.
+The stdlib oracle independently calculates mappings, time, identities,
+correlation fingerprints and exact bytes; default mode never writes. Its explicit
+`--emit-patch` mode only prints an apply_patch document. Goldens are checked
+against Rust output AND the unchanged Draft 2020-12 schema/semantic harness.
+Typed production construction is fail-closed, not a generic JSON Schema engine.
+
+Frozen `softflowd_000.bin` remains NEGATIVE F7 timing evidence: zero emitted,
+eight ordinary timing rejections, one ignored Options record, CountMismatch
+8 versus 14 preserved. Original input packets are from November 2023 while the
+export header anchors October 2026. Do not widen policy or rewrite that artifact
+to claim positive chronology. Independent packet inspection establishes IE1's
+IP-layer basis for this pinned software producer/sample only, not all exporters.
+Fresh positive real-exporter evidence and Linux qualification require an
+available external runtime; synthetic evidence is not hardware/vendor fleet proof.
+
+Not implemented in F7: Detection/ML adapters, dataset/CLI/PyO3 v9 orchestration,
+IPFIX, sFlow, live collector/session management, sampler association, counter
+scaling, loss analysis, reverse reconstruction, SCTP ports, ICMPv6 type/code.
+
+```bash
+cargo test --locked --manifest-path ingestion/Cargo.toml --test netflow_v9_normalization_tests
+python ingestion/tests/netflow_v9_normalization_oracle.py
+pwsh -NoProfile -File ingestion/tests/test_netflow_v9_canonical_goldens.ps1
+```
 
 ## Tests
 

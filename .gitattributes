@@ -1,0 +1,8 @@
+/ingestion/tests/fixtures/export/netflow_v5/canonical/*.canonical.jsonl text eol=lf
+/ingestion/tests/fixtures/export/netflow_v5/*.sha256 text eol=lf
+/ingestion/tests/fixtures/export/netflow_v5/**/*.sha256 text eol=lf
+/ingestion/tests/fixtures/export/netflow_v9_canonical/golden/*.jsonl text eol=lf
+/ingestion/tests/fixtures/export/netflow_v9_canonical/golden/*.sha256 text eol=lf
+/ingestion/tests/fixtures/export/netflow_v9_canonical/wire/*.hex text eol=lf
+/ingestion/tests/fixtures/export/netflow_v9_canonical/wire/*.sha256 text eol=lf
+/ingestion/tests/fixtures/export/netflow_v9_canonical/metadata/*.json text eol=lf
