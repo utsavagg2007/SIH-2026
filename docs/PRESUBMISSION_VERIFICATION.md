@@ -73,21 +73,30 @@ opt-in. This is unchanged from the previous integration.
 consume the adapter's output losslessly. **No adapter reconciliation was
 needed** — his changes shifted no field name or shape that detection reads.
 
-### NetFlow cannot currently reach Detection
+### NetFlow could not reach Detection *as of this run*
 
-`pub mod netflow` is declared in `ingestion/src/lib.rs`, but the
-`#[pymodule] ingestion_core` exports 14 functions and **none is NetFlow**. There
-is no `[[bin]]` target, no `fn main`, and no NetFlow JSONL writer wired to
-`pipeline.py` or `detector_profile.py`. The subsystem is a self-contained,
-well-tested Rust library with no Python consumer.
+> **Superseded on 2026-10-05.** This section described the state at
+> `bfd5062`/`678728b`. Advitya has since wired the path end to end
+> (`3c183d2`, merged as `8309b40`): a `netflow_export` Rust binary writes
+> CanonicalObservation v1 JSONL, and `detection_core.netflow_run` feeds it to
+> the detectors through a new `CanonicalFlowAdapter`. Only `ddos` runs on
+> NetFlow; the other six are skipped with recorded reasons. See
+> [`NETFLOW_INTEGRATION.md`](NETFLOW_INTEGRATION.md) for the verified result.
 
-This is not a regression — it is new additive work — but **"NetFlow support"
-must not be presented as end-to-end**. A NetFlow-shaped record does degrade
-safely if one is hand-fed to the adapter: no crash, no skip, a `schema drift:
+At the time of this run, `pub mod netflow` was declared in
+`ingestion/src/lib.rs`, but the `#[pymodule] ingestion_core` exported 14
+functions and **none was NetFlow**. There was no binary target, no `fn main`,
+and no NetFlow JSONL writer wired to `pipeline.py` or `detector_profile.py`.
+The subsystem was a self-contained, well-tested Rust library with no consumer.
+
+That was not a regression — it was new additive work — but **"NetFlow support"
+could not be presented as end-to-end**. A NetFlow-shaped record did degrade
+safely if hand-fed to the Zeek adapter: no crash, no skip, a `schema drift:
 unknown ingestion field 'source'` warning, and `source` retained in
-`FlowEvent.extra`. It carries no DNS/TLS/conn_state, so the DNS- and
+`FlowEvent.extra`. It carried no DNS/TLS/conn_state, so the DNS- and
 TLS-dependent detectors would starve on a NetFlow-only feed — inherent to
-NetFlow, which has no DNS query strings, SNI or JA3.
+NetFlow, which has no DNS query strings, SNI or JA3. That last point still
+holds and is why six detectors remain incompatible.
 
 ---
 

@@ -24,7 +24,7 @@ Conventional inline IDS/IPS assumes two-way visibility and the ability to act, a
 
 A passive detection system that converts a unidirectional traffic feed into evidence-backed threat alerts.
 
-It ingests PCAP through pinned Zeek runtimes, computes windowed statistical features in a Rust core, and runs seven detectors — six statistical and one machine-learning classifier for algorithmically generated domains. A separate offline Rust path currently parses raw NetFlow v5 datagrams or NetFlow v5 carried in classic PCAP into canonical flow observations; it is not yet connected to Detection. NetFlow v9, IPFIX, sFlow, and live flow-export intake are planned rather than implemented. A fusion layer calibrates confidence, removes duplicates, and correlates related alerts into single incidents. Results stream to a live web dashboard alongside an AI analyst that explains each finding in plain language.
+It ingests PCAP through pinned Zeek runtimes, computes windowed statistical features in a Rust core, and runs seven detectors — six statistical and one machine-learning classifier for algorithmically generated domains. A separate offline Rust path parses raw NetFlow v5 and v9 datagrams (or NetFlow v5 carried in classic PCAP) into canonical flow observations, and those observations now reach Detection through `python -m detection_core.netflow_run`. Because exported flows carry no DNS, TLS or payload-byte telemetry, **only the `ddos` detector runs on a NetFlow capture** — the other six are skipped with a recorded reason rather than guessing; see [docs/NETFLOW_E2E.md](docs/NETFLOW_E2E.md). IPFIX, sFlow, and live flow-export intake are planned rather than implemented. A fusion layer calibrates confidence, removes duplicates, and correlates related alerts into single incidents. Results stream to a live web dashboard alongside an AI analyst that explains each finding in plain language.
 
 The system runs end to end today across nine layers.
 
@@ -46,7 +46,7 @@ The system runs end to end today across nine layers.
 - **Feature Engineering:** Rust, PyO3, Maturin
 - **Database:** PostgreSQL, asyncpg, Supabase
 - **AI/ML:** scikit-learn (RandomForest), NumPy, joblib, Google Gemini API
-- **Network Analysis:** Zeek, JA3/JA3S, JA4+, offline NetFlow v5 (NetFlow v9/IPFIX/sFlow planned)
+- **Network Analysis:** Zeek, JA3/JA3S, JA4+, offline NetFlow v5/v9 (IPFIX/sFlow planned)
 - **Cloud:** Vercel, Docker
 - **Hardware:** None (software-only)
 - **Dev Tools:** Git/GitHub, pytest, Vitest, Cargo
@@ -77,10 +77,11 @@ Alert Bus  (ThreatAlert v1.1: confidence, evidence, MITRE)
   |
   +----> PostgreSQL ---> AI Analyst (RAG, read-only)
 
-Offline NetFlow v5 artifact (raw datagram / classic PCAP)
+Offline NetFlow v5/v9 artifact (raw datagram / classic PCAP)
   -> Rust parser + normalizer
   -> CanonicalObservation(flow)
-  -> no Detection handoff yet
+  -> detection_core.netflow_run -> ddos detector only
+     (six detectors skipped: no DNS/TLS/payload-byte telemetry)
 ```
 
 ## 7. Repository Structure
@@ -142,7 +143,7 @@ Dashboard screenshots are in `assets/screenshots/`.
 
 ## 11. Installation
 
-**Prerequisites:** Python 3.11–3.13, Node 22.22.2+ / 24.15.0+ / 26+. Rust and Docker are needed **only** for the real Zeek ingestion path over a PCAP.
+**Prerequisites:** Python 3.11–3.13, Node 22.22.2+ / 24.15.0+ / 26+. Rust and Docker are needed **only** for the real Zeek ingestion path over a PCAP; Rust alone (`cargo build --bin netflow_export`) is needed for the offline NetFlow path.
 
 ```bash
 git clone https://github.com/utsavagg2007/SIH-2026
