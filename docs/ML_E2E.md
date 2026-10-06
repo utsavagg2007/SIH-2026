@@ -154,8 +154,20 @@ identity before scoring and refuses to run if it has drifted.
 > against the model trained on the Tranco-only corpus. The corpus has since
 > gained 1 824 real CDN hostnames and the threshold has been re-derived, taking
 > that detector from precision 0.333 to **1.000** on this same matrix with
-> recall unchanged. See [`DGA_PRECISION.md`](DGA_PRECISION.md); the other six
-> detectors are unaffected and their numbers still stand.
+> recall unchanged. See [`DGA_PRECISION.md`](DGA_PRECISION.md).
+>
+> **The `c2_beaconing` row below is also a BEFORE figure**, superseded by
+> `c2_beaconing` 0.2.0 (commit `245e18d`, the same change that cut real-traffic
+> false positives 85%). That commit updated the real-data sections of this file
+> but not this synthetic matrix. Re-run of the identical harness
+> (`tools/detector_matrix.py --seeds 20`, 2026-10-04, shipped 0.65 config):
+> precision **0.571**, recall 1.000, F1 0.727 — TP 20, FP 15 (2 benign,
+> 13 cross-attack), against the 0.241 / FP 63 (42 benign, 21 cross) below.
+> The two benign confounders listed as 20/20 false positives in the next table
+> (`conf_ntp`, `conf_backup`) are now **silent at 0/20**, as is
+> `attack_exfiltration` cross-fire; `attack_encrypted_malware` (13/20) and
+> `benign_web` (2/20) are unchanged. The remaining five detectors reproduce
+> exactly, `dns_tunnelling` included.
 
 One trial = one detector over one traffic slice. TP/FN are counted over
 target-slice trials; FP/TN over benign + other-attack trials.
